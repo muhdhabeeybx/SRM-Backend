@@ -122,6 +122,30 @@ const FULL_ORDER_COLUMNS = {
   quantity: orders.quantity,
   /** The denominator for "truck 2 of 6" — see the column note on orders. */
   expectedTrucks: orders.expectedTrucks,
+  /**
+   * Where this order's trucks have got to, on the order row itself.
+   *
+   * Four correlated counts rather than a join, for the reason the payments
+   * query gives: an order with six trucks would otherwise multiply into six
+   * order rows. They are cheap — order_trucks is indexed on order_id — and
+   * having them here is what lets a list say "3 of 6 ticketed, 1 loaded"
+   * without a second request per row.
+   */
+  trucksTicketed: sql`(
+    SELECT COUNT(*)::int FROM order_trucks t WHERE t.order_id = ${orders.id}
+  )`,
+  trucksAwaitingIn: sql`(
+    SELECT COUNT(*)::int FROM order_trucks t
+     WHERE t.order_id = ${orders.id} AND t.status = 'pending'
+  )`,
+  trucksOnYard: sql`(
+    SELECT COUNT(*)::int FROM order_trucks t
+     WHERE t.order_id = ${orders.id} AND t.status IN ('gated_in', 'loaded')
+  )`,
+  trucksOut: sql`(
+    SELECT COUNT(*)::int FROM order_trucks t
+     WHERE t.order_id = ${orders.id} AND t.status = 'gated_out'
+  )`,
   price: orders.price,
   totalAmount: orders.totalAmount,
   // What has actually been received against the order, across however many
@@ -317,6 +341,20 @@ const findAll = async ({
         depotId: orders.depotId,
         productId: orders.productId,
         quantity: orders.quantity,
+        /**
+         * The truck picture, on the row.
+         *
+         * Correlated counts rather than a join — an order with six trucks
+         * would otherwise multiply into six order rows, the same shape that
+         * made the old payments query double-count. Cheap: order_trucks is
+         * indexed on order_id. Having them here is what lets a list say
+         * "3 of 6 ticketed, 1 loaded" without a request per row.
+         */
+        expectedTrucks: orders.expectedTrucks,
+        trucksTicketed: sql`(SELECT COUNT(*)::int FROM order_trucks t WHERE t.order_id = ${orders.id})`,
+        trucksAwaitingIn: sql`(SELECT COUNT(*)::int FROM order_trucks t WHERE t.order_id = ${orders.id} AND t.status = 'pending')`,
+        trucksOnYard: sql`(SELECT COUNT(*)::int FROM order_trucks t WHERE t.order_id = ${orders.id} AND t.status IN ('gated_in','loaded'))`,
+        trucksOut: sql`(SELECT COUNT(*)::int FROM order_trucks t WHERE t.order_id = ${orders.id} AND t.status = 'gated_out')`,
         price: orders.price,
         totalAmount: orders.totalAmount,
         deliveryType: orders.deliveryType,
