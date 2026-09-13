@@ -454,10 +454,47 @@ const startPfi = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * What is still moving on a batch — asked before anybody closes it.
+ *
+ * Closing takes the batch off the active register, so anything unfinished
+ * stops being visible at the moment it stops being actionable. The desk should
+ * see the list first, and it needs three separate lists because they need
+ * three different people: the loading desk generates the missing tickets,
+ * security gates the trucks in, security gates them out.
+ */
+const getPfiOutstanding = asyncHandler(async (req, res) => {
+  const pfi = await pfiRepo.findById(req.params.id);
+  if (!pfi) throw httpErr(404, "PFI not found");
+  const outstanding = await pfiRepo.outstandingWork(pfi.id);
+  res.json({ success: true, data: { outstanding } });
+});
+
 const finishPfi = asyncHandler(async (req, res) => {
   const pfi = await pfiRepo.findById(req.params.id);
   if (!pfi) throw httpErr(404, "PFI not found");
   if (pfi.status === "finished") throw httpErr(409, "This PFI is already closed");
+
+  /**
+   * Refused once, and only once, while work is still outstanding.
+   *
+   * A hard block would be wrong — the desk closes batches knowing things the
+   * system does not, and a rule it cannot get past is a rule it works around
+   * by never closing anything. So the first attempt is refused WITH the list,
+   * and `acknowledgeOutstanding` lets the same person say "I have seen it,
+   * close it anyway". What that buys is that nobody closes a batch without
+   * having been shown what they are burying.
+   */
+  const outstanding = await pfiRepo.outstandingWork(pfi.id);
+  const acknowledged = req.body?.acknowledgeOutstanding === true;
+  if (!outstanding.clean && !acknowledged) {
+    return res.status(409).json({
+      success: false,
+      code: "OUTSTANDING_WORK",
+      message: "This batch still has work on it. Review it, then close again to confirm.",
+      data: { outstanding },
+    });
+  }
 
   const updateData = { status: "finished", closureDate: parseDate(req.body.closure_date ?? req.body.closureDate) || new Date() };
 
@@ -781,6 +818,7 @@ module.exports = {
   deletePfi,
   startPfi,
   finishPfi,
+  getPfiOutstanding,
   getPfiSummary,
   getPfiExpenses,
   addPfiExpense,

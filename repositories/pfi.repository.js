@@ -368,7 +368,72 @@ const setTrucks = async (pfiId, trucks, staffId = null) => {
   });
 };
 
+/**
+ * What is still outstanding on a batch, for the desk about to close it.
+ *
+ * Closing a PFI takes it out of the stock totals and off the active register.
+ * Anything still moving on it — an order nobody ticketed, a truck that never
+ * reached the gate — stops being visible at the moment it stops being
+ * actionable, and the batch closes with litres unaccounted for.
+ *
+ * Three different kinds of unfinished, kept apart because they need different
+ * people:
+ *
+ *   unticketed   paid orders whose tickets have not been generated. The
+ *                loading desk's work, and the reason the litres show as sold
+ *                but not loaded.
+ *   trucksIn     trucks admitted to the yard that never gated out. Security's.
+ *   trucksDue    trucks ticketed but never admitted. Also security's, at the
+ *                other end.
+ *
+ * Deliberately a report and not a refusal. The desk closes batches knowing
+ * things the system does not, and a hard block would be worked around by
+ * leaving batches open forever — which is the state this is trying to end.
+ */
+const outstandingWork = async (pfiId) => {
+  const id = Number(pfiId);
+
+  const orderRows = rowsOf(await db.execute(sql`
+    SELECT o.id, o.order_number AS "orderNumber", o.status, o.quantity,
+           c.name AS "customerName",
+           COALESCE((SELECT SUM(t.quantity) FROM order_trucks t WHERE t.order_id = o.id), 0)::int AS ticketed
+      FROM orders o
+      LEFT JOIN customers c ON c.id = o.customer_id
+     WHERE o.pfi_id = ${id}
+       AND o.payment_status IN ('Paid', 'Part Paid')
+       AND o.status IN ('Paid', 'Released', 'Loading')
+     ORDER BY o.id
+  `));
+
+  const unticketed = orderRows
+    .map((r) => ({ ...r, shortBy: Number(r.quantity) - Number(r.ticketed) }))
+    .filter((r) => r.shortBy > 0);
+
+  const truckRows = rowsOf(await db.execute(sql`
+    SELECT t.id, t.truck_number AS "truckNumber", t.status, t.quantity,
+           o.order_number AS "orderNumber"
+      FROM order_trucks t
+      JOIN orders o ON o.id = t.order_id
+     WHERE o.pfi_id = ${id}
+       AND t.status IN ('pending', 'gated_in')
+     ORDER BY t.status, t.id
+  `));
+
+  const trucksDue = truckRows.filter((t) => t.status === "pending");
+  const trucksIn = truckRows.filter((t) => t.status === "gated_in");
+
+  return {
+    unticketed,
+    trucksDue,
+    trucksIn,
+    /** Litres on orders whose tickets were never generated. */
+    unticketedLitres: unticketed.reduce((sum, r) => sum + r.shortBy, 0),
+    clean: unticketed.length === 0 && truckRows.length === 0,
+  };
+};
+
 module.exports = {
+  outstandingWork,
   allowedDepots,
   setAllowedDepots,
   depotMaySell,

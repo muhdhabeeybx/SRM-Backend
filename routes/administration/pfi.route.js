@@ -15,6 +15,7 @@ const {
   deletePfi,
   startPfi,
   finishPfi,
+  getPfiOutstanding,
   getPfiSummary,
   getPfiExpenses,
   addPfiExpense,
@@ -49,6 +50,9 @@ router.put(
   validate({ params: misc.idParam, body: misc.setPfiTrucks }),
   setPfiTrucks
 );
+
+// What is still moving on a batch — read before closing it. See the controller.
+router.get("/:id/outstanding", verifyStaff, validate({ params: misc.idParam }), getPfiOutstanding);
 
 router.get("/:id/expenses", verifyStaff, validate({ params: misc.idParam }), getPfiExpenses);
 router.post("/:id/expenses", verifyStaff, validate({ params: misc.idParam }), addPfiExpense);
