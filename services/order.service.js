@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require("uuid");
 const { eq } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { orders, commissions, pfiMovements } = require("../db/schema");
+const { orders, commissions, pfiMovements, pfis } = require("../db/schema");
 const {
   orderRepo,
   customerRepo,
@@ -1250,6 +1250,80 @@ async function runPostPaymentEffects(orderId, { notifyWhatsApp = true } = {}) {
  * @param {string} [opts.note]
  * @returns {object} the updated order
  */
+/**
+ * PFI types whose orders have no loading desk and no gate.
+ *
+ * A coastal cargo is trucked out of a depot: tickets are issued, trucks are
+ * gated in, they load, they gate out, and the last one out completes the
+ * order. Every one of those states is a real event somebody performs.
+ *
+ * A gantry lifting and a delivery batch have none of them. The product is
+ * bought at the gantry or delivered by us; there is no truck for this depot's
+ * security to admit and no ticket for its loading desk to issue. So the states
+ * existed and nobody was ever going to move them: 1,536 fully-paid gantry
+ * orders sat at Released waiting on a desk that does not handle them, and
+ * 1,451 of those had no stock movement, which is why their batches read as
+ * sold-but-not-loaded.
+ */
+const DESKLESS_PFI_TYPES = ["gantry", "delivery"];
+
+/**
+ * Take a deskless order all the way to Completed the moment it is paid for.
+ *
+ * Released → Loading → Completed, stepped rather than jumped, so each move
+ * writes the audit row and fires the announcement it always has. Nothing here
+ * invents a gate event: no truck rows are created, so no truck is recorded as
+ * having arrived or departed, and the gate queues stay empty because there is
+ * genuinely nothing in them.
+ *
+ * ── The stock movement is the point ────────────────────────────────────────
+ *
+ * Stock leaves a PFI when tickets are generated — that is where the RELEASE
+ * row is written, and where the "litres loaded" on every report comes from.
+ * Skipping ticketing without writing it would complete the order and leave the
+ * batch permanently short, which is the exact reporting fault this is meant to
+ * end. So the shortcut writes the same row the ticketing desk would have, with
+ * a note saying why it did.
+ *
+ * Only on a FULLY paid order. A part payment releases the order so the balance
+ * can be chased; completing it there would say the business is finished with
+ * an order still owing money.
+ */
+async function completeDesklessOrder(order, { tx, actor, pfiType }) {
+  if (!DESKLESS_PFI_TYPES.includes(pfiType)) return false;
+
+  const qty = Number(order.quantity) || 0;
+  if (order.pfiId && qty > 0) {
+    await tx
+      .insert(pfiMovements)
+      .values({
+        pfiId: Number(order.pfiId),
+        orderId: order.id,
+        action: "RELEASE",
+        qtyLitres: qty,
+        notes: `${pfiType} order — no loading desk, released on payment`,
+        recordedBy: actor?.staffId ?? null,
+      })
+      // The same one-row-per-(order, RELEASE) guarantee ticket generation
+      // relies on, so a re-run cannot deduct the batch twice.
+      .onConflictDoUpdate({
+        target: [pfiMovements.orderId, pfiMovements.action],
+        set: { qtyLitres: qty },
+      });
+  }
+
+  const shared = { tx, actor, metadata: { trigger: "payment", pfiType, deskless: true } };
+  await orderStatus.transition(order.id, "Loading", {
+    ...shared,
+    set: { loadingStartedAt: new Date() },
+  });
+  await orderStatus.transition(order.id, "Completed", {
+    ...shared,
+    set: { completedAt: new Date() },
+  });
+  return true;
+}
+
 async function confirmOrderPayment({
   orderId,
   bankAccountId,
@@ -1360,6 +1434,23 @@ async function confirmOrderPayment({
         actor,
         metadata: { via: "bank_statement" },
       });
+
+      /**
+       * A gantry or delivery order has no desk after this point, so it does
+       * not wait at one. See completeDesklessOrder — it writes the stock
+       * movement ticketing would have written, then steps the order through
+       * to Completed. Only when nothing is still owed.
+       */
+      if (summary.shortfall <= 0) {
+        const [batch] = await tx
+          .select({ pfiType: pfis.pfiType })
+          .from(pfis)
+          .where(eq(pfis.id, order.pfiId ?? 0))
+          .limit(1);
+        if (batch?.pfiType) {
+          await completeDesklessOrder(order, { tx, actor, pfiType: batch.pfiType });
+        }
+      }
     }
     // A later instalment has no status to move — the order was released by its
     // first one. recordFromStatementLines has already written its own
@@ -1384,6 +1475,8 @@ module.exports = {
   cancelOrder,
   updatePickupTrucks,
   confirmOrderPayment,
+  completeDesklessOrder,
+  DESKLESS_PFI_TYPES,
   releasableQuantity,
   runPostPaymentEffects,
   expireOrder,

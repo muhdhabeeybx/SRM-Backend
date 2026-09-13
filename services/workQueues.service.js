@@ -78,6 +78,19 @@ const notOnClosedPfi = (pfiColumn) => sql`NOT EXISTS (
   SELECT 1 FROM pfis p WHERE p.id = ${pfiColumn} AND p.status = 'finished'
 )`;
 
+/**
+ * A gantry lifting and a delivery batch have no loading desk and no gate.
+ *
+ * Nobody at this depot issues their tickets or admits their trucks, so an
+ * order of theirs sitting in those queues is work that will never be done.
+ * They complete on payment now (see completeDesklessOrder), which keeps new
+ * ones out — this keeps the ones raised before that change out too, so the
+ * badge is right today rather than after a backfill.
+ */
+const notDeskless = (pfiColumn) => sql`NOT EXISTS (
+  SELECT 1 FROM pfis p WHERE p.id = ${pfiColumn} AND p.pfi_type IN ('gantry', 'delivery')
+)`;
+
 /** Orders that have taken money and are on their way — not finished, not dead. */
 const AWAITING_TICKETING = ["Paid", "Released"];
 /** Order lifecycle states where a payment can still be confirmed. */
@@ -131,6 +144,7 @@ const QUEUES = [
           where(
             inArray(orders.status, AWAITING_TICKETING),
             notOnClosedPfi(orders.pfiId),
+            notDeskless(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
@@ -157,6 +171,7 @@ const QUEUES = [
             eq(orderTrucks.status, "pending"),
             inArray(orders.status, GATE_LIVE_STATUSES),
             notOnClosedPfi(orders.pfiId),
+            notDeskless(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
@@ -180,6 +195,7 @@ const QUEUES = [
             inArray(orderTrucks.status, ["gated_in", "loaded"]),
             notInArray(orders.status, ORDER_DEAD_STATUSES),
             notOnClosedPfi(orders.pfiId),
+            notDeskless(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
