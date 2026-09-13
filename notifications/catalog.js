@@ -1234,6 +1234,69 @@ const CATALOG = {
 
   // ═══ Staff: operations ════════════════════════════════════════════════════
 
+  // ═══ Staff: desks with a backlog ══════════════════════════════════════════
+  //
+  // One digest per desk per sweep, carrying the count and the oldest few — not
+  // a notification per row. A queue that is 75 deep is one fact about the
+  // desk, and 75 separate messages is how somebody learns to ignore the bell.
+  //
+  // Sent only when there IS a backlog. Silence is the right output of a clear
+  // queue; a daily "0 pending" trains people to delete these unread.
+
+  /** data: count, hours, oldestHours, examples[], depots[] */
+  "staff.tickets_pending": {
+    audience: "staff",
+    category: "operations",
+    priority: "high",
+    channels: APP_ONLY,
+    title: (d) => `${d.count} order${d.count === 1 ? "" : "s"} waiting on tickets`,
+    body: (d) =>
+      `${d.count === 1 ? "An order has" : `${d.count} orders have`} been paid for and released without tickets` +
+      `${d.oldestHours ? `, the oldest ${d.oldestHours >= 48 ? `${Math.floor(d.oldestHours / 24)} days` : `${d.oldestHours} hours`} ago` : ""}` +
+      `${d.depots?.length ? ` (${d.depots.join(", ")})` : ""}.` +
+      ` Product cannot leave until they are generated.`,
+    entity: () => ({ type: "queue", id: "tickets" }),
+    data: () => ({ screen: "Tickets" }),
+    actionUrl: () => adminLink(`/ticket`),
+    // One per desk per day: a sweep that runs more often must not re-send the
+    // same backlog, and the count changing is not new news.
+    dedupe: (d) => `staff.tickets_pending:${new Date().toISOString().slice(0, 10)}:${d.count}`,
+  },
+
+  /** data: count, hours, oldestHours, examples[], depots[] */
+  "staff.trucks_awaiting_entry": {
+    audience: "staff",
+    category: "operations",
+    priority: "normal",
+    channels: APP_ONLY,
+    title: (d) => `${d.count} truck${d.count === 1 ? "" : "s"} expected at the gate`,
+    body: (d) =>
+      `${d.count} ticketed truck${d.count === 1 ? " has" : "s have"} not been gated in` +
+      `${d.depots?.length ? ` (${d.depots.join(", ")})` : ""}.` +
+      ` Gate them in as they arrive so the yard record stays true.`,
+    entity: () => ({ type: "queue", id: "gate-entry" }),
+    data: () => ({ screen: "SecurityEntry" }),
+    actionUrl: () => adminLink(`/security/entry`),
+    dedupe: (d) => `staff.trucks_awaiting_entry:${new Date().toISOString().slice(0, 10)}:${d.count}`,
+  },
+
+  /** data: count, hours, oldestHours, examples[], depots[] */
+  "staff.trucks_on_yard": {
+    audience: "staff",
+    category: "operations",
+    priority: "normal",
+    channels: APP_ONLY,
+    title: (d) => `${d.count} truck${d.count === 1 ? "" : "s"} still on the yard`,
+    body: (d) =>
+      `${d.count} truck${d.count === 1 ? " was" : "s were"} gated in and never gated out` +
+      `${d.oldestHours ? `, the oldest ${d.oldestHours >= 48 ? `${Math.floor(d.oldestHours / 24)} days` : `${d.oldestHours} hours`} ago` : ""}.` +
+      ` Until they are cleared, the yard record says they are still here.`,
+    entity: () => ({ type: "queue", id: "gate-exit" }),
+    data: () => ({ screen: "SecurityExit" }),
+    actionUrl: () => adminLink(`/security/exit`),
+    dedupe: (d) => `staff.trucks_on_yard:${new Date().toISOString().slice(0, 10)}:${d.count}`,
+  },
+
   /** data: orderId, reference, customerName, totalAmount, depotName, product, quantity, unit */
   "staff.order_placed": {
     audience: "staff",

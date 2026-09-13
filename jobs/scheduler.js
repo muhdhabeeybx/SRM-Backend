@@ -3,11 +3,20 @@ const { expireStaleOrders } = require("../services/order.service");
 const { expireStaleRequests } = require("../services/requestExpiry.service");
 const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
 const { notify } = require("../notifications");
+const { runDeskNudges } = require("../services/deskNudge.service");
 
 // An ad-hoc pg-boss queue created on demand, mirroring the WhatsApp maintenance
 // cron — not part of the WhatsApp queue set.
 const EXPIRY_QUEUE = "order-expiry-sweep";
 const DAILY_REPORT_QUEUE = "daily-report-send";
+const DESK_NUDGE_QUEUE = "desk-nudge-sweep";
+
+/**
+ * 08:00 Africa/Lagos, every day — the start of the working day, when a desk
+ * can still act on what it is told. Local time with an explicit tz for the
+ * same reason the daily report uses it.
+ */
+const DESK_NUDGE_CRON = process.env.DESK_NUDGE_CRON || "0 8 * * *";
 
 /**
  * 23:50 Africa/Lagos, every day.
@@ -73,6 +82,26 @@ const start = async () => {
   });
 
   await scheduleCron(DAILY_REPORT_QUEUE, DAILY_REPORT_CRON, {}, { tz: DAILY_REPORT_TZ });
+
+  // ── Desk backlogs ─────────────────────────────────────────────────────────
+  //
+  // Tells ticketing, the entrance gate and the exit gate what is still sitting
+  // on them. Swallows its own failure rather than dead-lettering: a nudge that
+  // did not go out is a nudge, not a lost report, and retrying it an hour
+  // later would arrive as a duplicate of a queue that has since moved.
+  await registerWorker(DESK_NUDGE_QUEUE, async () => {
+    try {
+      const results = await runDeskNudges();
+      const said = results.filter((r) => r.notified).map((r) => `${r.desk} ${r.count}`);
+      console.log(`[scheduler] desk nudges — ${said.join(", ") || "every desk clear"}`);
+      return { results };
+    } catch (err) {
+      console.error("[scheduler] desk nudges failed:", err.message);
+      return { failed: true };
+    }
+  });
+  await scheduleCron(DESK_NUDGE_QUEUE, DESK_NUDGE_CRON, {}, { tz: DAILY_REPORT_TZ });
+  console.log(`[scheduler] desk nudges scheduled (${DESK_NUDGE_CRON} ${DAILY_REPORT_TZ})`);
   console.log(
     `[scheduler] daily report scheduled (${DAILY_REPORT_CRON} ${DAILY_REPORT_TZ})`
   );
