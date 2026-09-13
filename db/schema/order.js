@@ -50,6 +50,22 @@ const orders = pgTable(
     // failed request. See db/migrations/0020.
     amountPaid: decimal("amount_paid", { precision: 15, scale: 2 }).default("0").notNull(),
     deliveryType: orderDeliveryTypeEnum("delivery_type").notNull(),
+    /**
+     * How many trucks this order is expected to take, stated when it is
+     * raised.
+     *
+     * order_trucks rows only exist once tickets are generated, so without this
+     * nothing knows how many an order is waiting for: every screen counts
+     * ORDERS awaiting tickets when the work is per truck, and a six-truck
+     * order with two ticketed looks exactly like a two-truck order that is
+     * finished.
+     *
+     * Nullable, and left null rather than guessed. Historic orders have nobody
+     * to ask and an order can be raised before the haulage is settled — so the
+     * absence of a figure is honest, and the UI says "3 ticketed" instead of
+     * inventing a total from litres over a typical truck size.
+     */
+    expectedTrucks: integer("expected_trucks"),
     // Where the truck goes on a delivery order — free text, the customer's
     // words. Empty for pickup (the depot is the address) and for orders
     // predating the column. `state` above stays the routing/pricing field.

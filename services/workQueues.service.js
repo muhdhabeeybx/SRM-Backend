@@ -1,6 +1,7 @@
 const { and, eq, inArray, notInArray, count, or, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
+const { outstandingTrucks } = require("./truckProgress.service");
 
 /**
  * How much work is waiting, per desk.
@@ -136,6 +137,19 @@ const QUEUES = [
     label: "Orders awaiting loading tickets",
     emptyLabel: "Every paid order has been ticketed",
     action: "Generate tickets for the loading desk",
+    /**
+     * Counted in orders, and the truck figure carried beside it.
+     *
+     * The badge stays an order count because that is what the page it links to
+     * lists, and a badge that disagrees with its page is worse than no badge.
+     * But an order is not a unit of work — one might need six trucks and have
+     * two — so `trucks` rides along and the landing page shows both. See
+     * truckProgress.outstandingTrucks.
+     */
+    trucks: async () => {
+      const t = await outstandingTrucks();
+      return { toTicket: t.toTicket, undeclaredOrders: t.undeclared };
+    },
     count: (user) =>
       db
         .select({ n: count() })
@@ -244,7 +258,14 @@ const getWorkQueues = async (user) => {
     QUEUES.map(async (q) => {
       try {
         const [row] = await q.count(user);
-        return { ...q, n: Number(row?.n ?? 0) };
+        // A queue may carry a second figure in a different unit — tickets are
+        // counted in orders for the badge and in trucks for the person doing
+        // the work. Best-effort: it decorates, it does not gate.
+        let detail = null;
+        if (q.trucks) {
+          try { detail = await q.trucks(); } catch { detail = null; }
+        }
+        return { ...q, n: Number(row?.n ?? 0), detail };
       } catch (err) {
         console.error(`[work-queues] ${q.key} failed:`, err.message);
         return { ...q, n: 0, failed: true };
@@ -260,12 +281,14 @@ const getWorkQueues = async (user) => {
 
   return {
     counts,
-    queues: results.map(({ key, path, label, emptyLabel, action, approverRoles, n, failed }) => ({
+    queues: results.map(({ key, path, label, emptyLabel, action, approverRoles, n, detail, failed }) => ({
       key,
       path,
       label,
       emptyLabel,
       action,
+      /** A second unit for the same queue, where one is meaningful. */
+      detail: detail ?? null,
       /** Roles that personally clear this queue; absent where nobody owns it. */
       approverRoles: approverRoles ?? null,
       count: n,

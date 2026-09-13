@@ -43,6 +43,9 @@ const createOrder = z.object({
   deliveryType: enumOf("Delivery type", ["delivery", "pickup"]),
   deliveryAddress: optionalString("Delivery address", 2000),
   companyName: requiredString("Company name", 255),
+  // How many trucks the order will take. Optional — an order can be raised
+  // before the haulage is settled, and a guessed total is worse than none.
+  expectedTrucks: z.coerce.number().int().positive().max(200).optional(),
   trucks: z.array(pickupTruck).max(20, "Too many trucks on one order").optional(),
 });
 
@@ -78,6 +81,9 @@ const updateOrder = z
     price: money("Unit price").optional(),
     totalAmount: money("Total amount").optional(),
     companyName: requiredString("Company name", 255).optional(),
+    // Editable after the fact: orders raised before the column existed have
+    // none, and the haulage on an order genuinely changes.
+    expectedTrucks: z.coerce.number().int().positive().max(200).nullable().optional(),
     // optionalString() turns an absent field into "" — right for create, wrong
     // for a patch, where absent has to mean "leave it" and only an explicit ""
     // means "clear it". Kept genuinely optional instead.

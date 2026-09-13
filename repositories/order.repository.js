@@ -120,6 +120,8 @@ const FULL_ORDER_COLUMNS = {
   depotId: orders.depotId,
   productId: orders.productId,
   quantity: orders.quantity,
+  /** The denominator for "truck 2 of 6" — see the column note on orders. */
+  expectedTrucks: orders.expectedTrucks,
   price: orders.price,
   totalAmount: orders.totalAmount,
   // What has actually been received against the order, across however many

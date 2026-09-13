@@ -274,6 +274,12 @@ async function placeOrder({
   deliveryType,
   deliveryAddress,
   companyName,
+  /**
+   * How many trucks the order is expected to take. Stated up front so every
+   * count afterwards is against a number somebody gave — see the column note
+   * on orders.expectedTrucks. Null is a legitimate answer.
+   */
+  expectedTrucks,
   trucks,
   actor = { type: "system" },
   // Callers whose requests can be redelivered (the WhatsApp CONFIRM step
@@ -457,6 +463,12 @@ async function placeOrder({
             ? deliveryAddress.trim()
             : "",
         companyName: typeof companyName === "string" ? companyName.trim() : "",
+        // Only a positive whole number, or nothing. A zero would read as "no
+        // trucks needed" on an order that plainly needs some.
+        expectedTrucks:
+          Number.isFinite(Number(expectedTrucks)) && Number(expectedTrucks) > 0
+            ? Math.trunc(Number(expectedTrucks))
+            : null,
         status: "Pending",
         paymentStatus: "Unpaid",
         virtualAccountNumber,
@@ -812,7 +824,10 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
     // money() schema, matching the numeric(15,2) column's own driver
     // representation, so a plain string compare is enough — no float
     // round-tripping either side of it.
-    for (const field of ["price", "totalAmount", "companyName", "deliveryAddress"]) {
+    // expectedTrucks is editable after the fact on purpose: 55 live orders were
+    // raised before the column existed, and the haulage on an order genuinely
+    // changes. Setting it is how the desk turns "3 ticketed" into "3 of 6".
+    for (const field of ["price", "totalAmount", "companyName", "deliveryAddress", "expectedTrucks"]) {
       if (patch[field] === undefined) continue;
       if (String(order[field]) !== String(patch[field])) {
         changes[field] = [order[field], patch[field]];

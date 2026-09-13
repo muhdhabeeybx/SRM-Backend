@@ -17,6 +17,7 @@ const { pfiMovements } = require("../../db/schema");
 const walletService = require("../../services/wallet.service");
 const { generateTicketForTruck } = require("../../services/ticket.service");
 const orderStatus = require("../../services/orderStatus.service");
+const truckProgress = require("../../services/truckProgress.service");
 const orderService = require("../../services/order.service");
 const orderPaymentService = require("../../services/orderPayment.service");
 const { placeOrder, withExpiresAt } = orderService;
@@ -63,6 +64,7 @@ const createOrder = asyncHandler(async (req, res) => {
   const {
     customer: customerId, state, depot: depotId,
     product: productId, quantity, deliveryType, deliveryAddress, companyName, trucks,
+    expectedTrucks,
   } = req.body;
 
   if (!customerId || !state || !depotId || !productId || !quantity || !deliveryType) {
@@ -81,6 +83,7 @@ const createOrder = asyncHandler(async (req, res) => {
 
   const { order, payment } = await placeOrder({
     customerId, state, depotId, productId, quantity, deliveryType, deliveryAddress, companyName, trucks,
+    expectedTrucks,
     actor: { type: "staff", staffId: req.user.id },
   });
 
@@ -1248,7 +1251,16 @@ const getOrderTrucks = asyncHandler(async (req, res) => {
   const order = await orderRepo.findById(orderId);
   if (!order) throw httpErr(404, "Order not found");
   const trucks = await orderTruckRepo.findByOrder(orderId);
-  res.json({ success: true, data: { trucks } });
+  /**
+   * The counts beside the rows, so the page never has to derive them.
+   *
+   * "4 of 6 ticketed, 2 of 6 loaded" is the sentence the loading desk and the
+   * gate both work from, and it is the one thing the old order-level view
+   * could not say — two truck rows looked the same whether the order needed
+   * two or six.
+   */
+  const progress = await truckProgress.forOrder(orderId);
+  res.json({ success: true, data: { trucks, progress } });
 });
 
 /**
