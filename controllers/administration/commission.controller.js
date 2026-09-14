@@ -91,7 +91,24 @@ const upsertRate = asyncHandler(async (req, res) => {
   }
 
   const rate = await commissionRepo.upsertRate(depotId, productId, numericRate);
-  res.json({ success: true, message: "Commission rate saved", data: { rate } });
+
+  /**
+   * Reprice what is already waiting.
+   *
+   * Setting a rate used to change nothing about the commissions already raised
+   * at that depot — 116 of them sit at N0 for exactly that reason. Only
+   * pending rows move; a paid commission settled at the rate in force when it
+   * was paid.
+   */
+  const repriced = await commissionService.recomputeForRate(depotId, productId);
+
+  res.json({
+    success: true,
+    message: repriced.updated
+      ? `Commission rate saved — ${repriced.updated} pending commission${repriced.updated === 1 ? "" : "s"} repriced`
+      : "Commission rate saved",
+    data: { rate, repriced },
+  });
 });
 
 const generateDailyReport = asyncHandler(async (req, res) => {

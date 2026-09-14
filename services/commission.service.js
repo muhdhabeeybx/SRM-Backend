@@ -58,8 +58,28 @@ async function createForOrder(orderId) {
   // buy a whole litre has nothing to compute on yet. The next payment creates it.
   if (quantity <= 0) return existing || null;
 
+  /**
+   * No rate for this depot and product means no commission — not a zero one.
+   *
+   * This used to fall back to 0 and create the row anyway, so every order at a
+   * location that pays no commission raised a ₦0 entry that sat in the desk's
+   * pending queue forever and showed the customer a commission they were never
+   * going to be paid. 160 of them exist, 44 at Dangote Refinery, which has no
+   * rate configured for anything.
+   *
+   * A commission is a promise. Where nobody has set a rate, there is no
+   * promise, and the honest record is the absence of a row.
+   *
+   * An existing row is left alone rather than deleted: it may already be paid,
+   * and unpaying somebody because a rate was later removed would be worse than
+   * the untidiness. recomputeForRate below is what brings stale rows into line
+   * when a rate is set or changed.
+   */
   const rateEntry = await commissionRepo.getRate(order.depotId, order.productId);
-  const commissionRate = rateEntry ? parseFloat(rateEntry.commissionRate) : 0;
+  const configuredRate = rateEntry ? parseFloat(rateEntry.commissionRate) : null;
+  if (configuredRate == null || !(configuredRate > 0)) return existing || null;
+
+  const commissionRate = configuredRate;
   const commissionAmount = quantity * commissionRate;
 
   if (existing) {
@@ -222,4 +242,41 @@ async function resolveMany({ ids, action, reason = "", staffId }) {
   return results;
 }
 
-module.exports = { createForOrder, confirmPayment, skipCommission, resolveMany };
+/**
+ * Bring pending commissions into line after a rate is set or changed.
+ *
+ * Rates are configured per depot and product, and until now nothing looked
+ * back at the commissions already raised under the old figure. 116 pending
+ * rows sit at ₦0 on depots that DO have a rate — created before somebody set
+ * it, and never revisited. The desk sees ₦0 owing; the customer sees a
+ * commission worth nothing.
+ *
+ * Only pending rows. A paid commission settled at the rate in force when it
+ * was paid, and repricing history is not a recalculation, it is a rewrite.
+ */
+async function recomputeForRate(depotId, productId) {
+  const pending = await commissionRepo.findPendingFor(depotId, productId);
+  const rateEntry = await commissionRepo.getRate(depotId, productId);
+  const rate = rateEntry ? parseFloat(rateEntry.commissionRate) : 0;
+
+  const updated = [];
+  for (const c of pending) {
+    const amount = Number(c.quantity) * rate;
+    if (parseFloat(c.commissionRate) === rate) continue;
+    updated.push(
+      await commissionRepo.update(c.id, {
+        commissionRate: String(rate),
+        commissionAmount: String(amount.toFixed(2)),
+      }),
+    );
+  }
+  return { considered: pending.length, updated: updated.length, rate };
+}
+
+module.exports = {
+  createForOrder,
+  confirmPayment,
+  skipCommission,
+  resolveMany,
+  recomputeForRate,
+};

@@ -363,6 +363,19 @@ const markAsSkipped = async (id, skippedBy, reason = "") => {
   return row || null;
 };
 
+/** Pending commissions on one depot and product — what a rate change affects. */
+const findPendingFor = async (depotId, productId) =>
+  db
+    .select()
+    .from(commissions)
+    .where(
+      and(
+        eq(commissions.depotId, parseInt(depotId)),
+        eq(commissions.productId, parseInt(productId)),
+        eq(commissions.status, "pending"),
+      ),
+    );
+
 const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
   const conditions = [];
   if (depotId) conditions.push(eq(commissions.depotId, parseInt(depotId)));
@@ -406,5 +419,6 @@ module.exports = {
   update,
   markAsPaid,
   markAsSkipped,
+  findPendingFor,
   getSummary,
 };
