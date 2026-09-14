@@ -1,5 +1,9 @@
+const { eq } = require("drizzle-orm");
+const { db } = require("../config/db");
+const { pfis } = require("../db/schema");
 const { dailyReportRepo, staffRepo } = require("../repositories");
 const { emitEvent } = require("./events");
+const reportActuals = require("./reportActuals.service");
 
 const UNIQUE_VIOLATION = "23505";
 const isUniqueViolation = (err) =>
@@ -73,12 +77,54 @@ const resolveTotals = (data, existing = null) => {
   };
 };
 
+/**
+ * The PFI id behind the number the report carries.
+ *
+ * Reports name their batch by its printed number; the actuals are computed by
+ * id. A report filed without one, or naming a batch nobody can find, gets a
+ * company-wide comparison rather than no comparison at all.
+ */
+const pfiIdForNumber = async (pfiNumber) => {
+  if (!pfiNumber) return null;
+  const rows = await db
+    .select({ id: pfis.id })
+    .from(pfis)
+    .where(eq(pfis.pfiNumber, String(pfiNumber).trim()))
+    .limit(1);
+  return rows[0]?.id ?? null;
+};
+
 const submitReport = async (data, { actor }) => {
   const derived = resolveTotals(data);
+
+  /**
+   * What the system held for this PFI and date, captured now.
+   *
+   * Not recomputed when the master report is read: orders get cancelled,
+   * payments get rematched, a batch gets reassigned, so a report opened in
+   * November would be checked against a book that has moved and the variance
+   * would change every time somebody looked. The question is "did this agree
+   * with the system on the day", which only an answer taken on the day can
+   * settle.
+   *
+   * Best-effort. A report is somebody's work and must not be refused because
+   * the comparison failed; a null snapshot reads as "not captured", which is
+   * the truth.
+   */
+  let systemActuals = null;
+  try {
+    systemActuals = await reportActuals.forReport({
+      date: data.reportDate,
+      pfiId: await pfiIdForNumber(data.pfiNumber),
+    });
+  } catch (err) {
+    console.error("[daily-report] actuals snapshot failed:", err.message);
+  }
 
   try {
     const report = await dailyReportRepo.create({
       ...data,
+      systemActuals,
       litresSold: derived.litresSold.toFixed(2),
       avgPrice: derived.avgPrice.toFixed(2),
       totalSalesAmount: derived.totalSalesAmount.toFixed(2),

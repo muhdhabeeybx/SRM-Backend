@@ -1,6 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const { dailyReportRepo } = require("../../repositories");
 const dailyReportService = require("../../services/dailyReport.service");
+const reportActuals = require("../../services/reportActuals.service");
 const { sendServiceResult } = require("../../utils/serviceResult");
 const { staffActor } = require("../../utils/actor");
 const { notifyAndWait } = require("../../notifications");
@@ -42,6 +43,26 @@ const getDailyReportById = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "Report not found" });
   }
   res.json({ success: true, data: { report } });
+});
+
+/**
+ * What the system holds for a PFI on a date — read live while a report is
+ * being typed, so the filer sees the comparison before they submit rather
+ * than a reviewer finding it afterwards.
+ *
+ * Read-only and never authoritative: it is shown beside what is being entered
+ * and never written over it. See services/reportActuals.service.js.
+ */
+const getReportActuals = asyncHandler(async (req, res) => {
+  const { date, pfiId } = req.query;
+  if (!date) {
+    return res.status(400).json({ success: false, message: "A date is required" });
+  }
+  const actuals = await reportActuals.forReport({
+    date: String(date),
+    pfiId: pfiId ? Number(pfiId) : null,
+  });
+  res.json({ success: true, data: { actuals } });
 });
 
 const submitDailyReport = asyncHandler(async (req, res) => {
@@ -243,6 +264,7 @@ module.exports = {
   getDailyReports,
   getDailyReportById,
   submitDailyReport,
+  getReportActuals,
   amendDailyReport,
   reviewDailyReport,
   emailDailyReports,

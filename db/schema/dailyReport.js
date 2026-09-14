@@ -102,6 +102,19 @@ const dailyReports = pgTable(
     // [{ name, phone, litres }, ...] — compliance's top 5 for the day.
     topCustomers: jsonb("top_customers").default(sql`'[]'::jsonb`),
     remarks: text("remarks").default(""),
+    /**
+     * What the system held for this PFI and date when the report was
+     * submitted — the figures the typed ones are checked against.
+     *
+     * Captured rather than recomputed on read: orders get cancelled, payments
+     * rematched, batches reassigned, so recomputing would check a report
+     * against a book that has moved and the variance would change every time
+     * somebody opened it. Null on reports filed before this existed, and the
+     * master report says "not captured" rather than implying no variance.
+     *
+     * See services/reportActuals.service.js.
+     */
+    systemActuals: jsonb("system_actuals"),
 
     // Workflow: submitted -> approved | rejected (manager review).
     status: dailyReportStatusEnum("status").default("submitted").notNull(),

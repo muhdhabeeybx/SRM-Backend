@@ -14,6 +14,7 @@ const {
 } = require("../../schemas/dailyReport.schema");
 const {
   getDailyReports,
+  getReportActuals,
   getDailyReportById,
   submitDailyReport,
   deleteDailyReport,
@@ -40,6 +41,10 @@ router.post(
   validate({ body: whatsappReportSchema }),
   whatsappDailyReports
 );
+
+// What the system holds for a PFI on a date, read live while a report is being
+// typed. Above /:id, or "actuals" is read as an id.
+router.get("/actuals", verifyStaff, getReportActuals);
 
 router.get("/:id", verifyStaff, validate({ params: idParamSchema }), getDailyReportById);
 router.delete("/:id", verifyStaff, deleteDailyReport);
