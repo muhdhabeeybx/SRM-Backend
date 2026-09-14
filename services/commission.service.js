@@ -3,6 +3,7 @@ const { db } = require("../config/db");
 const { orderTrucks } = require("../db/schema");
 const commissionRepo = require("../repositories/commission.repository");
 const { orderRepo } = require("../repositories");
+const auditLogRepo = require("../repositories/auditLog.repository");
 
 /**
  * Create — or re-snapshot — the commission record for a paid order.
@@ -243,6 +244,78 @@ async function resolveMany({ ids, action, reason = "", staffId }) {
 }
 
 /**
+ * Undo a settlement — paid or skipped — and put the row back in the queue.
+ *
+ * Mistakes are made: the wrong row ticked, a skip decided on the wrong order,
+ * a payment recorded that never went out. Without this the only exits were
+ * permanent, which quietly encourages the opposite error — leaving a wrong row
+ * settled because correcting it is impossible.
+ *
+ * A reason is required for the same purpose it is on a skip: the row will be
+ * looked at again months from now, and "why does this say pending when the
+ * ledger says we paid it" needs an answer written at the time.
+ *
+ * ── The one case that is not a clean undo ──────────────────────────────────
+ *
+ * 56 of the 194 paid commissions were confirmed while doing so credited the
+ * customer's wallet, and that deposit is still on their balance. Reverting one
+ * does NOT reverse it — this service will not silently claw money back from a
+ * customer — so the credit stays and the commission goes back to pending,
+ * which means the two now disagree.
+ *
+ * That is worth stopping on rather than discovering later, so the attempt is
+ * refused once and carries the deposit it found. `acknowledgeWalletCredit`
+ * says "I have seen it and I will deal with the credit separately".
+ */
+async function revertToPending(commissionId, staffId, { reason = "", acknowledgeWalletCredit = false } = {}) {
+  const commission = await commissionRepo.findById(commissionId);
+  if (!commission) {
+    throw Object.assign(new Error("Commission not found"), { status: 404 });
+  }
+  if (commission.status === "pending") {
+    throw Object.assign(new Error("This commission is already pending"), { status: 400 });
+  }
+
+  const trimmed = String(reason || "").trim();
+  if (trimmed.length < 3) {
+    throw Object.assign(new Error("Say why this is being undone"), { status: 400 });
+  }
+
+  const walletCredit =
+    commission.status === "paid" ? await commissionRepo.findWalletCreditFor(commissionId) : null;
+  if (walletCredit && !acknowledgeWalletCredit) {
+    throw Object.assign(
+      new Error(
+        `This commission credited the customer's wallet ${walletCredit.reference} with ` +
+        `N${Number(walletCredit.amount).toLocaleString()}. Undoing it here does not reverse that credit. ` +
+        `Confirm to undo anyway.`,
+      ),
+      { status: 409, code: "WALLET_CREDIT_EXISTS", walletCredit },
+    );
+  }
+
+  const was = commission.status;
+  const reverted = await commissionRepo.revertToPending(commissionId);
+
+  await auditLogRepo.record({
+    entityType: "commission",
+    entityId: commissionId,
+    action: "commission.reverted",
+    actor: staffId ? { type: "staff", staffId } : { type: "system" },
+    prevState: was,
+    newState: "pending",
+    metadata: {
+      reason: trimmed.slice(0, 2000),
+      amount: commission.commissionAmount,
+      orderId: commission.orderId,
+      walletCreditLeftInPlace: walletCredit ? walletCredit.reference : null,
+    },
+  });
+
+  return { commission: reverted, was, walletCredit };
+}
+
+/**
  * Bring pending commissions into line after a rate is set or changed.
  *
  * Rates are configured per depot and product, and until now nothing looked
@@ -278,5 +351,6 @@ module.exports = {
   confirmPayment,
   skipCommission,
   resolveMany,
+  revertToPending,
   recomputeForRate,
 };

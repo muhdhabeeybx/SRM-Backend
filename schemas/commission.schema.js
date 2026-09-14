@@ -19,6 +19,12 @@ const skipCommission = z.object({
   reason: requiredString("Reason", 2000),
 });
 
+const revertCommission = z.object({
+  reason: requiredString("Reason", 2000),
+  // Only meaningful on a commission that credited a wallet in the old world.
+  acknowledgeWalletCredit: z.boolean().optional(),
+});
+
 const bulkResolve = z.object({
   ids: z.array(id("Commission id")).min(1, "Select at least one commission").max(200, "Too many at once"),
   action: z.enum(["confirm", "skip"], { error: "Action must be confirm or skip" }),
@@ -46,4 +52,4 @@ const dailyReport = z.object({
   remarks: z.string().trim().max(2000).optional().default(""),
 });
 
-module.exports = { listCommissions, idParam, skipCommission, bulkResolve, upsertRate, dailyReport };
+module.exports = { listCommissions, idParam, skipCommission, revertCommission, bulkResolve, upsertRate, dailyReport };

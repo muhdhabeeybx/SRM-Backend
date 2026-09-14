@@ -10,6 +10,7 @@ const {
   depots,
   products,
   pfis,
+  deposits,
   staff,
 } = require("../db/schema");
 
@@ -399,6 +400,24 @@ const markAsSkipped = async (id, skippedBy, reason = "") => {
   return row || null;
 };
 
+/**
+ * The wallet credit a commission wrote, back when confirming one did that.
+ *
+ * The wallet era referenced its deposits `COM-<orderNumber>-<commissionId>`,
+ * so the commission is recoverable from the reference. 56 of the 194 paid
+ * commissions have one. It matters on an undo: taking such a commission back
+ * to pending leaves the customer holding a credit for money the desk is now
+ * saying it has not paid.
+ */
+const findWalletCreditFor = async (commissionId) => {
+  const rows = await db
+    .select({ id: deposits.id, amount: deposits.amount, reference: deposits.reference })
+    .from(deposits)
+    .where(ilike(deposits.reference, `COM-%-${parseInt(commissionId)}`))
+    .limit(1);
+  return rows[0] || null;
+};
+
 /** Pending commissions on one depot and product — what a rate change affects. */
 const findPendingFor = async (depotId, productId) =>
   db
@@ -411,6 +430,30 @@ const findPendingFor = async (depotId, productId) =>
         eq(commissions.status, "pending"),
       ),
     );
+
+/**
+ * Back to pending, and forget how it got settled.
+ *
+ * Both settlement stamps are cleared, not just the one that applied: a row
+ * that carried a skip reason and is now pending again must not keep the
+ * sentence explaining why it was never going to be paid.
+ */
+const revertToPending = async (id) => {
+  const [row] = await db
+    .update(commissions)
+    .set({
+      status: "pending",
+      paidAt: null,
+      paidBy: null,
+      skippedAt: null,
+      skippedBy: null,
+      skipReason: "",
+      updatedAt: new Date(),
+    })
+    .where(eq(commissions.id, id))
+    .returning();
+  return row || null;
+};
 
 const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
   const conditions = [];
@@ -455,6 +498,8 @@ module.exports = {
   update,
   markAsPaid,
   markAsSkipped,
+  revertToPending,
   findPendingFor,
+  findWalletCreditFor,
   getSummary,
 };

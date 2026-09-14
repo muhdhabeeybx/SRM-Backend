@@ -8,6 +8,7 @@ const {
   getCommissionById,
   confirmPayment,
   skipCommission,
+  revertCommission,
   bulkResolve,
   getSummary,
   getRates,
@@ -22,6 +23,9 @@ router.get("/:id", verifyStaff, validate({ params: commissionSchemas.idParam }),
 router.patch("/:id/confirm-payment", verifyStaff, validate({ params: commissionSchemas.idParam }), confirmPayment);
 // The second exit: settled without crediting anybody. See the service.
 router.patch("/:id/skip", verifyStaff, validate({ params: commissionSchemas.idParam, body: commissionSchemas.skipCommission }), skipCommission);
+// Undoing either settlement. Mistakes are made, and an exit that cannot be
+// reversed quietly encourages leaving a wrong row settled.
+router.patch("/:id/revert", verifyStaff, validate({ params: commissionSchemas.idParam, body: commissionSchemas.revertCommission }), revertCommission);
 // Both acts over a selection. Above nothing it could be mistaken for — /bulk
 // is not an id, and GET /:id would answer for it if this sat lower.
 router.post("/bulk", verifyStaff, validate({ body: commissionSchemas.bulkResolve }), bulkResolve);

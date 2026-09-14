@@ -70,6 +70,41 @@ const bulkResolve = asyncHandler(async (req, res) => {
   res.json({ success: results.failed.length === 0, message, data: results });
 });
 
+/**
+ * Undo a settlement, paid or skipped.
+ *
+ * The wallet-credit case answers 409 with the deposit it found rather than
+ * refusing outright — see the service. The client shows it and can retry with
+ * acknowledgeWalletCredit.
+ */
+const revertCommission = asyncHandler(async (req, res) => {
+  try {
+    const result = await commissionService.revertToPending(
+      parseInt(req.params.id),
+      req.user.id,
+      {
+        reason: req.body?.reason,
+        acknowledgeWalletCredit: req.body?.acknowledgeWalletCredit === true,
+      },
+    );
+    res.json({
+      success: true,
+      message: `Commission moved back to pending from ${result.was}`,
+      data: result,
+    });
+  } catch (err) {
+    if (err.code === "WALLET_CREDIT_EXISTS") {
+      return res.status(409).json({
+        success: false,
+        code: err.code,
+        message: err.message,
+        data: { walletCredit: err.walletCredit },
+      });
+    }
+    throw err;
+  }
+});
+
 const getSummary = asyncHandler(async (req, res) => {
   const { depotId, customerId, dateFrom, dateTo } = req.query;
   const summary = await commissionRepo.getSummary({ depotId, customerId, dateFrom, dateTo });
@@ -202,6 +237,7 @@ module.exports = {
   getCommissionById,
   confirmPayment,
   skipCommission,
+  revertCommission,
   bulkResolve,
   getSummary,
   getRates,
