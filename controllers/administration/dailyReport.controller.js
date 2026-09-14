@@ -54,14 +54,47 @@ const getDailyReportById = asyncHandler(async (req, res) => {
  * and never written over it. See services/reportActuals.service.js.
  */
 const getReportActuals = asyncHandler(async (req, res) => {
-  const { date, pfiId } = req.query;
+  const { date, pfiId, pfiNumber } = req.query;
   if (!date) {
     return res.status(400).json({ success: false, message: "A date is required" });
   }
-  const actuals = await reportActuals.forReport({
-    date: String(date),
-    pfiId: pfiId ? Number(pfiId) : null,
-  });
+
+  /**
+   * The batch may be named rather than numbered.
+   *
+   * The entry form knows the id, because the filer picked the batch from a
+   * list. The Reports Hub does not — a filed report stores the PFI NUMBER as
+   * text, and asking the Hub to resolve a dozen of those to ids before it
+   * could check anything would mean a second round trip per report. So both
+   * are accepted.
+   *
+   * A NAMED BATCH THAT CANNOT BE RESOLVED ANSWERS NOTHING. Falling back to the
+   * whole day here looks like it is being helpful and is the worst thing this
+   * endpoint can do: every report asking about a different batch gets the same
+   * company-wide figure back, so five locations all read "system 36" and the
+   * comparison quietly becomes a lie. Better to say there is nothing to check
+   * against and let the page show it as unchecked.
+   */
+  let id = pfiId ? Number(pfiId) : null;
+  if (!id && pfiNumber) {
+    id = await dailyReportService.pfiIdForNumber(String(pfiNumber));
+    if (!id) {
+      return res.json({
+        success: true,
+        data: {
+          actuals: {
+            date: String(date),
+            pfiId: null,
+            unresolvedPfi: String(pfiNumber),
+            fields: null,
+            context: null,
+          },
+        },
+      });
+    }
+  }
+
+  const actuals = await reportActuals.forReport({ date: String(date), pfiId: id });
   res.json({ success: true, data: { actuals } });
 });
 

@@ -228,4 +228,4 @@ const reviewReport = async (id, { approve, comment = "" }, { actor }) => {
   return { success: true, report: updated };
 };
 
-module.exports = { submitReport, amendReport, reviewReport, deriveFromBands, resolveTotals };
+module.exports = { submitReport, amendReport, reviewReport, deriveFromBands, resolveTotals, pfiIdForNumber };
