@@ -1,6 +1,6 @@
 const { eq, and, or, ilike, desc, count, sql, between, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { generateOrderReference } = require("../utils/helpers");
+const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
 const { scopeCondition } = require("../lib/scopeFilter");
 const {
   commissions,
@@ -153,15 +153,29 @@ const findAll = async ({
   }
   if (search) {
     const pattern = `%${search}%`;
-    conditions.push(
-      or(
-        ilike(orders.orderNumber, pattern),
-        ilike(customers.name, pattern),
-        ilike(customers.companyName, pattern),
-        ilike(depots.name, pattern),
-        ilike(products.name, pattern)
-      )
+    /**
+     * Search the reference the page SHOWS, not the one the column stores.
+     *
+     * orders.order_number holds a legacy value — "TA9649" — while every screen
+     * displays generateOrderReference(company, id), which for that same row is
+     * "MA11942". So typing the reference in front of you matched nothing, and
+     * the id inside it matched nothing either.
+     *
+     * parseOrderReference pulls the id back out of the displayed form, exactly
+     * as the finance report's search does. The stored column stays in the OR
+     * for anyone working from an older document.
+     */
+    const possibleId = parseOrderReference(search);
+    const textMatch = or(
+      ilike(orders.orderNumber, pattern),
+      ilike(customers.name, pattern),
+      ilike(customers.companyName, pattern),
+      ilike(orders.companyName, pattern),
+      ilike(depots.name, pattern),
+      ilike(products.name, pattern),
+      ilike(pfis.pfiNumber, pattern)
     );
+    conditions.push(possibleId ? or(eq(orders.id, possibleId), textMatch) : textMatch);
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -216,7 +230,29 @@ const findAll = async ({
       .orderBy(desc(commissions.createdAt))
       .limit(limitNum)
       .offset(offset),
-    db.select({ total: count() }).from(commissions).where(whereClause),
+    /**
+     * The same joins as the rows query, and it needs every one of them.
+     *
+     * This selected from `commissions` alone. The moment a search term was
+     * typed, the shared whereClause named orders, customers, depots and
+     * products — tables this query had never heard of — and Postgres answered
+     * with a missing-FROM-clause error. Every search on this page was a 500,
+     * on every keystroke.
+     *
+     * The rows query worked because it joins all four. Whatever the filters
+     * can reference, both halves have to be able to see; keeping the two in
+     * step is the whole requirement, which is why they are written the same
+     * way rather than the count being trimmed to what it "needs".
+     */
+    db
+      .select({ total: count() })
+      .from(commissions)
+      .leftJoin(orders, eq(commissions.orderId, orders.id))
+      .leftJoin(customers, eq(commissions.customerId, customers.id))
+      .leftJoin(depots, eq(commissions.depotId, depots.id))
+      .leftJoin(products, eq(commissions.productId, products.id))
+      .leftJoin(pfis, eq(orders.pfiId, pfis.id))
+      .where(whereClause),
   ]);
 
   /**
