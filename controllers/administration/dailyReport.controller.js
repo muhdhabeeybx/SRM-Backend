@@ -191,7 +191,7 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
 });
 
 const emailDailyReports = asyncHandler(async (req, res) => {
-  const { recipients, reportDate } = req.body;
+  const { recipients, reportDate, attachmentBase64, filename } = req.body;
 
   /**
    * The button sends the per-PFI report.
@@ -212,7 +212,11 @@ const emailDailyReports = asyncHandler(async (req, res) => {
   const data = await buildPfiDailyReportData(reportDate ? new Date(reportDate) : new Date());
   const result = await notifyAndWait("reports.pfi_daily", {
     to: recipients.map((email) => ({ email })),
-    data,
+    // The Hub's workbook rides along when the client sent one, so the email
+    // carries the very report the sender was looking at — same filters, same
+    // rows, same file as the Download button. Optional: the scheduled send
+    // and any older client post nothing, and get the summary alone.
+    data: { ...data, ...(attachmentBase64 && filename ? { attachmentBase64, filename } : {}) },
   });
 
   // notifyAndWait never throws — a provider outage must not read as a 500 — so

@@ -36,8 +36,30 @@ const ordersOn = (date, pfiId) => sql`
      ${pfiId ? sql`AND o.pfi_id = ${Number(pfiId)}` : sql``}
 `;
 
-/** An order that reached a truck, as against one merely placed. */
-const LOADED = ["Loading", "Completed"];
+/**
+ * "Loaded" means A TICKET WAS GENERATED.
+ *
+ * Not the order's status. A ticket is the point at which a specific truck is
+ * committed to a specific quantity, and it is the first record of the batch
+ * that a person actually signed. Order status moves for other reasons — a
+ * gantry order is marked Completed the moment payment clears, with no truck
+ * and no ticket anywhere near it — so reading status as "loaded" reports
+ * litres out of a tank nobody drew from.
+ *
+ * The stages after it, in order: pending (ticketed, not yet at the gate),
+ * gated_in / loaded (on the yard), gated_out (left).
+ */
+const TICKETED_IS_LOADED = true;
+
+/**
+ * The two batch types that never generate a ticket.
+ *
+ * A gantry or delivery order is completed on payment — there is no ticket, no
+ * gate, no yard. Counting ticketed litres for these would report zero loaded
+ * against a batch that sold out, so for these the order itself is the
+ * evidence.
+ */
+const DESKLESS_PFI_TYPES = ["gantry", "delivery"];
 
 const num = (v) => Number(v) || 0;
 
@@ -59,12 +81,53 @@ const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
 const forReport = async ({ date, pfiId = null }) => {
   const rows = rowsOf(await db.execute(ordersOn(date, pfiId)));
 
-  const loaded = rows.filter((o) => LOADED.includes(o.status));
   const paidOrders = rows.filter((o) => o.payment_status === "Paid");
 
   const litresOrdered = rows.reduce((s, o) => s + num(o.quantity), 0);
-  const litresLoaded = loaded.reduce((s, o) => s + num(o.quantity), 0);
   const valueOrdered = rows.reduce((s, o) => s + num(o.total_amount), 0);
+
+  /** Which kind of batch this is — it decides what counts as loaded. */
+  const batch = pfiId
+    ? (rowsOf(await db.execute(sql`
+        SELECT pfi_type FROM pfis WHERE id = ${Number(pfiId)}
+      `)))[0] || null
+    : null;
+  const deskless = !!batch && DESKLESS_PFI_TYPES.includes(batch.pfi_type);
+
+  /**
+   * Tickets written on the day, and how far each of those trucks has got.
+   *
+   * Dated by the TICKET, not by its order. A ticket written this morning
+   * against an order raised last week is this morning's loading, and the sheet
+   * being filed is about what this shift did.
+   */
+  const tk = (rowsOf(await db.execute(sql`
+    SELECT
+      COUNT(*)::int AS ticketed,
+      COALESCE(SUM(t.quantity), 0) AS litres_ticketed,
+      COUNT(*) FILTER (WHERE t.status = 'pending')::int AS awaiting_in,
+      COUNT(*) FILTER (WHERE t.status IN ('gated_in', 'loaded'))::int AS on_yard,
+      COUNT(*) FILTER (WHERE t.status = 'gated_out')::int AS departed,
+      COALESCE(SUM(t.quantity) FILTER (WHERE t.status = 'gated_out'), 0) AS litres_departed
+      FROM order_trucks t
+      JOIN orders o ON o.id = t.order_id
+     WHERE t.created_at >= ${date}::date
+       AND t.created_at < (${date}::date + interval '1 day')
+       ${pfiId ? sql`AND o.pfi_id = ${Number(pfiId)}` : sql``}
+  `)))[0] || {};
+
+  const litresTicketed = num(tk.litres_ticketed);
+
+  /**
+   * Litres loaded: the ticketed quantity, or the order's own on a batch that
+   * never tickets. Deliberately NOT the order's headline quantity on a
+   * ticketed batch — an order for 60,000 with one 30,000 truck ticketed has
+   * loaded 30,000, and reporting 60,000 is how the tank and the sheet drift
+   * apart.
+   */
+  const litresLoaded = deskless
+    ? rows.filter((o) => o.status === "Completed").reduce((s, o) => s + num(o.quantity), 0)
+    : litresTicketed;
 
   /**
    * Trucks the gate actually saw, on the day — not trucks attached to the
@@ -135,18 +198,35 @@ const forReport = async ({ date, pfiId = null }) => {
       receivedStock: litresOrdered,
       totalSalesAmount: valueOrdered,
       avgPrice: litresOrdered ? Math.round((valueOrdered / litresOrdered) * 100) / 100 : 0,
+      /** The security sheet's truck count is trucks that LEFT the gate. */
       truckCount: gate.exited,
       trucksEntered: gate.entered,
+      /** Tickets written, for whoever states how many trucks were loaded. */
+      trucksLoaded: num(tk.ticketed),
       fundsReceived: num(received.total),
       commissionDue: num(commission.due),
       amountPaid: num(commission.paid),
     },
-    /** Context the form shows but does not compare — prices vary legitimately. */
+    /**
+     * Shown, never compared — either because it varies legitimately (prices)
+     * or because no field states it, and its job is to explain a variance
+     * rather than to be one. A sheet 30,000 litres light reads very
+     * differently once you can see a truck still standing on the yard.
+     */
     context: {
+      pfiType: batch?.pfi_type ?? null,
+      deskless,
       litresOrdered,
       paidOrderCount: paidOrders.length,
       pendingCommissions: commission.pending_count,
       pricesSeen: prices.sort((a, b) => a - b),
+      /** Where the day's ticketed trucks actually got to. */
+      trucksTicketed: num(tk.ticketed),
+      trucksAwaitingIn: num(tk.awaiting_in),
+      trucksOnYard: num(tk.on_yard),
+      trucksDeparted: num(tk.departed),
+      litresTicketed,
+      litresDeparted: num(tk.litres_departed),
     },
   };
 };

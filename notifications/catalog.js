@@ -1835,7 +1835,22 @@ const CATALOG = {
     body: (d) =>
       `${d.summary?.activePfis ?? 0} active PFI(s), ${d.summary?.activeBatches ?? 0} truck-sales batch(es).`,
     entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
-    email: (d) => renderPfiDailyReportEmail(d),
+    /**
+     * The readable summary, with the Hub's own workbook attached when the
+     * caller sent one.
+     *
+     * The two are not alternatives. The summary is what gets read on a phone
+     * in a car; the workbook is what gets worked on at a desk, and it is the
+     * SAME file the Download button produces — built by the client that was
+     * looking at the filtered day, so what lands in the inbox is exactly what
+     * the sender was looking at, not a re-derivation that could have moved.
+     */
+    email: (d) => ({
+      ...renderPfiDailyReportEmail(d),
+      ...(d.attachmentBase64 && d.filename
+        ? { attachments: [{ filename: d.filename, content: d.attachmentBase64 }] }
+        : {}),
+    }),
   },
 
   // ═══ Delivery / truck flow (SMS) ══════════════════════════════════════════
