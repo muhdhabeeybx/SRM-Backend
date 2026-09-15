@@ -1,0 +1,43 @@
+{
+  "takenAt": "2026-09-15T05:11:47.659Z",
+  "orders": [
+    {
+      "id": 11962,
+      "pfi_id": 43
+    },
+    {
+      "id": 11963,
+      "pfi_id": 43
+    }
+  ],
+  "allocations": [
+    {
+      "id": 14064,
+      "pfi_id": 43
+    },
+    {
+      "id": 14065,
+      "pfi_id": 43
+    }
+  ],
+  "movements": [
+    {
+      "id": 7173,
+      "pfi_id": 43
+    },
+    {
+      "id": 7174,
+      "pfi_id": 43
+    }
+  ],
+  "pfis": [
+    {
+      "id": 43,
+      "sold_qty_litres": 19907693
+    },
+    {
+      "id": 51,
+      "sold_qty_litres": 494306
+    }
+  ]
+}
