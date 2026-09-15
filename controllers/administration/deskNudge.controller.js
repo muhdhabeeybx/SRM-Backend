@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const deskNudge = require("../../services/deskNudge.service");
+const deskAssignments = require("../../services/deskAssignments.service");
 
 /**
  * The desk backlogs, and the two ways of chasing them.
@@ -28,6 +29,29 @@ const getDeskNudges = asyncHandler(async (req, res) => {
   );
 
   res.json({ success: true, data: { desks: withContacts } });
+});
+
+/**
+ * Who owes what, by name.
+ *
+ * The queue counts say how deep each desk is; this says whose it is. A count
+ * belongs to nobody, which is how a queue 140 days deep became everybody's and
+ * therefore no-one's. See services/deskAssignments.service.js.
+ *
+ * Read-only, and gated to the people who can act on the answer: it names
+ * individual staff and what they are holding up, which is a management view
+ * rather than an operational one.
+ */
+const getDeskAssignments = asyncHandler(async (req, res) => {
+  const roles = req.user?.roles || [];
+  if (!roles.includes("super_admin") && !roles.includes("admin")) {
+    return res.status(403).json({
+      success: false,
+      message: "Only an admin may see who is responsible for each desk",
+    });
+  }
+  const desks = await deskAssignments.allDesks();
+  res.json({ success: true, data: { desks } });
 });
 
 const sendDeskNudges = asyncHandler(async (req, res) => {
@@ -68,4 +92,4 @@ const smsDeskNudge = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getDeskNudges, sendDeskNudges, smsDeskNudge };
+module.exports = { getDeskAssignments, getDeskNudges, sendDeskNudges, smsDeskNudge };

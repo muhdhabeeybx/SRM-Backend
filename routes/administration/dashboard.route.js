@@ -2,7 +2,9 @@ const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
 const { getStats, getOverview, getWorkQueues, getActivity } = require("../../controllers/administration/dashboard.controller");
-const { getDeskNudges, sendDeskNudges, smsDeskNudge } = require("../../controllers/administration/deskNudge.controller");
+const {
+  getDeskAssignments, getDeskNudges, sendDeskNudges, smsDeskNudge,
+} = require("../../controllers/administration/deskNudge.controller");
 
 router.get("/stats", verifyStaff, getStats);
 router.get("/overview", verifyStaff, getOverview);
@@ -20,6 +22,9 @@ router.get("/activity", verifyStaff, getActivity);
  * until tomorrow. The SMS route is one desk per call and takes a dryRun flag,
  * because texting eleven people is a decision, not a page load.
  */
+// Who owes what, by name. Admin-gated inside the controller — it names
+// individuals and what they are holding up.
+router.get("/desk-assignments", verifyStaff, getDeskAssignments);
 router.get("/desk-nudges", verifyStaff, getDeskNudges);
 router.post("/desk-nudges/notify", verifyStaff, sendDeskNudges);
 router.post("/desk-nudges/sms", verifyStaff, smsDeskNudge);
