@@ -39,6 +39,18 @@ const submitDailyReportSchema = z.object({
   priceBands: z.array(priceBandSchema).max(20).optional(),
   tankBalance: z.coerce.number().nonnegative().optional(),
   loadingLeftOver: z.coerce.number().nonnegative().optional(),
+  // The location manager's sheet. Nullable rather than defaulted: on a form
+  // filled in across a shift, 0 and "not answered" are different answers.
+  // A balance may legitimately go negative when a tank is over-drawn against
+  // the book, so those are not nonnegative.
+  blFigure: z.coerce.number().nonnegative().nullish(),
+  tankInitial: z.coerce.number().nonnegative().nullish(),
+  aggregateSold: z.coerce.number().nonnegative().nullish(),
+  pfiDaysCounting: z.coerce.number().int().nonnegative().nullish(),
+  yesterdayRemarks: z.string().max(5000).nullish(),
+  soldUnloaded: z.coerce.number().nullish(),
+  tankBalanceInclusive: z.coerce.number().nullish(),
+  netTankBalance: z.coerce.number().nullish(),
   amountPaid: z.coerce.number().nonnegative().optional(),
   differentials: z.coerce.number().optional(),
   truckCount: z.coerce.number().int().nonnegative().optional(),

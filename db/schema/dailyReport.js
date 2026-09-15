@@ -39,6 +39,30 @@ const dailyReports = pgTable(
     tankBalance: decimal("tank_balance", { precision: 15, scale: 2 }).default("0"),
     loadingLeftOver: decimal("loading_left_over", { precision: 15, scale: 2 }).default("0"),
 
+    // --- The location manager's sheet ------------------------------------
+    //
+    // Figures the paper form has always carried and the digital one had
+    // nowhere to put, so they were written into `remarks` as prose — where
+    // they could not be totalled, checked against the system, or carried into
+    // the master report.
+    //
+    // Nullable with no default, unlike the litres columns above: on a sheet
+    // filled in across a shift, 0 and "not answered yet" are different
+    // answers, and here 0 would read as a dipped-empty tank rather than an
+    // unvisited one.
+    blFigure: decimal("bl_figure", { precision: 15, scale: 2 }),
+    tankInitial: decimal("tank_initial", { precision: 15, scale: 2 }),
+    aggregateSold: decimal("aggregate_sold", { precision: 15, scale: 2 }),
+    pfiDaysCounting: integer("pfi_days_counting"),
+    /** Carried from yesterday's sheet so an open issue survives the night. */
+    yesterdayRemarks: text("yesterday_remarks"),
+    /** Sold today but still in the tank. */
+    soldUnloaded: decimal("sold_unloaded", { precision: 15, scale: 2 }),
+    /** Counting product already sold but not yet lifted. */
+    tankBalanceInclusive: decimal("tank_balance_inclusive", { precision: 15, scale: 2 }),
+    /** What is left once product owed to customers is taken out. */
+    netTankBalance: decimal("net_tank_balance", { precision: 15, scale: 2 }),
+
     // A day can sell at several prices: [{ "price": "850.00", "litres": "20000" }].
     // avgPrice / litresSold stay in sync as the derived scalars.
     priceBands: jsonb("price_bands").default(sql`'[]'::jsonb`),
