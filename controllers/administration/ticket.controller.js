@@ -1,5 +1,5 @@
 const asyncHandler = require("express-async-handler");
-const { ticketRepo, orderRepo } = require("../../repositories");
+const { ticketRepo } = require("../../repositories");
 
 const getTickets = asyncHandler(async (req, res) => {
   const { page = 1, limit = 50, search, status } = req.query;
@@ -53,11 +53,27 @@ const redeemTicket = asyncHandler(async (req, res) => {
     redeemedBy: adminId,
   });
 
-  // Mark order as completed if not already
-  const order = await orderRepo.findById(ticket.orderId);
-  if (order && order.status !== "Completed") {
-    await orderRepo.update(order.id, { status: "Completed" });
-  }
+  /**
+   * Redeeming a ticket does NOT complete the order.
+   *
+   * It used to, unconditionally: one redeemed ticket wrote Completed onto the
+   * whole order however many trucks were still to come. 3,505 orders carry
+   * 5,241 trucks that never gated out because of it — and once an order reads
+   * Completed the gate refuses it ("Order is Completed; it is not open for
+   * gating"), so those trucks could not be exited even by hand.
+   *
+   * It also wrote through orderRepo.update rather than orderStatus.transition,
+   * so it bypassed the state machine and left no audit row. That is why almost
+   * none of the affected orders can say how they were completed.
+   *
+   * An order is completed by the LAST TRUCK OUT, in gateOutTruck, which is the
+   * only place that knows whether any remain — and it already requires both
+   * that no load is outstanding and that the full quantity has been ticketed.
+   * A ticket is permission to load; it is not evidence that loading finished.
+   *
+   * Deskless orders (gantry, delivery) have no gate and no trucks, and are
+   * completed at payment by order.service — they never reach here.
+   */
 
   const updatedTicket = await ticketRepo.findByIdOrCodeFull(ticket.id);
 
