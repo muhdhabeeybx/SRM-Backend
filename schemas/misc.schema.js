@@ -150,9 +150,35 @@ const inventoryBase = {
   pfiLocation: optionalString("Pfi location", 255),
   allocationCode: optionalString("Allocation code", 64),
   notes: optionalString("Notes", 1000),
+  // Trip costs, per truck. Nullable rather than defaulted: clearing a figure
+  // back to "not costed" is a real edit, and `money().optional()` alone would
+  // silently drop a null instead of applying it.
+  agoLitres: money("AGO litres").nullish(),
+  agoPrice: money("AGO price").nullish(),
+  feedingAllowance: money("Feeding allowance").nullish(),
+  productPrice: money("Product price").nullish(),
 };
 const createInventory = z.object(inventoryBase).partial();
 const updateInventory = z.object(inventoryBase).partial();
+
+/**
+ * Applying one set of trip costs to several trucks at once.
+ *
+ * Trucks on a batch usually take the same diesel at the same price on the same
+ * day, and entering it twelve times is how twelve rows end up slightly
+ * different. The ids are explicit rather than "the whole batch": bulk entry
+ * that silently includes a truck somebody already costed by hand would
+ * overwrite the careful figure with the convenient one.
+ */
+const bulkCostInventory = z.object({
+  ids: z.array(id("Id")).min(1).max(200),
+  agoLitres: money("AGO litres").nullish(),
+  agoPrice: money("AGO price").nullish(),
+  feedingAllowance: money("Feeding allowance").nullish(),
+  productPrice: money("Product price").nullish(),
+  /** Without this, a blank field means "leave alone" rather than "clear". */
+  clearBlank: z.boolean().optional(),
+});
 const listInventory = pagination.extend({
   search: searchTerm,
   loading_status: enumOf("Loading status", ["loaded", "offloaded", "empty", "all"]).optional(),
@@ -758,7 +784,7 @@ module.exports = {
   listPfis,
   listTickets, ticketIdOrCode,
   createStation, updateStation, listStations,
-  createInventory, updateInventory, listInventory,
+  createInventory, updateInventory, listInventory, bulkCostInventory,
   createStaff, updateStaff, listStaff, updateMyProfile, changeMyPassword,
   createBankAccount, updateBankAccount,
   createBankStatement, bankStatementMapping, matchBankLines,

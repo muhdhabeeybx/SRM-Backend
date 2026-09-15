@@ -31,6 +31,28 @@ const deliveryInventory = pgTable(
     customerName: varchar("customer_name", { length: 255 }).default(""),
     quantityAllocated: real("quantity_allocated").default(0),
     rate: decimal("rate", { precision: 15, scale: 2 }).default("0"),
+
+    // --- Trip costs, per truck --------------------------------------------
+    //
+    // Diesel and feeding are bought per truck per trip: two trucks on one
+    // batch can take different AGO at different prices, and a batch-level
+    // figure would average away the thing being measured.
+    //
+    // Four inputs only. AGO value, total expenses, cost per litre, landing
+    // cost and margin are all computed where they are read — a stored total
+    // goes stale the moment a price is corrected, and it would drift silently
+    // against `rate` above, which the margin is measured from.
+    //
+    // Nullable with no default: zero and "not costed yet" are different
+    // states, and a trip with no AGO recorded has an unknown margin rather
+    // than a perfect one.
+    agoLitres: decimal("ago_litres", { precision: 12, scale: 2 }),
+    agoPrice: decimal("ago_price", { precision: 12, scale: 2 }),
+    feedingAllowance: decimal("feeding_allowance", { precision: 14, scale: 2 }),
+    /** What the product cost US per litre — not the selling rate above. */
+    productPrice: decimal("product_price", { precision: 14, scale: 2 }),
+    costedAt: timestamp("costed_at", { withTimezone: true }),
+    costedBy: varchar("costed_by", { length: 255 }),
     dateAllocated: varchar("date_allocated", { length: 20 }).default(""),
     dateOffloaded: varchar("date_offloaded", { length: 20 }),
     loadingStatus: loadingStatusEnum("loading_status").default("loaded").notNull(),

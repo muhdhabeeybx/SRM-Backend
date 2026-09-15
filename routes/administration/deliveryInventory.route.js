@@ -8,6 +8,7 @@ const {
   getDeliveryInventoryById,
   createDeliveryInventory,
   updateDeliveryInventory,
+  setDeliveryTripCosts,
   deleteDeliveryInventory,
 } = require("../../controllers/administration/deliveryInventory.controller");
 const {
@@ -34,6 +35,14 @@ router.patch("/batches/:code", verifyStaff, setDeliveryBatchStatus);
 router.get("/", verifyStaff, validate({ query: misc.listInventory }), getDeliveryInventory);
 router.get("/:id", verifyStaff, validate({ params: misc.idParam }), getDeliveryInventoryById);
 router.post("/", verifyStaff, validate({ body: misc.createInventory }), createDeliveryInventory);
+// Above "/:id" so "costs" is never read as an inventory id.
+router.post(
+  "/costs",
+  verifyStaff,
+  validate({ body: misc.bulkCostInventory }),
+  setDeliveryTripCosts
+);
+
 router.patch("/:id", verifyStaff, validate({ params: misc.idParam, body: misc.updateInventory }), updateDeliveryInventory);
 router.delete("/:id", verifyStaff, validate({ params: misc.idParam }), deleteDeliveryInventory);
 

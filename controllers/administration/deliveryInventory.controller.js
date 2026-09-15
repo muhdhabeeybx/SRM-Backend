@@ -78,6 +78,35 @@ const createDeliveryInventory = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * One set of trip costs applied to several trucks — POST /delivery-inventory/costs
+ *
+ * Trucks on a batch usually take the same diesel at the same price on the same
+ * day, and entering it twelve times is how twelve rows end up slightly
+ * different. The ids are named explicitly rather than "the whole batch": a bulk
+ * pass that quietly swept up a truck somebody had already costed by hand would
+ * replace the careful figure with the convenient one.
+ */
+const setDeliveryTripCosts = asyncHandler(async (req, res) => {
+  const { ids, clearBlank, ...values } = req.body;
+
+  const actor = req.user?.name || req.user?.email || null;
+  const rows = await deliveryInventoryRepo.setCosts(ids, values, { clearBlank, actor });
+
+  if (!rows.length) {
+    return res.status(400).json({
+      success: false,
+      message: "Nothing to apply — enter at least one figure",
+    });
+  }
+
+  res.json({
+    success: true,
+    message: `Costs applied to ${rows.length} truck${rows.length === 1 ? "" : "s"}`,
+    data: { inventory: rows, updated: rows.length },
+  });
+});
+
 const updateDeliveryInventory = asyncHandler(async (req, res) => {
   const record = await deliveryInventoryRepo.findById(req.params.id);
   if (!record) {
@@ -106,5 +135,6 @@ module.exports = {
   getDeliveryInventoryById,
   createDeliveryInventory,
   updateDeliveryInventory,
+  setDeliveryTripCosts,
   deleteDeliveryInventory,
 };
