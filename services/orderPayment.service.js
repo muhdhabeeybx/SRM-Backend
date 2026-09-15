@@ -1,5 +1,6 @@
 const { eq, and, sql, inArray, asc } = require("drizzle-orm");
 const { db } = require("../config/db");
+const { orderReferenceSql } = require("../lib/orderReferenceSql");
 const {
   orders,
   orderPayments,
@@ -738,8 +739,8 @@ const listForOrder = async (orderId, tx = db) => {
       -- rather than leaving the reader to look the transfer up.
       CASE WHEN p.source = 'transfer_out' THEN t.to_order_id
            WHEN p.source = 'transfer_in'  THEN t.from_order_id END AS "counterpartOrderId",
-      CASE WHEN p.source = 'transfer_out' THEN o_to.order_number
-           WHEN p.source = 'transfer_in'  THEN o_from.order_number END AS "counterpartOrderNumber",
+      CASE WHEN p.source = 'transfer_out' THEN ${orderReferenceSql("o_to", null)}
+           WHEN p.source = 'transfer_in'  THEN ${orderReferenceSql("o_from", null)} END AS "counterpartOrderNumber",
       t.reason AS "transferReason",
       -- The bank payment a transfer leg's money originally arrived as. See the
       -- same subqueries in order.repository.findFinanceReport for why.
@@ -800,7 +801,7 @@ const summarizeOrder = async (orderId, tx = db) => {
 const findOrdersWithSurplus = async ({ limit = 100, customerId = null } = {}) => {
   const rows = await db.execute(sql`
     SELECT
-      o.id, o.order_number AS "orderNumber", o.company_name AS "companyName",
+      o.id, ${orderReferenceSql("o", "c")} AS "orderNumber", o.company_name AS "companyName",
       o.customer_id AS "customerId", c.name AS "customerName",
       o.total_amount AS "totalAmount", o.payment_status AS "paymentStatus",
       p.received,

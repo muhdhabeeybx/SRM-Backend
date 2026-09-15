@@ -1,5 +1,6 @@
 const { sql } = require("drizzle-orm");
 const { db } = require("../config/db");
+const { orderReferenceSql } = require("../lib/orderReferenceSql");
 
 /**
  * The gate's own queue: every truck it is waiting on, not one order at a time.
@@ -123,7 +124,7 @@ const list = async (stage, opts = {}) => {
            t.security_entered_at AS "enteredAt",
            t.loaded_at           AS "loadedAt",
            o.id                  AS "orderId",
-           o.order_number        AS "orderNumber",
+           ${orderReferenceSql("o", "c")} AS "orderNumber",
            o.status              AS "orderStatus",
            c.name                AS "customerName",
            d.id                  AS "depotId",

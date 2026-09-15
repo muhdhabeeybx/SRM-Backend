@@ -3,6 +3,7 @@ const { db } = require("../config/db");
 const { pfis, depots, products, staff } = require("../db/schema");
 const { lpgStations } = require("../db/schema/lpgStation");
 const { scopeCondition } = require("../lib/scopeFilter");
+const { orderReferenceSql } = require("../lib/orderReferenceSql");
 
 /**
  * A batch's location, resolved rather than trusted.
@@ -394,7 +395,7 @@ const outstandingWork = async (pfiId) => {
   const id = Number(pfiId);
 
   const orderRows = rowsOf(await db.execute(sql`
-    SELECT o.id, o.order_number AS "orderNumber", o.status, o.quantity,
+    SELECT o.id, ${orderReferenceSql("o", "c")} AS "orderNumber", o.status, o.quantity,
            c.name AS "customerName",
            COALESCE((SELECT SUM(t.quantity) FROM order_trucks t WHERE t.order_id = o.id), 0)::int AS ticketed
       FROM orders o
@@ -411,7 +412,7 @@ const outstandingWork = async (pfiId) => {
 
   const truckRows = rowsOf(await db.execute(sql`
     SELECT t.id, t.truck_number AS "truckNumber", t.status, t.quantity,
-           o.order_number AS "orderNumber"
+           ${orderReferenceSql("o", null)} AS "orderNumber"
       FROM order_trucks t
       JOIN orders o ON o.id = t.order_id
      WHERE o.pfi_id = ${id}

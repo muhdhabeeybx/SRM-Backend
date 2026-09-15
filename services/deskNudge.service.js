@@ -1,6 +1,7 @@
 const { sql, and, eq, arrayOverlaps } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { staff } = require("../db/schema");
+const { orderReferenceSql } = require("../lib/orderReferenceSql");
 const { notify } = require("../notifications");
 const { sendSMSWithFallback } = require("./sms.service");
 
@@ -57,7 +58,7 @@ const LIVE_PFI = sql`EXISTS (
  */
 const unticketedOrders = async (olderThanHours) => {
   const rows = await db.execute(sql`
-    SELECT o.id, o.order_number AS "orderNumber", o.quantity, o.released_at AS "releasedAt",
+    SELECT o.id, ${orderReferenceSql("o", "c")} AS "orderNumber", o.quantity, o.released_at AS "releasedAt",
            c.name AS "customerName", d.name AS "depotName",
            EXTRACT(EPOCH FROM (now() - o.released_at)) / 3600 AS "hoursWaiting"
       FROM orders o
@@ -75,7 +76,7 @@ const unticketedOrders = async (olderThanHours) => {
 /** Trucks ticketed but never admitted to the yard. */
 const trucksAwaitingEntry = async (olderThanHours) => {
   const rows = await db.execute(sql`
-    SELECT t.id, t.truck_number AS "truckNumber", o.order_number AS "orderNumber",
+    SELECT t.id, t.truck_number AS "truckNumber", ${orderReferenceSql("o", null)} AS "orderNumber",
            d.name AS "depotName",
            EXTRACT(EPOCH FROM (now() - t.created_at)) / 3600 AS "hoursWaiting"
       FROM order_trucks t
@@ -93,7 +94,7 @@ const trucksAwaitingEntry = async (olderThanHours) => {
 /** Trucks on the yard that never gated out. */
 const trucksOnYard = async (olderThanHours) => {
   const rows = await db.execute(sql`
-    SELECT t.id, t.truck_number AS "truckNumber", o.order_number AS "orderNumber",
+    SELECT t.id, t.truck_number AS "truckNumber", ${orderReferenceSql("o", null)} AS "orderNumber",
            d.name AS "depotName",
            EXTRACT(EPOCH FROM (now() - COALESCE(t.security_entered_at, t.created_at))) / 3600 AS "hoursWaiting"
       FROM order_trucks t

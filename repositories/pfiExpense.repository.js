@@ -1,4 +1,5 @@
 const { client } = require("../db");
+const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { OPEN_STATES } = require("../lib/expenseChain");
 
 /**
@@ -734,7 +735,7 @@ const recordMovement = async (
 
 const listMovements = async (pfiId) => {
   return client`
-    SELECT m.*, o.order_number, o.status AS order_status,
+    SELECT m.*, ${orderReferenceClient(client, 'o', 'c')} AS order_number, o.status AS order_status,
            COALESCE(NULLIF(TRIM(c.company_name), ''), c.name) AS customer_name
     FROM pfi_movements m
     LEFT JOIN orders o ON o.id = m.order_id
@@ -760,7 +761,7 @@ const listMovements = async (pfiId) => {
 const listOrdersForPfi = async (pfiId) => {
   return client`
     SELECT o.id,
-           o.order_number,
+           ${orderReferenceClient(client, 'o', 'c')} AS order_number,
            o.status::text AS order_status,
            o.quantity,
            o.total_amount,

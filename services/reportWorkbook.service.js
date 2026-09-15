@@ -1,5 +1,6 @@
 const ExcelJS = require("exceljs");
 const { client } = require("../db");
+const { orderReferenceClient } = require("../lib/orderReferenceSql");
 
 /**
  * The daily report workbook — the Node half of Django's `orders_report_*.xlsx`.
@@ -87,10 +88,11 @@ const addSheet = (wb, name, columns, rows, emptyMessage) => {
 };
 
 /** Orders created on `date`, with the customer and product resolved. */
-// `reference` is derived at the service layer, not stored — order_number is the
-// column that actually exists and is what the reference is built from.
+// The reference is derived, never stored: orders.order_number holds an opaque
+// ORD- value for 511 orders, and a workbook quoting one names an order nobody
+// can look up. See lib/orderReferenceSql.
 const ordersFor = async ({ start, end }) => client`
-  SELECT o.order_number, o.status, o.payment_status,
+  SELECT ${orderReferenceClient(client, 'o', 'c')} AS order_number, o.status, o.payment_status,
          c.name AS customer, c.company_name,
          p.name AS product, o.quantity, o.total_amount,
          d.name AS depot, o.created_at

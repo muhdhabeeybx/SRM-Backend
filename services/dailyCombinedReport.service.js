@@ -1,4 +1,5 @@
 const { client } = require("../db");
+const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { generateOrderReference } = require("../utils/helpers");
 
 /**
@@ -221,7 +222,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         FROM daily_reports WHERE report_date = ${reportDateStr}
       `,
       client`
-        SELECT o.id, o.order_number, o.company_name, o.pfi_id, o.depot_id,
+        SELECT o.id, ${orderReferenceClient(client, 'o', 'c')} AS order_number, o.company_name, o.pfi_id, o.depot_id,
                o.quantity, o.price, o.total_amount, o.status, o.payment_status,
                c.name AS customer_name, pr.name AS product_name
         FROM orders o

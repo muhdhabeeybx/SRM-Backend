@@ -1,6 +1,7 @@
 const { sql, and, eq, arrayOverlaps, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { staff, depotStaff, pfiStaff } = require("../db/schema");
+const { orderReferenceSql } = require("../lib/orderReferenceSql");
 
 /**
  * Not "10 tickets are waiting" — "Usman Ibrahim has these ten to generate".
@@ -81,7 +82,7 @@ const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
  */
 const unticketedOrders = () => sql`
   SELECT o.id,
-         o.order_number  AS "ref",
+         ${orderReferenceSql("o", "c")} AS "ref",
          o.depot_id      AS "depotId",
          o.pfi_id        AS "pfiId",
          d.name          AS "depotName",
@@ -104,7 +105,7 @@ const unticketedOrders = () => sql`
 const trucksAwaitingEntry = () => sql`
   SELECT t.id,
          t.truck_number  AS "truckRef",
-         o.order_number  AS "ref",
+         ${orderReferenceSql("o", null)} AS "ref",
          o.depot_id      AS "depotId",
          o.pfi_id        AS "pfiId",
          d.name          AS "depotName",
@@ -124,7 +125,7 @@ const trucksAwaitingEntry = () => sql`
 const trucksOnYard = () => sql`
   SELECT t.id,
          t.truck_number  AS "truckRef",
-         o.order_number  AS "ref",
+         ${orderReferenceSql("o", null)} AS "ref",
          o.depot_id      AS "depotId",
          o.pfi_id        AS "pfiId",
          d.name          AS "depotName",
@@ -149,7 +150,7 @@ const trucksOnYard = () => sql`
  * them.
  */
 const unticketedWithoutBatch = () => sql`
-  SELECT o.id, o.order_number AS "ref", o.depot_id AS "depotId", NULL::int AS "pfiId",
+  SELECT o.id, ${orderReferenceSql("o", "c")} AS "ref", o.depot_id AS "depotId", NULL::int AS "pfiId",
          d.name AS "depotName", NULL::text AS "pfiNumber", c.name AS "customerName",
          o.quantity AS "quantity",
          EXTRACT(EPOCH FROM (now() - COALESCE(o.released_at, o.payment_confirmed_at, o.created_at))) / 3600 AS "hoursWaiting"
@@ -164,7 +165,7 @@ const unticketedWithoutBatch = () => sql`
 `;
 
 const gateTrucksWithoutBatch = (statuses, orderStatusClause) => sql`
-  SELECT t.id, t.truck_number AS "truckRef", o.order_number AS "ref",
+  SELECT t.id, t.truck_number AS "truckRef", ${orderReferenceSql("o", null)} AS "ref",
          o.depot_id AS "depotId", NULL::int AS "pfiId",
          d.name AS "depotName", NULL::text AS "pfiNumber",
          EXTRACT(EPOCH FROM (now() - COALESCE(t.security_entered_at, t.created_at))) / 3600 AS "hoursWaiting"
