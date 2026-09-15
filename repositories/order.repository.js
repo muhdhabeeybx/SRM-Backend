@@ -1465,14 +1465,39 @@ const findPayableOrders = async (scopeUser) => {
       quantity: orders.quantity,
       totalAmount: orders.totalAmount,
       deliveryType: orders.deliveryType,
+      deliveryAddress: orders.deliveryAddress,
+      state: orders.state,
       createdAt: orders.createdAt,
       depotName: depots.name,
       productName: products.name,
+      productUnit: products.unit,
+      price: orders.price,
+      /**
+       * The fields the payable desk filters and totals by.
+       *
+       * They were absent because the page was not using this endpoint at all —
+       * it asked for status='Pending' through the generic order list, which
+       * silently hid every PART-PAID order, since a part-paid order has always
+       * been released already. Eleven of them, ₦1.84bn, with product loading
+       * against unpaid balances, and the page's own "Part paid" card read 0.
+       *
+       * amountPaid comes from the payment rows rather than a column: it is
+       * what the desk is deciding about, and a stale denormalised copy on the
+       * order is the one number here that must not be wrong.
+       */
+      pfiNumber: pfis.pfiNumber,
+      customerPhone: customers.phone,
+      amountPaid: sql`(
+        SELECT COALESCE(SUM(op.amount), 0)
+          FROM order_payments op
+         WHERE op.order_id = ${orders.id}
+      )`,
     })
     .from(orders)
     .innerJoin(customers, eq(orders.customerId, customers.id))
     .leftJoin(depots, eq(orders.depotId, depots.id))
     .leftJoin(products, eq(orders.productId, products.id))
+    .leftJoin(pfis, eq(orders.pfiId, pfis.id))
     .where(and(...conditions))
     .orderBy(asc(orders.createdAt));
   return rows.map(formatOrderRow);
