@@ -33,11 +33,41 @@ const { staff, depotStaff, pfiStaff } = require("../db/schema");
  * nudges, in one shared fragment, so the three cannot drift.
  */
 
-/** Batches nobody is working any more, and batches with no desk to wait for. */
-const LIVE_PFI = sql`NOT EXISTS (
+/**
+ * The work must be on a LIVE batch.
+ *
+ * Stated positively, and the difference is not academic. The first version
+ * asked for the absence of a dead batch — NOT EXISTS — which is satisfied by an
+ * order carrying no pfi_id at all, because nothing matches and so nothing is
+ * excluded. 31 unticketed orders and 23 gate-pending trucks rode through on
+ * exactly that, every one between 120 and 201 days old, and appeared on
+ * somebody's dashboard as their pending work with 200d against them.
+ *
+ * A live batch is one that is not finished and is not a gantry or delivery
+ * lifting — those have no loading desk and no gate at all, so their orders
+ * would wait on a desk that does not exist.
+ */
+const ON_LIVE_BATCH = sql`EXISTS (
   SELECT 1 FROM pfis p
-  WHERE p.id = o.pfi_id AND (p.status = 'finished' OR p.pfi_type IN ('gantry', 'delivery'))
+   WHERE p.id = o.pfi_id
+     AND p.status <> 'finished'
+     AND p.pfi_type NOT IN ('gantry', 'delivery')
 )`;
+
+/**
+ * Orders never attached to a batch.
+ *
+ * Reported, not queued. An order with no batch cannot be ticketed — a loading
+ * ticket draws against stock and there is no stock to draw against — so
+ * showing it as somebody's pending task asks for work that cannot be done.
+ * Every one of these is over four months old, which is what that impossibility
+ * looks like after the fact.
+ *
+ * They are still surfaced, in their own bucket, because 31 orders that took
+ * money and went nowhere is a thing somebody should know about. It is a records
+ * problem for an admin, not a queue for a desk.
+ */
+const HAS_NO_BATCH = sql`o.pfi_id IS NULL`;
 
 const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
 
@@ -65,7 +95,7 @@ const unticketedOrders = () => sql`
     LEFT JOIN pfis p      ON p.id = o.pfi_id
    WHERE o.status IN ('Paid', 'Released')
      AND o.payment_status IN ('Paid', 'Part Paid')
-     AND ${LIVE_PFI}
+     AND ${ON_LIVE_BATCH}
      AND NOT EXISTS (SELECT 1 FROM order_trucks t WHERE t.order_id = o.id)
    ORDER BY COALESCE(o.released_at, o.payment_confirmed_at, o.created_at) ASC
 `;
@@ -86,7 +116,7 @@ const trucksAwaitingEntry = () => sql`
     LEFT JOIN pfis p   ON p.id = o.pfi_id
    WHERE t.status = 'pending'
      AND o.status IN ('Released', 'Loading')
-     AND ${LIVE_PFI}
+     AND ${ON_LIVE_BATCH}
    ORDER BY t.created_at ASC
 `;
 
@@ -106,7 +136,44 @@ const trucksOnYard = () => sql`
     LEFT JOIN pfis p   ON p.id = o.pfi_id
    WHERE t.status IN ('gated_in', 'loaded')
      AND o.status NOT IN ('Cancelled', 'Expired')
-     AND ${LIVE_PFI}
+     AND ${ON_LIVE_BATCH}
+   ORDER BY COALESCE(t.security_entered_at, t.created_at) ASC
+`;
+
+/**
+ * The same three queues, restricted to orders with no batch at all.
+ *
+ * Deliberately separate queries rather than a flag on the main ones: these are
+ * not a subset of anybody's work, they are a different kind of fact, and
+ * keeping them apart means the per-person lists cannot accidentally include
+ * them.
+ */
+const unticketedWithoutBatch = () => sql`
+  SELECT o.id, o.order_number AS "ref", o.depot_id AS "depotId", NULL::int AS "pfiId",
+         d.name AS "depotName", NULL::text AS "pfiNumber", c.name AS "customerName",
+         o.quantity AS "quantity",
+         EXTRACT(EPOCH FROM (now() - COALESCE(o.released_at, o.payment_confirmed_at, o.created_at))) / 3600 AS "hoursWaiting"
+    FROM orders o
+    LEFT JOIN customers c ON c.id = o.customer_id
+    LEFT JOIN depots d    ON d.id = o.depot_id
+   WHERE o.status IN ('Paid', 'Released')
+     AND o.payment_status IN ('Paid', 'Part Paid')
+     AND ${HAS_NO_BATCH}
+     AND NOT EXISTS (SELECT 1 FROM order_trucks t WHERE t.order_id = o.id)
+   ORDER BY COALESCE(o.released_at, o.payment_confirmed_at, o.created_at) ASC
+`;
+
+const gateTrucksWithoutBatch = (statuses, orderStatusClause) => sql`
+  SELECT t.id, t.truck_number AS "truckRef", o.order_number AS "ref",
+         o.depot_id AS "depotId", NULL::int AS "pfiId",
+         d.name AS "depotName", NULL::text AS "pfiNumber",
+         EXTRACT(EPOCH FROM (now() - COALESCE(t.security_entered_at, t.created_at))) / 3600 AS "hoursWaiting"
+    FROM order_trucks t
+    JOIN orders o      ON o.id = t.order_id
+    LEFT JOIN depots d ON d.id = o.depot_id
+   WHERE t.status IN ${statuses}
+     AND ${orderStatusClause}
+     AND ${HAS_NO_BATCH}
    ORDER BY COALESCE(t.security_entered_at, t.created_at) ASC
 `;
 
@@ -124,6 +191,7 @@ const DESKS = [
     verb: "generate tickets for",
     unit: "order",
     fetch: unticketedOrders,
+    fetchNoBatch: unticketedWithoutBatch,
     describe: (r) => r.ref || `order ${r.id}`,
   },
   {
@@ -133,6 +201,10 @@ const DESKS = [
     verb: "gate in",
     unit: "truck",
     fetch: trucksAwaitingEntry,
+    fetchNoBatch: () => gateTrucksWithoutBatch(
+      sql`('pending')`,
+      sql`o.status IN ('Released', 'Loading')`,
+    ),
     describe: (r) => `${r.truckRef || "a truck"} on ${r.ref || "—"}`,
   },
   {
@@ -142,6 +214,10 @@ const DESKS = [
     verb: "gate out",
     unit: "truck",
     fetch: trucksOnYard,
+    fetchNoBatch: () => gateTrucksWithoutBatch(
+      sql`('gated_in', 'loaded')`,
+      sql`o.status NOT IN ('Cancelled', 'Expired')`,
+    ),
     describe: (r) => `${r.truckRef || "a truck"} on ${r.ref || "—"}`,
   },
 ];
@@ -239,9 +315,14 @@ const owns = (person, item) => {
  * and both people genuinely need to see it.
  */
 const forDesk = async (desk) => {
-  const [items, people] = await Promise.all([
+  const [items, people, batchless] = await Promise.all([
     db.execute(desk.fetch()).then(rowsOf),
     deskStaff(desk),
+    // Best-effort: these are a footnote about the records, and a failure to
+    // count them must not take the desk's real work down with it.
+    desk.fetchNoBatch
+      ? db.execute(desk.fetchNoBatch()).then(rowsOf).catch(() => [])
+      : Promise.resolve([]),
   ]);
 
   const byPerson = new Map();
@@ -316,6 +397,20 @@ const forDesk = async (desk) => {
       count: orphans.length,
       locations: byLocation(orphans),
       items: orphans.map(shape),
+    },
+    /**
+     * Orders and trucks never attached to a batch.
+     *
+     * Outside every count above, and outside everybody's task list. These
+     * cannot be worked — a loading ticket draws against stock and there is no
+     * batch to draw from — so putting them on a person's sheet would ask for
+     * something impossible and make them look behind. They are shown because 31
+     * orders that took money and went nowhere is worth somebody knowing.
+     */
+    noBatch: {
+      count: batchless.length,
+      locations: byLocation(batchless),
+      items: batchless.map(shape),
     },
     /** People on the desk who own nothing, so an admin can see spare capacity. */
     idle: people

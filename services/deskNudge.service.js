@@ -27,10 +27,26 @@ const { sendSMSWithFallback } = require("./sms.service");
  * nudge is wrong.
  */
 
-/** Batches nobody is working any more. */
-const LIVE_PFI = sql`NOT EXISTS (
+/**
+ * The work must be on a LIVE batch — stated positively, and that matters.
+ *
+ * This asked for the absence of a dead batch, which NOT EXISTS grants to any
+ * order carrying no pfi_id at all: nothing matches, so nothing is excluded. 31
+ * unticketed orders and 20 gate-pending trucks came through that way, all of
+ * them between four and seven months old, and they were about to be texted to
+ * a gate officer as today's backlog.
+ *
+ * Live means not finished, and not a gantry or delivery lifting — those have no
+ * loading desk and no gate, so nudging anybody about them teaches them the
+ * nudge is wrong. Orders with no batch are not nudged at all: they cannot be
+ * ticketed, and the dashboard reports them as a records problem instead (see
+ * deskAssignments' noBatch bucket).
+ */
+const LIVE_PFI = sql`EXISTS (
   SELECT 1 FROM pfis p
-  WHERE p.id = o.pfi_id AND (p.status = 'finished' OR p.pfi_type IN ('gantry', 'delivery'))
+   WHERE p.id = o.pfi_id
+     AND p.status <> 'finished'
+     AND p.pfi_type NOT IN ('gantry', 'delivery')
 )`;
 
 /**

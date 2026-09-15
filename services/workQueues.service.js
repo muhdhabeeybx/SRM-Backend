@@ -80,16 +80,29 @@ const notOnClosedPfi = (pfiColumn) => sql`NOT EXISTS (
 )`;
 
 /**
- * A gantry lifting and a delivery batch have no loading desk and no gate.
+ * Work the loading desk and the gates can actually do: it needs a LIVE batch.
  *
- * Nobody at this depot issues their tickets or admits their trucks, so an
- * order of theirs sitting in those queues is work that will never be done.
- * They complete on payment now (see completeDesklessOrder), which keeps new
- * ones out — this keeps the ones raised before that change out too, so the
- * badge is right today rather than after a backfill.
+ * Stated as "there is a live batch" rather than "there is no dead batch", and
+ * the difference is not academic. NOT EXISTS is satisfied by an order with no
+ * pfi_id at all — nothing matches, so nothing is excluded — and 31 unticketed
+ * orders and 23 gate-pending trucks were riding through on exactly that, every
+ * one of them between 120 and 201 days old. They showed as this week's backlog
+ * on somebody's dashboard, with 200d against them.
+ *
+ * An order with no batch cannot be ticketed: a loading ticket draws against
+ * stock, and there is no stock to draw against. So the queues ask for a live
+ * batch, and orders without one are reported as a data problem rather than
+ * dressed up as a queue — see deskAssignments' noBatch bucket.
+ *
+ * Payment confirmation deliberately does NOT use this. Money can be matched
+ * against an order whether or not it was ever attached to a batch, and hiding
+ * an unpaid order because of a missing link would lose real money.
  */
-const notDeskless = (pfiColumn) => sql`NOT EXISTS (
-  SELECT 1 FROM pfis p WHERE p.id = ${pfiColumn} AND p.pfi_type IN ('gantry', 'delivery')
+const onLiveBatch = (pfiColumn) => sql`EXISTS (
+  SELECT 1 FROM pfis p
+   WHERE p.id = ${pfiColumn}
+     AND p.status <> 'finished'
+     AND p.pfi_type NOT IN ('gantry', 'delivery')
 )`;
 
 /** Orders that have taken money and are on their way — not finished, not dead. */
@@ -157,8 +170,7 @@ const QUEUES = [
         .where(
           where(
             inArray(orders.status, AWAITING_TICKETING),
-            notOnClosedPfi(orders.pfiId),
-            notDeskless(orders.pfiId),
+            onLiveBatch(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
@@ -184,8 +196,7 @@ const QUEUES = [
           where(
             eq(orderTrucks.status, "pending"),
             inArray(orders.status, GATE_LIVE_STATUSES),
-            notOnClosedPfi(orders.pfiId),
-            notDeskless(orders.pfiId),
+            onLiveBatch(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
@@ -208,8 +219,7 @@ const QUEUES = [
           where(
             inArray(orderTrucks.status, ["gated_in", "loaded"]),
             notInArray(orders.status, ORDER_DEAD_STATUSES),
-            notOnClosedPfi(orders.pfiId),
-            notDeskless(orders.pfiId),
+            onLiveBatch(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),
         ),
