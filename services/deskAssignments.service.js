@@ -2,6 +2,7 @@ const { sql, and, eq, arrayOverlaps, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { staff, depotStaff, pfiStaff } = require("../db/schema");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
+const { FALLBACK_TRUCK_LITRES } = require("./truckProgress.service");
 
 /**
  * Not "10 tickets are waiting" — "Usman Ibrahim has these ten to generate".
@@ -89,11 +90,33 @@ const unticketedOrders = () => sql`
          p.pfi_number    AS "pfiNumber",
          c.name          AS "customerName",
          o.quantity      AS "quantity",
+         o.expected_trucks AS "expectedTrucks",
+         /*
+          * How many trucks this order still needs ticketed.
+          *
+          * The declared count where the order carries one; otherwise litres
+          * over the median truck that depot actually loads. The desk asked for
+          * this queue in trucks, and an order awaiting tickets has none by
+          * definition, so the estimate is the only thing that can answer at
+          * all — but which of the two produced the figure travels with it, and
+          * nothing sums them together silently. See truckProgress.service.
+          */
+         GREATEST(1, COALESCE(
+           o.expected_trucks,
+           CEIL(o.quantity::numeric / COALESCE(NULLIF(m.median, 0), ${FALLBACK_TRUCK_LITRES}))::int
+         )) AS "trucksNeeded",
+         (o.expected_trucks IS NULL) AS "trucksEstimated",
          EXTRACT(EPOCH FROM (now() - COALESCE(o.released_at, o.payment_confirmed_at, o.created_at))) / 3600 AS "hoursWaiting"
     FROM orders o
     LEFT JOIN customers c ON c.id = o.customer_id
     LEFT JOIN depots d    ON d.id = o.depot_id
     LEFT JOIN pfis p      ON p.id = o.pfi_id
+    LEFT JOIN (
+      SELECT o2.depot_id, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY t2.quantity) AS median
+        FROM order_trucks t2 JOIN orders o2 ON o2.id = t2.order_id
+       WHERE t2.quantity > 0
+       GROUP BY o2.depot_id
+    ) m ON m.depot_id = o.depot_id
    WHERE o.status IN ('Paid', 'Released')
      AND o.payment_status IN ('Paid', 'Part Paid')
      AND ${ON_LIVE_BATCH}
@@ -350,6 +373,10 @@ const forDesk = async (desk) => {
     pfiNumber: item.pfiNumber || null,
     customerName: item.customerName || null,
     quantity: item.quantity != null ? Number(item.quantity) : null,
+    /** Trucks this row represents — 1 for a truck row, n for an order. */
+    trucksNeeded: item.trucksNeeded != null ? Number(item.trucksNeeded) : 1,
+    /** Whether that figure was declared or worked out from litres. */
+    trucksEstimated: Boolean(item.trucksEstimated),
     hoursWaiting: Math.floor(Number(item.hoursWaiting) || 0),
   });
 
@@ -365,6 +392,26 @@ const forDesk = async (desk) => {
       .sort((a, b) => b.count - a.count);
   };
 
+  /**
+   * The same pile counted in trucks.
+   *
+   * The desk works trucks, not orders: one order might need six and have two.
+   * Counted here rather than left to the client so the panel, the export and
+   * any future caller cannot each arrive at a different total — and
+   * `trucksEstimated` says how many of them were worked out from litres rather
+   * than declared, so nothing presents a guess as a count.
+   */
+  const trucksOf = (list) => {
+    let trucks = 0;
+    let estimated = 0;
+    for (const i of list) {
+      const n = Number(i.trucksNeeded) || 1;
+      trucks += n;
+      if (i.trucksEstimated) estimated += n;
+    }
+    return { trucks, trucksEstimated: estimated };
+  };
+
   const assignments = [...byPerson.values()]
     .map(({ person, items: own }) => ({
       staffId: person.id,
@@ -372,6 +419,7 @@ const forDesk = async (desk) => {
       phone: person.phone,
       roles: person.roles,
       count: own.length,
+      ...trucksOf(own.map(shape)),
       /** "needs to generate tickets for" — the panel prints this verbatim. */
       sentence: `${person.name} needs to ${desk.verb}`,
       locations: byLocation(own),
@@ -388,6 +436,8 @@ const forDesk = async (desk) => {
     roles: desk.roles,
     total: items.length,
     assigned: items.length - orphans.length,
+    /** The whole desk in trucks, with the guessed part named. */
+    ...trucksOf(items.map(shape)),
     assignments,
     /**
      * Work with nobody on the desk scoped to it. Named plainly, because this

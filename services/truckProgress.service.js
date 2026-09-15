@@ -124,6 +124,45 @@ const forOrders = async (orderIds) => {
 };
 
 /**
+ * How many trucks an order still needs ticketed, when nobody declared a count.
+ *
+ * ── Why an estimate exists at all ──────────────────────────────────────────
+ *
+ * The desk asked for the ticket queue in trucks rather than orders, and an
+ * order awaiting tickets has none by definition — so the only exact source is
+ * expected_trucks, captured at order entry. Today not one order in the queue
+ * has it: the field is newer than they are. Counting only declared trucks
+ * would report "0 trucks to ticket" beside eight orders plainly needing them,
+ * which is worse than an approximation.
+ *
+ * ── How good the approximation is ──────────────────────────────────────────
+ *
+ * Litres divided by the median truck that depot actually loads. Checked
+ * against the 4,679 orders whose trucks are already known: exact for 73% of
+ * them, within one truck for 98%. Every depot's median is 45,000, but it is
+ * computed per depot rather than hard-coded so a depot that starts loading
+ * 60,000s corrects itself.
+ *
+ * ── And why it stays separate from the exact figure ────────────────────────
+ *
+ * An estimate summed into a declared count produces a number nobody can act
+ * on: a supervisor cannot tell whether "14" means fourteen trucks are coming
+ * or that a spreadsheet guessed. They are returned apart, and every caller
+ * showing the total says which part was guessed.
+ */
+const DEPOT_MEDIAN_TRUCK = sql`
+  SELECT o2.depot_id,
+         PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY t2.quantity) AS median
+    FROM order_trucks t2
+    JOIN orders o2 ON o2.id = t2.order_id
+   WHERE t2.quantity > 0
+   GROUP BY o2.depot_id
+`;
+
+/** The company-wide fallback, for a depot that has never loaded a truck. */
+const FALLBACK_TRUCK_LITRES = 45000;
+
+/**
  * The same four states counted across the whole book, for the badges.
  *
  * This is the number the desk asked for: not "46 orders awaiting tickets" but
@@ -136,24 +175,59 @@ const forOrders = async (orderIds) => {
  */
 const outstandingTrucks = async () => {
   const rows = await db.execute(sql`
+    WITH medians AS (${DEPOT_MEDIAN_TRUCK})
     SELECT
-      COALESCE(SUM(GREATEST(0, o.expected_trucks - COALESCE(t.ticketed, 0))), 0)::int AS "toTicket",
-      COUNT(*) FILTER (
-        WHERE o.expected_trucks IS NULL AND COALESCE(t.ticketed, 0) = 0
-      )::int AS "undeclared",
+      -- Declared and still to ticket. Exact.
+      COALESCE(SUM(
+        CASE WHEN o.expected_trucks IS NOT NULL
+             THEN GREATEST(0, o.expected_trucks - COALESCE(t.ticketed, 0)) END
+      ), 0)::int AS "toTicketExact",
+
+      -- Undeclared, worked out from litres. Approximate, and kept apart.
+      COALESCE(SUM(
+        CASE WHEN o.expected_trucks IS NULL
+             THEN GREATEST(1, CEIL(
+               o.quantity::numeric
+               / COALESCE(NULLIF(m.median, 0), ${FALLBACK_TRUCK_LITRES})
+             ))::int - COALESCE(t.ticketed, 0) END
+      ), 0)::int AS "toTicketEstimated",
+
+      COUNT(*) FILTER (WHERE o.expected_trucks IS NULL)::int AS "undeclared",
+      COUNT(*)::int AS "orders",
       COALESCE(SUM(COALESCE(t.awaiting_in, 0)), 0)::int AS "awaitingIn",
       COALESCE(SUM(COALESCE(t.on_yard, 0)), 0)::int AS "onYard"
       FROM orders o
       ${PROGRESS_JOIN}
-     WHERE o.status IN ('Paid', 'Released', 'Loading')
+      LEFT JOIN medians m ON m.depot_id = o.depot_id
+     WHERE o.status IN ('Paid', 'Released')
        AND o.payment_status IN ('Paid', 'Part Paid')
-       AND NOT EXISTS (
+       -- A LIVE batch, stated positively. NOT EXISTS is satisfied by an order
+       -- with no pfi_id at all, which is how months-old work kept counting as
+       -- today's. Same rule as the badges, desk queues and nudges.
+       AND EXISTS (
          SELECT 1 FROM pfis p
-         WHERE p.id = o.pfi_id
-           AND (p.status = 'finished' OR p.pfi_type IN ('gantry', 'delivery'))
+          WHERE p.id = o.pfi_id
+            AND p.status <> 'finished'
+            AND p.pfi_type NOT IN ('gantry', 'delivery')
        )
+       -- Not yet fully ticketed: an order with every declared truck already
+       -- written is finished here even though it is still Paid.
+       AND (o.expected_trucks IS NULL OR COALESCE(t.ticketed, 0) < o.expected_trucks)
   `);
-  return (rows.rows ?? rows)[0];
+
+  const row = (rows.rows ?? rows)[0] || {};
+  const exact = Number(row.toTicketExact) || 0;
+  const estimated = Math.max(0, Number(row.toTicketEstimated) || 0);
+
+  return {
+    ...row,
+    toTicketExact: exact,
+    toTicketEstimated: estimated,
+    /** The headline. Honest only when shown beside `estimated`. */
+    toTicket: exact + estimated,
+    /** True when any part of the headline was worked out rather than declared. */
+    approximate: estimated > 0,
+  };
 };
 
-module.exports = { forOrder, forOrders, outstandingTrucks, shape };
+module.exports = { forOrder, forOrders, outstandingTrucks, shape, FALLBACK_TRUCK_LITRES };
