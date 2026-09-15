@@ -15,7 +15,7 @@ const getGateQueue = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: "Stage must be entry or exit" });
   }
 
-  const { from, to, pfiId, depotId, search, page, limit } = req.query;
+  const { from, to, pfiId, depotId, search, page, limit, includeClosed } = req.query;
 
   /**
    * Scope from the session, never from the query.
@@ -38,6 +38,10 @@ const getGateQueue = asyncHandler(async (req, res) => {
     search: search || null,
     page: page || 1,
     limit: limit || 100,
+    // Off by default: a closed batch is not work anybody is behind on. On, it
+    // shows the tickets the live queue leaves out, so a truck that turns up
+    // anyway can still be recorded rather than gated in off the books.
+    includeClosed: includeClosed === "true" || includeClosed === "1",
     scope,
   });
 

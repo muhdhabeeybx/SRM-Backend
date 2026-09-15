@@ -33,7 +33,21 @@ const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
 const STAGES = {
   entry: {
     truckStatuses: sql`('pending')`,
-    orderStatuses: sql`o.status IN ('Released', 'Loading')`,
+    /**
+     * Dead orders only — NOT "the order must be Released or Loading".
+     *
+     * A ticket at `pending` means a named truck is expected at the gate, and
+     * that is a fact about the TRUCK. The order's status is about the order,
+     * and it moves for reasons that have nothing to do with this truck: an
+     * order flips to Completed when its last truck gates OUT, so one with
+     * twenty-three trucks away and forty-four never admitted is Completed
+     * while forty-four are still expected. Eighty-one such trucks existed on
+     * live batches when this was found, every one of them invisible to the
+     * gate.
+     *
+     * The exit stage below already had it right. This now matches it.
+     */
+    orderStatuses: sql`o.status NOT IN ('Cancelled', 'Expired')`,
     /** Waiting since the ticket was written — that is when the gate starts expecting it. */
     since: sql`t.created_at`,
   },
@@ -51,18 +65,43 @@ const STAGES = {
  * Built once and handed to both so a card can never disagree with the table
  * beneath it — the commonest way a dashboard starts lying.
  */
-const buildWhere = (stage, { from, to, pfiId, depotId, search, scope }) => {
+const buildWhere = (stage, { from, to, pfiId, depotId, search, scope, includeClosed }) => {
   const s = STAGES[stage];
   const parts = [
     sql`t.status IN ${s.truckStatuses}`,
     s.orderStatuses,
-    // A live batch: not finished, and not a type with no gate at all.
-    sql`EXISTS (
-      SELECT 1 FROM pfis p
-       WHERE p.id = o.pfi_id
-         AND p.status <> 'finished'
-         AND p.pfi_type NOT IN ('gantry', 'delivery')
-    )`,
+    /**
+     * A live batch — not finished, and not a type with no gate at all.
+     *
+     * ── Why `includeClosed` exists ──────────────────────────────────────
+     *
+     * A ticket is a commitment: somebody wrote it, and the truck it names may
+     * still drive up to the gate. Closing the batch does not stop that, and a
+     * gate officer who cannot SEE the truck cannot record it either — which is
+     * worse than a cluttered queue, because the movement then happens with no
+     * record at all.
+     *
+     * So closed batches are out of the default queue and the counts (they are
+     * not work anybody is behind on) but reachable behind a toggle, with their
+     * number shown so nobody has to guess there is something there. Today all
+     * 132 of them are between 43 and 151 days old — plainly abandoned — which
+     * is exactly why they should not be in the officer's face, and exactly why
+     * hiding them outright would be the wrong instinct to bake in.
+     *
+     * Gantry and delivery batches stay excluded either way: they have no gate,
+     * so no truck is ever coming.
+     */
+    includeClosed
+      ? sql`NOT EXISTS (
+          SELECT 1 FROM pfis p
+           WHERE p.id = o.pfi_id AND p.pfi_type IN ('gantry', 'delivery')
+        )`
+      : sql`EXISTS (
+          SELECT 1 FROM pfis p
+           WHERE p.id = o.pfi_id
+             AND p.status <> 'finished'
+             AND p.pfi_type NOT IN ('gantry', 'delivery')
+        )`,
   ];
 
   if (from) parts.push(sql`${s.since} >= ${from}::date`);
@@ -201,7 +240,31 @@ const summary = async (stage, opts = {}) => {
      ORDER BY 2 DESC
   `));
 
+  /**
+   * How many the default queue is leaving out, counted even while excluding
+   * them — a toggle offering "show the rest" with no number beside it asks the
+   * officer to click it to find out whether it was worth clicking.
+   *
+   * Everything the live-batch test rejects, not only closed batches: an order
+   * with no pfi_id at all is excluded too, and to the person at the gate those
+   * are the same fact — a ticket exists and this queue is not showing it.
+   */
+  const [off = {}] = rowsOf(await db.execute(sql`
+    SELECT COUNT(*)::int AS n
+      FROM order_trucks t
+      JOIN orders o        ON o.id = t.order_id
+      LEFT JOIN customers c ON c.id = o.customer_id
+     WHERE ${buildWhere(stage, { ...opts, includeClosed: true })}
+       AND NOT EXISTS (
+         SELECT 1 FROM pfis p
+          WHERE p.id = o.pfi_id
+            AND p.status <> 'finished'
+            AND p.pfi_type NOT IN ('gantry', 'delivery')
+       )
+  `));
+
   return {
+    offLiveBatches: Number(off.n || 0),
     trucks: Number(row.trucks || 0),
     orders: Number(row.orders || 0),
     customers: Number(row.customers || 0),

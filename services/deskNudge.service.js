@@ -83,7 +83,7 @@ const trucksAwaitingEntry = async (olderThanHours) => {
       JOIN orders o ON o.id = t.order_id
       LEFT JOIN depots d ON d.id = o.depot_id
      WHERE t.status = 'pending'
-       AND o.status IN ('Released', 'Loading')
+       AND o.status NOT IN ('Cancelled', 'Expired')
        AND t.created_at < now() - (${olderThanHours} * interval '1 hour')
        AND ${LIVE_PFI}
      ORDER BY t.created_at ASC

@@ -109,8 +109,6 @@ const onLiveBatch = (pfiColumn) => sql`EXISTS (
 const AWAITING_TICKETING = ["Paid", "Released"];
 /** Order lifecycle states where a payment can still be confirmed. */
 const PAYABLE_STATUSES = ["Pending", "Paid", "Released", "Loading"];
-/** An order whose trucks the gate should still expect to see. */
-const GATE_LIVE_STATUSES = ["Released", "Loading"];
 /** An order that is over — its trucks are history, not a queue. */
 const ORDER_DEAD_STATUSES = ["Cancelled", "Expired"];
 
@@ -195,7 +193,11 @@ const QUEUES = [
         .where(
           where(
             eq(orderTrucks.status, "pending"),
-            inArray(orders.status, GATE_LIVE_STATUSES),
+            // Dead orders only. A ticket at 'pending' is a fact about the
+            // truck; the order's status moves for other reasons entirely —
+            // it completes when the LAST truck gates out, stranding every
+            // truck that never arrived. See gateQueue.service's entry stage.
+            notInArray(orders.status, ORDER_DEAD_STATUSES),
             onLiveBatch(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),

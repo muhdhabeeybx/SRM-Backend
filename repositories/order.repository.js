@@ -367,6 +367,19 @@ const findAll = async ({
         paymentStatus: orders.paymentStatus,
         status: orders.status,
         expiredAt: orders.expiredAt,
+        /**
+         * The lifecycle timestamps, which the list was not returning.
+         *
+         * The Loading Tickets page has a "Date Loaded" column reading
+         * `loadingStartedAt`, and the field was never in this select — so the
+         * column rendered a dash on every row of a page whose whole subject is
+         * loading, while 4,442 orders had the date recorded perfectly well.
+         * releasedAt and completedAt go in beside it: same omission, same
+         * reason somebody will reach for them next.
+         */
+        releasedAt: orders.releasedAt,
+        loadingStartedAt: orders.loadingStartedAt,
+        completedAt: orders.completedAt,
         createdAt: orders.createdAt,
         updatedAt: orders.updatedAt,
         customerName: customers.name,

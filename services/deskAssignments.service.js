@@ -139,7 +139,7 @@ const trucksAwaitingEntry = () => sql`
     LEFT JOIN depots d ON d.id = o.depot_id
     LEFT JOIN pfis p   ON p.id = o.pfi_id
    WHERE t.status = 'pending'
-     AND o.status IN ('Released', 'Loading')
+     AND o.status NOT IN ('Cancelled', 'Expired')
      AND ${ON_LIVE_BATCH}
    ORDER BY t.created_at ASC
 `;
