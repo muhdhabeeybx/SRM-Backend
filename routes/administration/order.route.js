@@ -4,6 +4,7 @@ const verifyStaff = require("../../middleware/verifyStaff");
 const { authenticateStaff, requireRole } = verifyStaff;
 const validate = require("../../middleware/validate");
 const orderSchemas = require("../../schemas/order.schema");
+const { getGateQueue } = require("../../controllers/administration/gateQueue.controller");
 const {
   getOrders,
   getOrderById,
@@ -46,6 +47,9 @@ router.delete(
 router.get("/payable", verifyStaff, getPayableOrders);
 
 // Reads and creation stay behind the admin gate (verifyStaff).
+// The gate's own queue, before any "/:id" route can swallow the path.
+router.get("/gate-queue/:stage", verifyStaff, getGateQueue);
+
 router.get("/", verifyStaff, validate({ query: orderSchemas.listOrders }), getOrders);
 router.get("/:id", verifyStaff, validate({ params: orderSchemas.idParam }), getOrderById);
 router.post("/", verifyStaff, validate({ body: orderSchemas.createOrder }), createOrder);
