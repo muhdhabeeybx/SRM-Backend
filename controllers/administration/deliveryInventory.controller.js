@@ -1,6 +1,48 @@
 const asyncHandler = require("express-async-handler");
 const { deliveryInventoryRepo, pfiRepo, truckRepo } = require("../../repositories");
 
+/**
+ * Trip costs are stripped for anybody who cannot open Delivery Costing.
+ *
+ * Hiding a page is not restricting data. These rows are served to the Delivery
+ * Inventory page too, which everybody can open — so without this, what product
+ * costs the company and what each trip earns would be one devtools tab away
+ * from every driver and gate officer on the system, while the menu item was
+ * carefully hidden from them.
+ *
+ * The gate is the same per-person page override the dashboard reads, so the
+ * two cannot disagree: whoever can see the page sees the figures, and nobody
+ * else does. An explicit denial beats super admin here exactly as it does in
+ * the client's canAccessRoute — "only these people" has to mean these people.
+ */
+const COST_FIELDS = [
+  "agoLitres", "agoPrice", "agoValue",
+  "feedingAllowance", "totalExpenses", "costPerLitre",
+  "productPrice", "landingCost",
+  "margin", "marginValue",
+  "costed", "missing", "costedAt", "costedBy",
+];
+
+const COSTING_ROUTE = "/delivery-costing";
+
+const maySeeCosts = (user) => {
+  if (!user) return false;
+  const override = (user.pageOverrides || []).find((o) => o.routePath === COSTING_ROUTE);
+  if (override) return Boolean(override.allowed);
+  return (user.roles || []).includes("super_admin");
+};
+
+/** Rate stays: it is the selling price, which the inventory page already shows. */
+const stripCosts = (row) => {
+  if (!row) return row;
+  const out = { ...row };
+  for (const f of COST_FIELDS) delete out[f];
+  return out;
+};
+
+const withCostVisibility = (user, rows) =>
+  maySeeCosts(user) ? rows : rows.map(stripCosts);
+
 const getDeliveryInventory = asyncHandler(async (req, res) => {
   const { search, loading_status, truck_number, page = 1, limit = 500 } = req.query;
 
@@ -13,7 +55,8 @@ const getDeliveryInventory = asyncHandler(async (req, res) => {
     scopeUser: req.user,
   });
 
-  res.json({ success: true, data: result });
+  const loadings = withCostVisibility(req.user, result.loadings || []);
+  res.json({ success: true, data: { ...result, loadings, inventory: loadings } });
 });
 
 const getDeliveryInventoryById = asyncHandler(async (req, res) => {
@@ -21,7 +64,7 @@ const getDeliveryInventoryById = asyncHandler(async (req, res) => {
   if (!loading) {
     return res.status(404).json({ success: false, message: "Inventory record not found" });
   }
-  res.json({ success: true, data: { loading } });
+  res.json({ success: true, data: { loading: maySeeCosts(req.user) ? loading : stripCosts(loading) } });
 });
 
 const createDeliveryInventory = asyncHandler(async (req, res) => {
@@ -88,6 +131,15 @@ const createDeliveryInventory = asyncHandler(async (req, res) => {
  * replace the careful figure with the convenient one.
  */
 const setDeliveryTripCosts = asyncHandler(async (req, res) => {
+  // Same gate as reading them. A hidden page is not an authorisation check,
+  // and this endpoint writes what the margins are built from.
+  if (!maySeeCosts(req.user)) {
+    return res.status(403).json({
+      success: false,
+      message: "You do not have access to delivery costing",
+    });
+  }
+
   const { ids, clearBlank, ...values } = req.body;
 
   const actor = req.user?.name || req.user?.email || null;
