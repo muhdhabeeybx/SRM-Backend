@@ -469,12 +469,31 @@ const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
   }
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 
+  /**
+   * Skipped rows are left out of the totals, not just out of the money.
+   *
+   * pendingAmount and paidAmount already excluded them — a skipped commission
+   * is one the desk decided is not payable — but totalOrders and
+   * totalQuantity counted them, so a customer with a skipped row saw orders
+   * and litres that do not reconcile to the two figures beside them. On a
+   * commission statement that reads as money gone missing, which is the one
+   * impression this page must never give. 22 skipped rows carry 13.9m litres
+   * today, so the gap was not theoretical.
+   *
+   * The skipped figures are returned separately rather than hidden entirely:
+   * the customer bought that fuel, and a client that wants to account for it
+   * can, without it being added to what they are owed.
+   */
+  const notSkipped = sql`${commissions.status} <> 'skipped'`;
+
   const [stats] = await db
     .select({
-      totalOrders: count(),
-      totalQuantity: sql`COALESCE(SUM(${commissions.quantity}), 0)`,
+      totalOrders: sql`COUNT(*) FILTER (WHERE ${notSkipped})`,
+      totalQuantity: sql`COALESCE(SUM(${commissions.quantity}) FILTER (WHERE ${notSkipped}), 0)`,
       pendingAmount: sql`COALESCE(SUM(CASE WHEN ${commissions.status} = 'pending' THEN ${commissions.commissionAmount} ELSE 0 END), 0)`,
       paidAmount: sql`COALESCE(SUM(CASE WHEN ${commissions.status} = 'paid' THEN ${commissions.commissionAmount} ELSE 0 END), 0)`,
+      skippedOrders: sql`COUNT(*) FILTER (WHERE ${commissions.status} = 'skipped')`,
+      skippedQuantity: sql`COALESCE(SUM(${commissions.quantity}) FILTER (WHERE ${commissions.status} = 'skipped'), 0)`,
     })
     .from(commissions)
     .where(whereClause);
@@ -484,6 +503,9 @@ const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
     totalQuantity: Number(stats.totalQuantity) || 0,
     pendingAmount: parseFloat(stats.pendingAmount) || 0,
     paidAmount: parseFloat(stats.paidAmount) || 0,
+    /** Decided not payable. Outside every figure above. */
+    skippedOrders: Number(stats.skippedOrders) || 0,
+    skippedQuantity: Number(stats.skippedQuantity) || 0,
   };
 };
 
