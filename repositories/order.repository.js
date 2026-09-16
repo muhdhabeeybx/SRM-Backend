@@ -1,4 +1,4 @@
-const { eq, and, or, ilike, inArray, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
+const { eq, and, or, ilike, inArray, notInArray, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const {
   orders, customers, depots, products, pfis, orderTrucks,
@@ -88,6 +88,45 @@ const findByIdempotencyKey = async (idempotencyKey, tx = db) => {
     .from(orders)
     .where(eq(orders.idempotencyKey, idempotencyKey))
     .limit(1);
+  return formatOrderRow(row);
+};
+
+/**
+ * The same order from the same customer, moments ago.
+ *
+ * A double-tap guard that depends on nothing the client sends: the portal and
+ * the app send no idempotency key at all, and a client that generates a fresh
+ * key per attempt defeats one anyway. So this matches on what the order IS.
+ *
+ * Only live orders count. An order the customer cancelled, or one that
+ * expired, is not something they are about to be given again — and refusing
+ * to let somebody re-place an order they just cancelled would be its own bug.
+ *
+ * Newest first: if several slipped through before this existed, the one they
+ * would have been shown is the most recent.
+ */
+const findRecentDuplicate = async ({
+  customerId, depotId, productId, quantity, deliveryType, withinSeconds = 90,
+}) => {
+  if (!customerId || !depotId || !productId) return null;
+
+  const [row] = await db
+    .select()
+    .from(orders)
+    .where(
+      and(
+        eq(orders.customerId, Number(customerId)),
+        eq(orders.depotId, Number(depotId)),
+        eq(orders.productId, Number(productId)),
+        eq(orders.quantity, Number(quantity)),
+        deliveryType ? eq(orders.deliveryType, deliveryType) : undefined,
+        notInArray(orders.status, ["Cancelled", "Expired"]),
+        sql`${orders.createdAt} > now() - (${Number(withinSeconds)} * interval '1 second')`,
+      ),
+    )
+    .orderBy(desc(orders.createdAt))
+    .limit(1);
+
   return formatOrderRow(row);
 };
 
@@ -1539,6 +1578,7 @@ module.exports = {
   lockById,
   findByNumber,
   findByIdempotencyKey,
+  findRecentDuplicate,
   findByIdFull,
   findByNumberFull,
   findTrucksByOrderId,

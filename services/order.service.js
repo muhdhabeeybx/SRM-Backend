@@ -257,6 +257,15 @@ async function replayResult(orderId) {
   };
 }
 
+/**
+ * How long an identical order counts as the same tap rather than a new order.
+ *
+ * Ninety seconds: long enough to cover a slow network and a customer tapping
+ * again because nothing happened, short enough that a real second load placed
+ * a couple of minutes later still goes through.
+ */
+const DUPLICATE_WINDOW_SECONDS = Number(process.env.ORDER_DUPLICATE_WINDOW_SECONDS || 90);
+
 // Only the idempotency-key index counts — an orderNumber collision (or any
 // other 23505) must still surface as the error it is.
 const isIdempotencyConflict = (err) => {
@@ -290,6 +299,58 @@ async function placeOrder({
   if (idempotencyKey) {
     const existing = await orderRepo.findByIdempotencyKey(idempotencyKey);
     if (existing) return replayResult(existing.id);
+  }
+
+  /**
+   * The same order again, seconds later, is a double-tap — not a second order.
+   *
+   * An idempotency key only protects a client that sends one AND reuses it on
+   * retry. The portal and the app send none at all, so every tap created an
+   * order: one customer produced eight identical 10,000-litre orders in 58
+   * seconds on 16 September, 14 across the morning, and somebody had to delete
+   * them by hand afterwards.
+   *
+   * Nothing the client sends can be relied on here — a fresh key per tap
+   * defeats the check above, and a customer tapping because the first tap
+   * showed no feedback is the ordinary case, not an edge one. So the guard is
+   * on the FACTS of the order: same customer, same depot, same product, same
+   * quantity, same delivery type, inside a short window.
+   *
+   * It returns the order they already placed rather than an error. An error is
+   * what makes somebody tap again — and they are not wrong to think it failed,
+   * because from where they are sitting it looks identical to a failure.
+   *
+   * The window is deliberately short. A customer genuinely buying two
+   * identical loads an hour apart is real business and must go through; two
+   * within ninety seconds is a finger, not a decision.
+   */
+  /**
+   * Best-effort, and that asymmetry is deliberate.
+   *
+   * If this check throws — an unexpected delivery type, a database hiccup —
+   * the order must still be placed. A duplicate is visible and deletable in a
+   * click; an order silently refused because a GUARD broke is money the
+   * customer thinks they have spent and nobody has a record of.
+   */
+  let recent = null;
+  try {
+    recent = await orderRepo.findRecentDuplicate({
+      customerId,
+      depotId,
+      productId,
+      quantity,
+      deliveryType,
+      withinSeconds: DUPLICATE_WINDOW_SECONDS,
+    });
+  } catch (err) {
+    console.error("[placeOrder] duplicate check failed, placing anyway:", err.message);
+  }
+  if (recent) {
+    console.warn(
+      `[placeOrder] duplicate suppressed: customer ${customerId} re-sent the same order `
+      + `within ${DUPLICATE_WINDOW_SECONDS}s — returning order ${recent.id}`,
+    );
+    return { ...(await replayResult(recent.id)), deduplicated: true };
   }
 
   const customer = await customerRepo.findById(customerId);
