@@ -1,0 +1,31 @@
+{
+  "takenAt": "2026-09-16T02:28:43.397Z",
+  "orders": [
+    {
+      "id": 11982,
+      "pfi_id": 43
+    }
+  ],
+  "allocations": [
+    {
+      "id": 14085,
+      "pfi_id": 43
+    }
+  ],
+  "movements": [
+    {
+      "id": 7203,
+      "pfi_id": 43
+    }
+  ],
+  "pfis": [
+    {
+      "id": 43,
+      "sold_qty_litres": 19815193
+    },
+    {
+      "id": 51,
+      "sold_qty_litres": 936806
+    }
+  ]
+}

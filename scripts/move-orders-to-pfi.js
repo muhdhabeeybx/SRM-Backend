@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 /**
- * Move FG11962 and BG11963 from PFI/27/26/PMS/MT BORA/WARRI to
- * PFI/46/26/MT BORA/WARRI/16KT.
+ * Move one or more orders onto a different PFI, taking their stock reservation
+ * and ticket ledger with them.
  *
- * ── What is being corrected ───────────────────────────────────────────────
+ *   node scripts/move-orders-to-pfi.js --orders=11982 --to=PFI/46/26
+ *   node scripts/move-orders-to-pfi.js --orders=11962,11963 --to=PFI/46/26 --apply
  *
- * Both orders were raised against PFI/27 (#43) and belong on PFI/46 (#51).
- * Same depot (47) and same product (27), so nothing about the sale changes —
+ * `--to` is matched as a prefix of pfi_number and must resolve to exactly one
+ * batch, so a partial like "PFI/46/26" is enough and an ambiguous one is
+ * refused rather than guessed at.
+ *
+ * ── What it corrects ──────────────────────────────────────────────────────
+ *
+ * An order raised against the wrong batch. Nothing about the sale changes —
  * only which batch it draws on, and therefore which batch is credited with the
  * volume, the revenue and the commission.
  *
- *     FG11962   285,000 L   N387,030,000   Loading     paid in full
- *     BG11963    52,500 L    N71,295,000   Completed   paid, N277,500 over
+ * The orders must all sit on one source PFI, and that PFI and the destination
+ * must agree on depot and product. Both are asserted, because moving an order
+ * to a batch at another depot or of another product would not be a correction.
  *
  * ── Why this bypasses updateOrder ─────────────────────────────────────────
  *
@@ -58,11 +65,23 @@ const { Client } = require("pg");
 
 const APPLY = process.argv.includes("--apply");
 
-const ORDER_IDS = [11962, 11963];
-const FROM_PFI = 43;
-const TO_PFI = 51;
-const EXPECTED_FROM = "PFI/27/26/PMS/MT BORA/WARRI";
-const EXPECTED_TO = "PFI/46/26/MT BORA/WARRI/16KT";
+const arg = (name) => {
+  const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return hit ? hit.slice(name.length + 3) : null;
+};
+
+const ORDER_IDS = String(arg("orders") || "")
+  .split(",")
+  .map((s) => Number(String(s).trim()))
+  .filter((n) => Number.isInteger(n) && n > 0);
+
+const TO_PREFIX = String(arg("to") || "").trim();
+
+if (!ORDER_IDS.length || !TO_PREFIX) {
+  console.error("usage: --orders=11982[,11983] --to=PFI/46/26 [--apply]");
+  process.exitCode = 1;
+  process.exit();
+}
 
 const litres = (n) => Number(n || 0).toLocaleString("en-NG");
 const naira = (v) => `₦${Number(v || 0).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -73,6 +92,37 @@ async function main() {
   await client.query("BEGIN");
 
   try {
+    // ── Resolve the destination from its number ─────────────────────────────
+    //
+    // A prefix is enough, but it must identify ONE batch. Taking the first of
+    // several matches would move an order onto whichever row happened to sort
+    // first, which is the kind of quiet wrong this script exists to undo.
+    const matches = (
+      await client.query(
+        `SELECT id FROM pfis WHERE pfi_number LIKE $1 || '%' ORDER BY id`,
+        [TO_PREFIX]
+      )
+    ).rows;
+    if (!matches.length) throw new Error(`no PFI whose number starts with "${TO_PREFIX}"`);
+    if (matches.length > 1) {
+      throw new Error(`"${TO_PREFIX}" matches ${matches.length} PFIs (${matches.map((m) => m.id).join(", ")}) — be more specific`);
+    }
+    const TO_PFI = Number(matches[0].id);
+
+    // ── The source, taken from the orders rather than assumed ───────────────
+    const sources = (
+      await client.query(
+        `SELECT DISTINCT pfi_id FROM orders WHERE id = ANY($1::int[])`,
+        [ORDER_IDS]
+      )
+    ).rows.map((r) => (r.pfi_id == null ? null : Number(r.pfi_id)));
+    if (sources.length !== 1) {
+      throw new Error(`the orders sit on ${sources.length} different PFIs — move them in one group per source batch`);
+    }
+    const FROM_PFI = sources[0];
+    if (FROM_PFI == null) throw new Error("these orders carry no PFI, so there is nothing to move from");
+    if (FROM_PFI === TO_PFI) throw new Error(`already on PFI ${TO_PFI} — nothing to do`);
+
     // ── Both batches, locked ────────────────────────────────────────────────
     const pfiRows = (
       await client.query(
@@ -85,10 +135,15 @@ async function main() {
     const from = pfiRows.find((p) => Number(p.id) === FROM_PFI);
     const to = pfiRows.find((p) => Number(p.id) === TO_PFI);
     if (!from || !to) throw new Error("one of the PFIs was not found");
-    if (from.pfi_number !== EXPECTED_FROM) throw new Error(`#${FROM_PFI} is ${from.pfi_number}, expected ${EXPECTED_FROM}`);
-    if (to.pfi_number !== EXPECTED_TO) throw new Error(`#${TO_PFI} is ${to.pfi_number}, expected ${EXPECTED_TO}`);
     // reserveStock refuses a batch that is not active; mirror that rule here.
     if (to.status !== "active") throw new Error(`${to.pfi_number} is ${to.status}, not active`);
+    // Moving between depots or products would not be a correction.
+    if (Number(from.location_id) !== Number(to.location_id)) {
+      throw new Error(`${from.pfi_number} is at depot ${from.location_id}, ${to.pfi_number} at ${to.location_id}`);
+    }
+    if (Number(from.product_id) !== Number(to.product_id)) {
+      throw new Error(`${from.pfi_number} carries product ${from.product_id}, ${to.pfi_number} ${to.product_id}`);
+    }
 
     // ── The orders ──────────────────────────────────────────────────────────
     const orders = (
@@ -158,7 +213,18 @@ async function main() {
     console.log(`    sold ${litres(to.sold_qty_litres)} L  →  ${litres(toSoldAfter)} L   (reserve ${litres(reserved)})`);
     console.log(`    remaining ${litres(Number(to.starting_qty_litres) - toSoldAfter)} L of ${litres(to.starting_qty_litres)} L`);
     console.log(`\n  unchanged: quantity, price, total, amount paid, payment status, order status, trucks,`);
-    console.log(`             and commissions 842/843 — both paid, and they follow the order by join.`);
+    // A commission carries no pfi_id — it reaches its batch through the order —
+    // so it re-attributes itself and no figure is rewritten. That holds whether
+    // it is still pending or already paid, which is why a paid one is safe here
+    // when it would not be safe to restate directly.
+    const { rows: comms } = await client.query(
+      `SELECT status::text AS status, COUNT(*)::int AS n FROM commissions
+        WHERE order_id = ANY($1::int[]) GROUP BY 1 ORDER BY 1`,
+      [ORDER_IDS]
+    );
+    console.log(
+      `             and ${comms.map((c) => `${c.n} ${c.status}`).join(", ") || "no"} commission(s) — they follow the order by join.`
+    );
 
     if (!APPLY) {
       await client.query("ROLLBACK");
