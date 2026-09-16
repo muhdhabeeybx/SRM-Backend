@@ -9,7 +9,9 @@ const { client } = require("../db");
  * is what makes re-uploading an overlapping date range safe.
  */
 function dedupKey({ txnDate, bankRef, amount, depositor }) {
-  const day = new Date(txnDate).toISOString().slice(0, 10);
+  // The plain day, taken off the front of whatever came in rather than routed
+  // through Date — the round trip is what shifted it in the first place.
+  const day = String(txnDate).slice(0, 10);
   const normalisedAmount = Number(amount).toFixed(2);
   const payload = [
     day,
@@ -99,9 +101,20 @@ const bankStatementRepo = {
 
     if (!fresh.length) return { added: 0, duplicates, statement: null };
 
-    // This postgres driver binds timestamps as strings, not Date objects.
-    const iso = (d) => new Date(d).toISOString();
-    const dates = fresh.map((r) => new Date(r.txnDate)).sort((a, b) => a - b);
+    /**
+     * The date as it was printed, and nothing else.
+     *
+     * A statement line carries a calendar date — no hour, no zone — and the
+     * column is a `date` to match. Sending a full ISO instant here is what put
+     * 1,066 rows a day out: the instant was built at local midnight, which is
+     * the previous day in UTC, and the shift was invisible because the same
+     * browser read it back.
+     *
+     * So the value is trimmed to YYYY-MM-DD before it is bound. Postgres has
+     * no timezone arithmetic to apply to that, which is the whole point.
+     */
+    const day = (d) => String(d).slice(0, 10);
+    const dates = fresh.map((r) => day(r.txnDate)).sort();
 
     const [statement] = await client`
       INSERT INTO bank_statements
@@ -109,7 +122,7 @@ const bankStatementRepo = {
          period_start, period_end)
       VALUES (${bankAccountId}, ${filename || ""}, ${uploadedBy ?? null},
               ${fresh.length}, ${duplicates},
-              ${iso(dates[0])}, ${iso(dates[dates.length - 1])})
+              ${dates[0]}, ${dates[dates.length - 1]})
       RETURNING *
     `;
 
@@ -118,7 +131,7 @@ const bankStatementRepo = {
         INSERT INTO bank_statement_lines
           (bank_account_id, statement_id, txn_date, amount, depositor, bank_ref,
            narration, raw_row, dedup_key)
-        VALUES (${bankAccountId}, ${statement.id}, ${iso(r.txnDate)}, ${r.amount},
+        VALUES (${bankAccountId}, ${statement.id}, ${day(r.txnDate)}, ${r.amount},
                 ${r.depositor || ""}, ${r.bankRef || ""}, ${r.narration || ""},
                 ${JSON.stringify(r.rawRow || [])}::jsonb, ${r.dedup})
         ON CONFLICT (bank_account_id, dedup_key) DO NOTHING

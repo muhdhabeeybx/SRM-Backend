@@ -7,6 +7,7 @@ const {
   text,
   numeric,
   timestamp,
+  date,
   jsonb,
   uniqueIndex,
   index,
@@ -85,7 +86,14 @@ const bankStatementLines = pgTable(
     statementId: integer("statement_id")
       .references(() => bankStatements.id, { onDelete: "cascade" })
       .notNull(),
-    txnDate: timestamp("txn_date", { withTimezone: true }).notNull(),
+    /**
+     * The date printed on the statement — a calendar date, not an instant.
+     *
+     * A timestamp was the wrong type: there is no hour or timezone on a bank
+     * line, and storing one is how 1,066 rows ended up a day out. See
+     * migration 0039.
+     */
+    txnDate: date("txn_date").notNull(),
     amount: numeric("amount", { precision: 18, scale: 2 }).notNull(),
     depositor: varchar("depositor", { length: 255 }).default("").notNull(),
     bankRef: varchar("bank_ref", { length: 255 }).default("").notNull(),
