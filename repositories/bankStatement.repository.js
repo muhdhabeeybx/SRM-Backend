@@ -78,24 +78,41 @@ const bankStatementRepo = {
     }));
 
     const existing = await client`
-      SELECT dedup_key, bank_ref FROM bank_statement_lines
+      SELECT dedup_key FROM bank_statement_lines
       WHERE bank_account_id = ${bankAccountId}
     `;
     const seenKeys = new Set(existing.map((e) => e.dedup_key));
-    const seenRefs = new Set(
-      existing.map((e) => String(e.bank_ref || "").trim().toLowerCase()).filter(Boolean),
-    );
 
+    /**
+     * A row is a duplicate only if the WHOLE of it matches — date, reference,
+     * amount and depositor together.
+     *
+     * There was a second rule here: a row was also discarded if its bank
+     * reference alone matched anything already on the account. That is only
+     * safe if the reference column holds a unique transaction id, and on these
+     * statements it does not — the mapping points it at the narration, which
+     * is text like "POOKIE ENERGY L/To FIDELITY BANK | SOROMAN NIGERIA" and
+     * repeats every time that customer pays.
+     *
+     * So the first payment from a customer silently swallowed every later one.
+     * A N38,461,500 credit on 1 September was rejected because a N70,000,000
+     * credit from the same payer was already on file — different date,
+     * different money, discarded as "already on record" with no way to see
+     * which row it collided with.
+     *
+     * Losing a real credit is far worse than importing a near-duplicate: a
+     * missing line looks exactly like money that never arrived, while a
+     * doubled one is visible and can be deleted. The composite key still
+     * catches the case this was meant to catch — the same file uploaded twice.
+     */
     const fresh = [];
     let duplicates = 0;
     for (const r of prepared) {
-      const ref = String(r.bankRef || "").trim().toLowerCase();
-      if (seenKeys.has(r.dedup) || (ref && seenRefs.has(ref))) {
+      if (seenKeys.has(r.dedup)) {
         duplicates++;
         continue;
       }
       seenKeys.add(r.dedup);
-      if (ref) seenRefs.add(ref);
       fresh.push(r);
     }
 
