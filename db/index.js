@@ -1,29 +1,33 @@
 const { drizzle } = require("drizzle-orm/postgres-js");
-const { PgTimestamp } = require("drizzle-orm/pg-core");
 const postgres = require("postgres");
 
 const schema = require("./schema");
 const relations = require("./relations");
 
-// Patch Drizzle PgTimestamp to safely handle string, number, and Date inputs
-PgTimestamp.prototype.mapToDriverValue = function (value) {
-  if (value === null || value === undefined) return value;
-  if (typeof value === "string") {
-    const d = new Date(value);
-    return isNaN(d.getTime()) ? null : d.toISOString();
-  }
-  if (typeof value === "number") {
-    const d = new Date(value);
-    return isNaN(d.getTime()) ? null : d.toISOString();
-  }
-  if (value instanceof Date) {
-    return isNaN(value.getTime()) ? null : value.toISOString();
-  }
-  if (typeof value?.toISOString === "function") {
-    return value.toISOString();
-  }
-  return value;
-};
+/**
+ * There was a patch here that claimed to make PgTimestamp accept strings and
+ * numbers as well as Dates. It never ran once.
+ *
+ * It assigned to `PgTimestamp.prototype.mapToDriverValue`, but drizzle defines
+ * that member as an arrow-function CLASS FIELD:
+ *
+ *   mapToDriverValue = (value) => value.toISOString();
+ *
+ * A class field is an OWN property set on every instance at construction, so
+ * each column shadows the prototype and the patched function was never
+ * reachable. Removing it is behaviour-neutral — verified by checking that
+ * `orderPayments.txnDate` has its own `mapToDriverValue` and that it is not
+ * the patched function.
+ *
+ * It is gone rather than repaired because the guarantee it advertised is what
+ * made migration 0039 look safe: `bank_statement_lines.txn_date` became a
+ * `date`, Drizzle started returning "YYYY-MM-DD" strings, and the code copying
+ * one into a `timestamptz` column threw `value.toISOString is not a function`
+ * on every payment confirmation. Converting at the copy site — where the
+ * intended instant is actually known — is the fix; see statementDayToInstant
+ * in services/orderPayment.service.js. A blanket coercion here would only have
+ * turned that outage into a silent day-shift.
+ */
 
 // Under a test run, use TEST_DATABASE_URL when provided so fixtures never touch
 // the app's real database. Everything else (the server, migrations, seeds) runs

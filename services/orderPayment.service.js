@@ -45,6 +45,31 @@ const round2 = (value) => Math.round(money(value) * 100) / 100;
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 
 /**
+ * A statement line's calendar date, as the instant this table stores.
+ *
+ * bank_statement_lines.txn_date became a `date` in migration 0039, so Drizzle
+ * now hands it over as the string "YYYY-MM-DD". order_payments.txn_date is
+ * still `timestamptz` — deliberately, see 0039 — and Drizzle's PgTimestamp
+ * calls `.toISOString()` on whatever it is given. So copying the line's value
+ * straight across threw `value.toISOString is not a function` while BUILDING
+ * the insert, before any round trip: every payment confirmation 500'd, on
+ * every order, from the moment 0039 was applied.
+ *
+ * Nothing caught it, because db/index.js carries a patch that claims to make
+ * PgTimestamp accept strings and does not — drizzle defines mapToDriverValue
+ * as an arrow-function class field, so each column instance shadows the
+ * patched prototype. See the note left there.
+ *
+ * Anchored at UTC midnight, NOT local midnight. Local midnight in Lagos is
+ * 23:00 UTC the previous day — the exact round trip 0039 removed from the
+ * statement lines, and re-introducing it here would file each payment a day
+ * behind the line it was copied from. At UTC midnight the day reads back the
+ * same whether it is rendered in Lagos (01:00) or in UTC.
+ */
+const statementDayToInstant = (value) =>
+  value instanceof Date ? value : new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
+
+/**
  * The audit actor for a staff id that may not be there.
  *
  * `actorColumns` rejects a staff actor with no id outright, which is right —
@@ -213,7 +238,7 @@ const recordFromStatementLines = async (
           confirmationBasis: CONFIRMATION_BASIS.BANK_MATCHED,
           // The statement, verbatim. Copied rather than joined — see the
           // schema comment on this table for the three ways the join lied.
-          txnDate: line.txnDate,
+          txnDate: statementDayToInstant(line.txnDate),
           depositor: line.depositor || "",
           narration: line.narration || "",
           bankRef: line.bankRef || "",
