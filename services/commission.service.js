@@ -60,25 +60,53 @@ async function createForOrder(orderId) {
   if (quantity <= 0) return existing || null;
 
   /**
-   * No rate for this depot and product means no commission — not a zero one.
+   * No rate for this depot and product raises a NOT-PAYABLE row, not a real one.
    *
-   * This used to fall back to 0 and create the row anyway, so every order at a
-   * location that pays no commission raised a ₦0 entry that sat in the desk's
-   * pending queue forever and showed the customer a commission they were never
-   * going to be paid. 160 of them exist, 44 at Dangote Refinery, which has no
-   * rate configured for anything.
+   * Three attempts at this, and the middle one was wrong in both directions.
    *
-   * A commission is a promise. Where nobody has set a rate, there is no
-   * promise, and the honest record is the absence of a row.
+   * It first fell back to a rate of 0 and created an ordinary pending row, so
+   * every order at a location that pays nothing raised a ₦0 entry that sat in
+   * the desk's queue forever and showed the customer a commission they were
+   * never going to get.
    *
-   * An existing row is left alone rather than deleted: it may already be paid,
-   * and unpaying somebody because a rate was later removed would be worse than
-   * the untidiness. recomputeForRate below is what brings stale rows into line
-   * when a rate is set or changed.
+   * Then it created nothing at all. That fixed the false promise and
+   * introduced a silence: the customer bought the fuel, the order simply never
+   * appeared on their commission page, and "why is my Dangote order missing"
+   * has no answer visible to anybody.
+   *
+   * So the row exists and says what it is. It carries the same `skipped`
+   * status the desk uses for a commission it has decided against, with a
+   * reason naming the cause — both mean "this order earns nothing", and giving
+   * them one state means the clients have one thing to render and the totals
+   * have one thing to exclude. It is outside every money figure, on the
+   * dashboard and on the customer's page alike.
+   *
+   * SETTING A RATE LATER DOES NOT REVIVE IT. recomputeForRate touches pending
+   * rows only, deliberately: a commission the customer was told they would not
+   * be paid should not quietly start owing months afterwards because somebody
+   * configured a depot. If it should be paid, the desk undoes the skip, which
+   * is a decision with a person's name on it.
+   *
+   * An existing row is left alone rather than rewritten: it may already be
+   * paid, and unpaying somebody because a rate was later removed would be far
+   * worse than the untidiness.
    */
   const rateEntry = await commissionRepo.getRate(order.depotId, order.productId);
   const configuredRate = rateEntry ? parseFloat(rateEntry.commissionRate) : null;
-  if (configuredRate == null || !(configuredRate > 0)) return existing || null;
+  if (configuredRate == null || !(configuredRate > 0)) {
+    if (existing) return existing;
+    return commissionRepo.create({
+      orderId: order.id,
+      customerId: order.customerId,
+      depotId: order.depotId,
+      productId: order.productId,
+      quantity,
+      commissionRate: "0",
+      commissionAmount: "0",
+      status: "skipped",
+      skipReason: "No commission rate set for this location and product",
+    });
+  }
 
   const commissionRate = configuredRate;
   const commissionAmount = quantity * commissionRate;
