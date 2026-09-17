@@ -1,5 +1,5 @@
 const { v4: uuidv4 } = require("uuid");
-const { eq } = require("drizzle-orm");
+const { eq, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orders, commissions, pfiMovements, pfis } = require("../db/schema");
 const {
@@ -766,14 +766,75 @@ async function releaseOrderResources(order, tx) {
   await walletService.releaseHold(order.id, tx);
 }
 
-// Once an order is finished or dead there is nothing left to correct.
+// Once an order is finished or dead there is nothing left to correct — with
+// one exception, below: which cargo a completed order was lifted from is a
+// fact that can be recorded wrongly and has to be correctable afterwards.
 const EDIT_LOCKED_STATUSES = new Set(["Completed", "Cancelled", "Expired"]);
-// Quantity and PFI both back a physical stock reservation; once release has
-// captured a truck allocation against that reservation, changing either
-// would desync a ticket that already names a real gate action. Everything
-// else about the order (customer, date, price, logistics text) stays
-// editable right up to Completed.
+
+/**
+ * Quantity backs a physical stock reservation that live tickets are cut
+ * against, so it stops being editable the moment release captures a truck
+ * allocation. Changing it under a ticket that already names a real gate
+ * action desyncs the two.
+ *
+ * Everything else about the order (customer, date, price, logistics text)
+ * stays editable right up to Completed.
+ */
 const STOCK_EDITABLE_STATUSES = new Set(["Pending", "Paid"]);
+
+/**
+ * The PFI is different, and used to share the gate above.
+ *
+ * Which cargo an order was lifted from is not a plan that expires when the
+ * trucks roll — it is a fact about where the product came from, and it is
+ * recorded before anyone knows it is wrong. An order gets raised against the
+ * wrong batch, loads, completes, and the error is only found when the cargo's
+ * sold litres do not match its bank of orders. Until now the answer was that
+ * the order could never be corrected: the desk was told "Quantity and PFI can
+ * only be changed before an order is released for loading", and the figures
+ * stayed wrong on both cargoes permanently.
+ *
+ * Nothing about the move depends on the order's stage. A PFI's position is one
+ * counter — sold litres against starting litres — and moving an order is the
+ * same two writes at every stage: give the litres back to the cargo that did
+ * not supply them, take them from the one that did. The records that name the
+ * PFI travel with it (see the move below), so the new cargo's report gains
+ * exactly what the old one loses.
+ *
+ * Cancelled and Expired are the exception, and stay refused. Those orders gave
+ * their litres back when they died — there is no reservation left to move, and
+ * "moving" one would consume a second cargo's stock for an order that is never
+ * going to lift it.
+ */
+const PFI_MOVE_LOCKED_STATUSES = new Set(["Cancelled", "Expired"]);
+
+/**
+ * Is this patch asking for anything beyond the PFI?
+ *
+ * A completed order accepts a PFI correction and nothing else, so the blanket
+ * edit lock has to distinguish the two. Compared against the order's current
+ * values rather than merely being present: a form that posts every field it
+ * rendered sends `price` and `quantity` unchanged, and refusing that as "an
+ * edit to a completed order" would block the correction the desk came to make.
+ */
+const CHANGES_BEYOND_PFI = (patch, order) => {
+  const same = (a, b) => String(a ?? "") === String(b ?? "");
+  const unchanged = {
+    customerId: same(patch.customerId, order.customerId),
+    quantity: same(patch.quantity, order.quantity),
+    price: same(patch.price, order.price),
+    totalAmount: same(patch.totalAmount, order.totalAmount),
+    companyName: same(patch.companyName, order.companyName),
+    expectedTrucks: same(patch.expectedTrucks, order.expectedTrucks),
+    deliveryAddress: same(patch.deliveryAddress, order.deliveryAddress),
+    createdAt:
+      patch.createdAt === undefined ||
+      new Date(patch.createdAt).getTime() === new Date(order.createdAt).getTime(),
+  };
+  return Object.entries(unchanged).some(
+    ([field, isSame]) => patch[field] !== undefined && !isSame,
+  );
+};
 
 /**
  * Edit an order's own fields — reassign it to another customer, move it to a
@@ -790,8 +851,20 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
   return db.transaction(async (tx) => {
     const order = await orderRepo.lockById(orderId, tx);
     if (!order) throw httpError(404, "Order not found");
+
+    const wantsPfiChange = patch.pfiId !== undefined && (patch.pfiId ?? null) !== order.pfiId;
+
     if (EDIT_LOCKED_STATUSES.has(order.status)) {
-      throw httpError(409, `A ${order.status.toLowerCase()} order can no longer be edited`);
+      // A completed order still accepts one correction: the cargo it was
+      // lifted from. See PFI_MOVE_LOCKED_STATUSES for why that one and no
+      // other, and why a cancelled or expired order accepts none.
+      const pfiOnly =
+        wantsPfiChange &&
+        !PFI_MOVE_LOCKED_STATUSES.has(order.status) &&
+        !CHANGES_BEYOND_PFI(patch, order);
+      if (!pfiOnly) {
+        throw httpError(409, `A ${order.status.toLowerCase()} order can no longer be edited`);
+      }
     }
 
     const changes = {};
@@ -819,11 +892,24 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
     }
 
     // ── Quantity / PFI reassignment — share the same release/reserve path ──
-    const wantsPfiChange = patch.pfiId !== undefined && (patch.pfiId ?? null) !== order.pfiId;
     const wantsQtyChange = patch.quantity !== undefined && Number(patch.quantity) !== order.quantity;
     if (wantsPfiChange || wantsQtyChange) {
-      if (!STOCK_EDITABLE_STATUSES.has(order.status)) {
-        throw httpError(409, "Quantity and PFI can only be changed before an order is released for loading");
+      /**
+       * Two gates, because they guard two different things.
+       *
+       * Quantity is a live reservation that tickets are cut against, so it
+       * closes at release. The PFI is a record of which cargo supplied the
+       * order, correctable for as long as the order exists — the litres move
+       * with it either way, and at every stage that is the same two writes.
+       */
+      if (wantsQtyChange && !STOCK_EDITABLE_STATUSES.has(order.status)) {
+        throw httpError(409, "Quantity can only be changed before an order is released for loading");
+      }
+      if (wantsPfiChange && PFI_MOVE_LOCKED_STATUSES.has(order.status)) {
+        throw httpError(
+          409,
+          `A ${order.status.toLowerCase()} order gave its litres back to its PFI — move the order it should have been on instead`,
+        );
       }
 
       const newPfiId = patch.pfiId !== undefined ? patch.pfiId : order.pfiId;
@@ -854,11 +940,42 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
         await orderPfiAllocationRepo.create([{ pfiId: newPfiId, quantity: newQuantity }], orderId, tx);
       }
 
-      // A ticket already cut for this order recorded stock against whichever
-      // PFI was current at that moment — repoint it too, or the sold-litres
-      // figure stays with a PFI this order no longer credits revenue to.
+      /**
+       * Everything else that names the old PFI moves with the order.
+       *
+       * A ticket cut for this order wrote a stock movement against whichever
+       * cargo was current at that moment. Leaving those behind is what makes a
+       * move half-done: the order would show on the new PFI's report while its
+       * litres stayed recorded as lifted from the old one, and neither cargo's
+       * figures would be right.
+       *
+       * With the allocation rewritten above and the movements repointed here,
+       * the new PFI gains exactly what the old one loses — the reservation,
+       * the sold litres, and every movement row behind them.
+       */
       if (wantsPfiChange) {
-        await tx.update(pfiMovements).set({ pfiId: newPfiId }).where(eq(pfiMovements.orderId, orderId));
+        if (newPfiId == null) {
+          const [{ movements } = { movements: 0 }] = await tx
+            .select({ movements: sql`COUNT(*)::int` })
+            .from(pfiMovements)
+            .where(eq(pfiMovements.orderId, orderId));
+          if (movements > 0) {
+            throw httpError(
+              409,
+              "This order has already moved stock, so it cannot be left without a PFI — move it to the PFI that supplied it instead",
+            );
+          }
+        } else {
+          await tx.update(pfiMovements).set({ pfiId: newPfiId }).where(eq(pfiMovements.orderId, orderId));
+        }
+
+        /**
+         * The cargo the order arrived at may now be fully sold, exactly as it
+         * would be had the order been raised against it — placeOrder marks it
+         * and so does this. The cargo it LEFT is handled inside releaseStock,
+         * which reopens a finished PFI that has litres again.
+         */
+        if (newPfiId != null) await pfiRepo.markFinishedIfComplete(newPfiId, tx);
       }
 
       if (wantsPfiChange) { changes.pfiId = [order.pfiId, newPfiId]; set.pfiId = newPfiId; }
