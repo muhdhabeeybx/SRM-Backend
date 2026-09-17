@@ -309,6 +309,25 @@ const buildPfiDailyReportData = async (date = new Date()) => {
    * today's trading earned, and what actually went out today. The running
    * totals follow, so a reader can see both without the day being buried in
    * them — which is what a single to-date column did.
+   *
+   * ── EARNED IS DATED ON THE ORDER, NOT ON THE COMMISSION ROW ─────────────
+   *
+   * A commission is earned by an order, so it belongs to the ORDER's day. The
+   * commission row is written whenever the desk gets to it, which is routinely
+   * the next morning: 133 of 592 live rows (22%) carry a date different from
+   * the order that earned them, and both of the commissions this report showed
+   * as "earned today" on 16 September belong to orders placed on the 15th.
+   *
+   * It matters more than the lag, because `orders.created_at` is EDITABLE
+   * (services/order.service.js) and is what every other figure on this report
+   * is keyed to. Correcting an order's date moves its litres, its sales value
+   * and its stock movement to the corrected day; keyed on `c.created_at` the
+   * commission stayed behind on the day somebody happened to key it in, and
+   * the two halves of the same trade ended up on different reports.
+   *
+   * PAID stays on `c.paid_at`. Settling a commission is its own event on its
+   * own day — money left the bank when it left the bank, whatever date the
+   * order it belongs to now carries.
    */
   const commissionRows = await client`
     SELECT o.pfi_id,
@@ -316,11 +335,11 @@ const buildPfiDailyReportData = async (date = new Date()) => {
            COALESCE(SUM(c.commission_amount::numeric) FILTER (WHERE c.status = 'pending'), 0) AS due,
            COALESCE(SUM(c.commission_amount::numeric) FILTER (WHERE c.status = 'paid'), 0)    AS paid,
            COALESCE(SUM(c.quantity), 0)                                                  AS litres,
-           -- Earned today: the commission rows today's orders created, whatever
-           -- has since happened to them.
-           COUNT(*) FILTER (WHERE c.created_at >= ${startIso} AND c.created_at < ${endIso}) AS entries_today,
+           -- Earned today: what today's ORDERS earned, whatever day the
+           -- commission row was keyed in and whatever has since happened to it.
+           COUNT(*) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}) AS entries_today,
            COALESCE(SUM(c.commission_amount::numeric)
-             FILTER (WHERE c.created_at >= ${startIso} AND c.created_at < ${endIso}), 0)   AS due_today,
+             FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0)   AS due_today,
            -- Settled today, dated on the settlement rather than on the order:
            -- last week's commission paid this morning is today's outflow.
            COALESCE(SUM(c.commission_amount::numeric)

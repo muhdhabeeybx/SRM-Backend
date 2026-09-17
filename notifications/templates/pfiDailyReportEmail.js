@@ -50,6 +50,26 @@ const up = (v) => String(v == null ? "" : v).toUpperCase();
 const KEY = { s: KEY_S, bg: TINT };
 
 /**
+ * The vertical rhythm, as four numbers rather than a dozen literals.
+ *
+ * Spacing was the last thing carrying hierarchy once colour had been reserved
+ * for meaning and the section bars were told apart by weight — and it had
+ * drifted into eight different values that no longer said anything. These are
+ * a scale: a new SECTION gets roughly twice the air a GROUP inside one does,
+ * and a heading sits closer to the table it introduces than to the table above
+ * it. That last relationship is the one doing the work — it is what makes a
+ * heading read as belonging to what follows it.
+ *
+ * Spacers are `<td>`-height divs rather than margins: Outlook drops margins on
+ * a div, and two sections would run together in exactly the client least able
+ * to cope with it.
+ */
+const GAP = { section: 32, group: 18, afterSectionBar: 8, afterGroupBar: 5 };
+
+/** A fixed vertical gap that survives Outlook. */
+const space = (px) => `<div style="height:${px}px;line-height:${px}px;">&nbsp;</div>`;
+
+/**
  * Satoshi, where the client will have it.
  *
  * Mail clients do not download web fonts with any reliability — Gmail strips
@@ -62,9 +82,55 @@ const KEY = { s: KEY_S, bg: TINT };
  * two faces that ship on the devices this is read on.
  */
 const FONT = FONT_STACK;
+
+/**
+ * The one <style> block, and everything in it is an IMPROVEMENT rather than a
+ * requirement.
+ *
+ * Gmail strips @import, Outlook ignores @font-face, and several clients drop
+ * embedded <style> entirely — so every rule here has an inline equivalent
+ * already doing the job, and the document has to read correctly with this
+ * block deleted. It is not where the report is styled; it is where the report
+ * is made nicer on the clients that allow it.
+ *
+ * What it buys, in order of how much it matters on a phone:
+ *
+ *   NOWRAP ON FIGURES  "₦1,220,979,873" breaking across two lines mid-number
+ *     is the single worst thing that happens to this report on a narrow
+ *     screen — the eye reads "₦1,220" and stops. Right-aligned cells are
+ *     exactly the numeric ones, so the selector needs no markup of its own.
+ *     Inline it would cost ~20 bytes on every one of ~600 cells; here it costs
+ *     45 bytes once, which is the only reason it is affordable at all.
+ *
+ *   TIGHTER CELLS UNDER 600px  `cellpadding="6"` is an attribute and cannot be
+ *     conditional, so the media query overrides it. Two pixels a side across
+ *     nine columns is most of a column back.
+ *
+ *   THE SECTION NOTE STEPS ASIDE  "raised or paid today" is floated right of
+ *     its heading. There is room for it on a laptop and there is not on a
+ *     phone, where it wraps under the heading and doubles the bar's height on
+ *     every section. It is an aside; it goes.
+ *
+ * Mobile mail clients that report a desktop viewport will not match the media
+ * query at all. That is why the layout does not depend on it: the tables scroll
+ * inside their own wrappers either way, and `max-width` lets the document
+ * shrink to whatever width it is actually given.
+ */
 const FONT_LINK =
-  `<style>@import url('https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900&display=swap');` +
-  `table,td,th,p,div,span{font-family:${FONT};}</style>`;
+  `<style>` +
+  `@import url('https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900&display=swap');` +
+  `table,td,th,p,div,span{font-family:${FONT};}` +
+  `td[align=right],th[align=right]{white-space:nowrap;}` +
+  `@media only screen and (max-width:600px){` +
+  // Scoped to the DATA tables by their border attribute. A bare `td,th` also
+  // catches the section bars, which are single-cell tables — shrinking a
+  // heading to 11px and stripping its padding turns the one piece of structure
+  // the report has into another line of small text.
+  `table[border="1"] td,table[border="1"] th{padding:4px 5px!important;font-size:11px!important;}` +
+  `.rpt-note{display:none!important;}` +
+  `.rpt-title{font-size:19px!important;}` +
+  `}` +
+  `</style>`;
 
 // ─── Section furniture ──────────────────────────────────────────────────────
 
@@ -92,8 +158,8 @@ const NOTE_ON_INK = "#BDBDBD";
  */
 const barNote = (note, color) =>
   note
-    ? `<span style="float:right;font-weight:400;letter-spacing:0;text-transform:none;` +
-      `color:${color};font-size:11px;">${escapeHtml(note)}</span>`
+    ? `<span class="rpt-note" style="float:right;font-weight:400;letter-spacing:0;` +
+      `text-transform:none;color:${color};font-size:11px;padding-left:12px;">${escapeHtml(note)}</span>`
     : "";
 
 const bar = (label, note, { bg, color, size, noteColor, extra = "" }) =>
@@ -104,18 +170,18 @@ const bar = (label, note, { bg, color, size, noteColor, extra = "" }) =>
   `</tr></table>`;
 
 const section = (label, note = "") =>
-  `<div style="margin-top:32px;">` +
+  `<div style="margin-top:${GAP.section}px;">` +
   bar(label, note, { bg: INK, color: "#ffffff", size: 13, noteColor: NOTE_ON_INK }) +
-  `<div style="height:8px;line-height:8px;">&nbsp;</div>`;
+  space(GAP.afterSectionBar);
 
 /** A PFI inside FILLING STATIONS, a desk inside STAFF REPORTS. */
 const group = (label, note = "") =>
-  `<div style="margin-top:18px;">` +
+  `<div style="margin-top:${GAP.group}px;">` +
   bar(label, note, {
     bg: "#EDEDED", color: INK, size: 11, noteColor: MUTED,
     extra: `border-left:4px solid ${INK};`,
   }) +
-  `<div style="height:5px;line-height:5px;">&nbsp;</div>`;
+  space(GAP.afterGroupBar);
 
 /**
  * An empty section, in one line — and the `</div>` its heading opened.
@@ -157,7 +223,8 @@ const headRow = (labels) => `<tr>${labels.map((l, i) => hcell(up(l), { r: i > 0 
  */
 const table = (labels, rows, empty = "Nothing to report.") =>
   rows.length
-    ? `<div style="overflow-x:auto;">${TABLE}<thead>${headRow(labels)}</thead><tbody>${rows.join("")}</tbody></table></div></div>`
+    ? `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px;">` +
+      `${TABLE}<thead>${headRow(labels)}</thead><tbody>${rows.join("")}</tbody></table></div></div>`
     : nothing(empty);
 
 /** The row label column: uppercase, tinted, bold. Every table opens with one. */
@@ -637,17 +704,21 @@ const renderPfiDailyReportEmail = (d) => {
 
   const body =
     FONT_LINK +
-    `<div style="font-family:${FONT};font-size:13px;color:${INK};max-width:1100px;">` +
-    `<div style="font-size:22px;font-weight:900;letter-spacing:1px;">SOROMAN</div>` +
-    `<div style="font-size:14px;font-weight:700;letter-spacing:.4px;color:${INK};margin-top:1px;">` +
+    // `max-width` rather than `width`, so the document shrinks to whatever it
+    // is given instead of forcing a phone to zoom out to 1100px and render
+    // every figure at four pixels. The horizontal padding is what keeps the
+    // section bars off the very edge of a narrow screen.
+    `<div style="font-family:${FONT};font-size:13px;color:${INK};max-width:1100px;padding:0 2px;">` +
+    `<div class="rpt-title" style="font-size:22px;font-weight:900;letter-spacing:1px;line-height:1.1;">SOROMAN</div>` +
+    `<div style="font-size:14px;font-weight:700;letter-spacing:.4px;color:${INK};margin-top:2px;line-height:1.3;">` +
     `Sales &amp; Operations Report</div>` +
-    `<div style="font-size:12px;color:${MUTED};margin-top:2px;">${escapeHtml(up(date))}</div>` +
+    `<div style="font-size:12px;color:${MUTED};margin-top:3px;">${escapeHtml(up(date))}</div>` +
     `<div style="height:1px;line-height:1px;background:${INK};margin:12px 0 16px;">&nbsp;</div>` +
     // The greeting, in the words the desk reads it in. Deliberately the first
     // prose in the document and deliberately before any figure: somebody
     // opening this on a phone should know what it is in one line.
-    `<p style="margin:0 0 6px;font-size:13px;">Dear Sir,</p>` +
-    `<p style="margin:0;font-size:13px;line-height:1.55;">` +
+    `<p style="margin:0 0 8px;font-size:13px;line-height:1.5;">Dear Sir,</p>` +
+    `<p style="margin:0 0 4px;font-size:13px;line-height:1.6;">` +
     `Please find below the summary of sales and operations across all locations for ` +
     `<strong>${escapeHtml(date)}</strong>.</p>` +
     /**

@@ -487,3 +487,67 @@ describe("truck sales — rolling a batch up from its customers", () => {
     assert.equal(b.customers, 1);
   });
 });
+
+/**
+ * How it holds up on a phone.
+ *
+ * The rule the whole approach rests on: the <style> block is an improvement,
+ * never a requirement. Gmail strips @import, Outlook ignores @font-face, and
+ * several clients drop embedded <style> entirely — so the document has to be
+ * correct with that block deleted, and these tests delete it to check.
+ */
+describe("sales & operations report — on a narrow screen", () => {
+  const full = () =>
+    render({
+      pfis: [pfi(), gasPfi()],
+      expenseLines: [{
+        label: "PFI/46/26/MT BORA/WARRI/16KT",
+        today: { count: 1, requested: 2400000, paid: 0 },
+        toDate: { count: 9, requested: 666936121, paid: 15986121 },
+      }],
+    });
+
+  test("the document shrinks to the screen rather than forcing it wide", () => {
+    const { html } = full();
+    // `max-width`, not `width`. A pinned 1100px document makes a phone zoom out
+    // to fit it and renders every figure at about four pixels.
+    assert.match(html, /max-width:1100px/);
+    assert.doesNotMatch(html, /[^-]width:\s*1100px/);
+  });
+
+  test("every data table scrolls inside its own wrapper", () => {
+    const body = full().html.split("</style>")[1];
+    const wrappers = (body.match(/overflow-x:auto/g) || []).length;
+    const tables = (body.match(/<table[^>]*border="1"/g) || []).length;
+    assert.equal(wrappers, tables, "a table that cannot scroll will be cut off, not shrunk");
+    assert.ok(tables > 0);
+  });
+
+  test("figures never break across two lines mid-number", () => {
+    // "₦1,220,979,873" wrapping after "₦1,220" is the single worst thing that
+    // happens to this report on a narrow screen. Right-aligned cells are
+    // exactly the numeric ones, so the rule needs no markup of its own.
+    assert.match(full().html, /td\[align=right\][^}]*white-space:nowrap/);
+  });
+
+  test("the report is still correct with the style block deleted", () => {
+    const stripped = full().html.replace(/<style>[\s\S]*?<\/style>/, "");
+    // Nothing structural may live only in CSS: the font, the palette, the
+    // section bars and the cell tints are all inline and survive the cut.
+    assert.match(stripped, /font-family:'Satoshi'/);
+    assert.match(stripped, /background:#1a1a1a|bgcolor="#1a1a1a"/);
+    assert.match(stripped, /#15803D/, "the credit colour is inline");
+    assert.match(stripped, /overflow-x:auto/, "the scroll wrapper is inline");
+    assert.match(stripped, /DEPOT SALES/);
+  });
+
+  test("the narrow-screen rules touch data cells, not the section headings", () => {
+    const { html } = full();
+    const mq = html.slice(html.indexOf("@media"), html.indexOf("</style>"));
+    // A bare `td,th` also catches the section bars, which are single-cell
+    // tables — shrinking a heading to 11px turns the one piece of structure the
+    // report has into another line of small text.
+    assert.match(mq, /table\[border="1"\] td/);
+    assert.doesNotMatch(mq, /(^|[;{])\s*td\s*,/);
+  });
+});
