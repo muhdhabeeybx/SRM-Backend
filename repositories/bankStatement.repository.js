@@ -23,38 +23,44 @@ function dedupKey({ txnDate, bankRef, amount, depositor }) {
 }
 
 /**
- * The bank's own transaction id, where the reference column holds one.
+ * THE REFERENCE IS THE PAYMENT. Nothing else identifies it.
  *
  * A composite fingerprint answers "is this the same ROW?" and that is not the
- * same question as "is this the same TRANSACTION?". The date is part of the
- * fingerprint, so the same credit read off two different exports of the same
- * account — an .xlsx and a .csv that disagree by a day — produces two
- * fingerprints and imports twice. That is exactly what happened on account 8
- * on 16 September: 19 credits, N776,822,000, each sitting in the unmatched
- * pool beside its own matched twin, indistinguishable from money that had
- * arrived twice.
+ * question. The date is part of it, so the same credit read off two different
+ * exports of the same account — an .xlsx and a .csv that disagree by a day —
+ * produces two fingerprints and imports twice. That is what happened on
+ * account 8 on 16 September: 19 credits, N776,822,000, each sitting in the
+ * unmatched pool beside its own matched twin, indistinguishable from money
+ * that had arrived twice.
  *
- * A bank reference of this shape settles it. 34503253780 is Zenith's id for
- * one transfer; it is issued once and never reused, so two rows carrying it
- * are one transaction however their dates were parsed.
+ * So the reference alone decides it, and a reference already on the account is
+ * the same payment WHATEVER else differs — date, description, depositor,
+ * amount. A bank issues 34503253780 once for one transfer; two rows carrying
+ * it are one transfer read twice, and no disagreement between the two files
+ * about anything else changes that.
  *
- * The shape test is the whole safeguard. These mappings often point the
- * reference column at the narration instead — "POOKIE ENERGY L/To FIDELITY
- * BANK | SOROMAN NIGERIA" — which repeats every time that customer pays, and
- * treating THAT as an identity is what made the first payment from a payer
- * swallow every later one (see the rule this replaces). Digits only, eight or
- * more: narration never looks like that, and every one of the 4,146 rows that
- * does is unique per transaction on its account — verified against the live
- * table, where the only repeats are the 19 double-imports above.
+ * That is stricter than the shape test this replaces (digits only, eight or
+ * more), which trusted a reference as an identity only when it looked like a
+ * bank's id. On the live table the difference is two rows, both on account 37,
+ * and both are the same underlying problem rather than an exception to the
+ * rule: that account's mapping points reference_column at column 4, which is
+ * ALSO its narration and depositor column, so its "reference" is text like
+ * "POOKIE ENERGY L/To FIDELITY BANK | SOROMAN NIGERIA" that repeats every
+ * time that payer pays. An account whose reference column is not a reference
+ * needs its mapping corrected — see upsertMapping — because no dedup rule can
+ * tell two payments apart when the file gives them the same name.
+ *
+ * A row with NO reference at all falls back to the composite fingerprint.
+ * There is nothing to identify it by, and refusing every unreferenced row
+ * after the first would discard real credits.
  */
-const TRANSACTION_ID = /^\d{8,}$/;
-const transactionId = (ref) => {
-  const s = String(ref || "").trim();
-  return TRANSACTION_ID.test(s) ? s : null;
+const paymentReference = (ref) => {
+  const s = String(ref || "").trim().toLowerCase();
+  return s || null;
 };
 
 const bankStatementRepo = {
-  transactionId,
+  paymentReference,
   dedupKey,
 
   // ── Column mapping ────────────────────────────────────────────────────────
@@ -97,9 +103,10 @@ const bankStatementRepo = {
   /**
    * Stores a parsed statement.
    *
-   * Rows are deduplicated twice: against everything already held for the
-   * account (by fingerprint *or* by the bank's own reference), and against the
-   * rest of the incoming batch. A statement that yields no new rows is
+   * Rows are deduplicated against everything already held for the account and
+   * against the rest of the incoming batch — by REFERENCE, which is the
+   * payment's identity, falling back to the composite fingerprint only for a
+   * row that carries no reference. A statement that yields no new rows is
    * rejected by the caller rather than stored empty.
    */
   async ingest({ bankAccountId, filename, uploadedBy, rows }) {
@@ -114,58 +121,60 @@ const bankStatementRepo = {
       WHERE bank_account_id = ${bankAccountId}
     `;
     const seenKeys = new Set(existing.map((e) => e.dedup_key));
-    const seenTxnIds = new Set(
-      existing.map((e) => transactionId(e.bank_ref)).filter(Boolean),
+    const seenReferences = new Set(
+      existing.map((e) => paymentReference(e.bank_ref)).filter(Boolean),
     );
 
     /**
-     * A row is a duplicate only if the WHOLE of it matches — date, reference,
-     * amount and depositor together.
+     * The reference decides, and the fingerprint only covers what has none.
      *
-     * There was a second rule here: a row was also discarded if its bank
-     * reference alone matched anything already on the account. That is only
-     * safe if the reference column holds a unique transaction id, and on these
-     * statements it does not — the mapping points it at the narration, which
-     * is text like "POOKIE ENERGY L/To FIDELITY BANK | SOROMAN NIGERIA" and
-     * repeats every time that customer pays.
+     * A payment's reference IS the payment. Two rows carrying the same one are
+     * the same credit read twice, however much else disagrees — a date a day
+     * out, a description worded differently by another export, even an amount,
+     * because a file that gives two different amounts the same reference is
+     * wrong about something and importing both is the worst answer to that.
      *
-     * So the first payment from a customer silently swallowed every later one.
-     * A N38,461,500 credit on 1 September was rejected because a N70,000,000
-     * credit from the same payer was already on file — different date,
-     * different money, discarded as "already on record" with no way to see
-     * which row it collided with.
+     * The rule this tightens said a row was a duplicate only when the WHOLE of
+     * it matched: date, reference, amount and depositor together. It let 19
+     * credits onto account 8 twice, N776,822,000 of them, because an .xlsx and
+     * a .csv of the same account dated them differently and a date is part of
+     * the key.
      *
-     * Losing a real credit is far worse than importing a near-duplicate: a
-     * missing line looks exactly like money that never arrived, while a
-     * doubled one is visible and can be deleted. The composite key still
-     * catches the case this was meant to catch — the same file uploaded twice.
+     * Before that, the reference WAS the identity and the swallow it caused is
+     * the reason it was removed: a N38,461,500 credit on 1 September was
+     * refused because a N70,000,000 credit from the same payer was already on
+     * file. That was never the reference's fault. Account 37 maps its
+     * reference column onto column 4 — the same column it reads narration and
+     * depositor from — so what it calls a reference is "POOKIE ENERGY L/To
+     * FIDELITY BANK | SOROMAN NIGERIA", which every payment from that payer
+     * repeats. The mapping is what needs correcting; a dedup rule cannot tell
+     * two payments apart when the file hands it one name for both.
      *
-     * What it does NOT catch is the same transaction arriving with two
-     * different dates, because the date is part of the key. A bank's own
-     * transaction id does catch that, and is checked second — see
-     * `transactionId` above for why only that shape of reference is trusted
-     * with it.
+     * What HAS changed is that the loss is no longer silent. A skipped row is
+     * now counted as a repeated reference and named in the upload's result, so
+     * a mis-mapped account announces itself on the first upload instead of
+     * quietly dropping a month of credits.
      */
     const fresh = [];
     let duplicates = 0;
-    let repeatedTransactions = 0;
+    let repeatedReferences = 0;
     for (const r of prepared) {
       if (seenKeys.has(r.dedup)) {
         duplicates++;
         continue;
       }
-      const txnId = transactionId(r.bankRef);
-      if (txnId && seenTxnIds.has(txnId)) {
+      const reference = paymentReference(r.bankRef);
+      if (reference && seenReferences.has(reference)) {
         duplicates++;
-        repeatedTransactions++;
+        repeatedReferences++;
         continue;
       }
       seenKeys.add(r.dedup);
-      if (txnId) seenTxnIds.add(txnId);
+      if (reference) seenReferences.add(reference);
       fresh.push(r);
     }
 
-    if (!fresh.length) return { added: 0, duplicates, repeatedTransactions, statement: null };
+    if (!fresh.length) return { added: 0, duplicates, repeatedReferences, statement: null };
 
     /**
      * The date as it was printed, and nothing else.
@@ -204,7 +213,7 @@ const bankStatementRepo = {
       `;
     }
 
-    return { added: fresh.length, duplicates, repeatedTransactions, statement };
+    return { added: fresh.length, duplicates, repeatedReferences, statement };
   },
 
   async listStatements(bankAccountId) {

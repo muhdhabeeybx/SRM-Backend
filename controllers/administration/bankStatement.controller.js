@@ -55,16 +55,18 @@ async function uploadStatement(req, res) {
   });
 
   /**
-   * A row skipped because its transaction id is already on the account is
-   * worth saying out loud, separately from an identical row.
+   * A row skipped because its REFERENCE is already on the account is worth
+   * saying out loud, separately from a row that matched in every field.
    *
-   * It means this file dates a credit differently from the file that brought
-   * it in — a .csv export and an .xlsx of the same account disagreeing by a
-   * day — and the desk is otherwise left to wonder why a row it can see in the
-   * statement did not arrive. Silence is what made the old rule dangerous.
+   * It means this file describes a credit differently from the file that
+   * brought it in — a different date, a reworded narration — and the desk is
+   * otherwise left to wonder why a row it can see in the statement did not
+   * arrive. Silence about dropped rows is what made this rule dangerous the
+   * last time it was in force; on an account whose reference column is
+   * mis-mapped onto the narration, this line is the symptom to read.
    */
-  const repeats = result.repeatedTransactions
-    ? `, ${result.repeatedTransactions} already on record under a different date`
+  const repeats = result.repeatedReferences
+    ? `, ${result.repeatedReferences} already on record under the same reference`
     : "";
 
   if (result.added === 0) {
