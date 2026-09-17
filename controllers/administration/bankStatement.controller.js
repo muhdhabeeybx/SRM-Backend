@@ -54,14 +54,31 @@ async function uploadStatement(req, res) {
     rows,
   });
 
+  /**
+   * A row skipped because its transaction id is already on the account is
+   * worth saying out loud, separately from an identical row.
+   *
+   * It means this file dates a credit differently from the file that brought
+   * it in — a .csv export and an .xlsx of the same account disagreeing by a
+   * day — and the desk is otherwise left to wonder why a row it can see in the
+   * statement did not arrive. Silence is what made the old rule dangerous.
+   */
+  const repeats = result.repeatedTransactions
+    ? `, ${result.repeatedTransactions} already on record under a different date`
+    : "";
+
   if (result.added === 0) {
-    return fail(res, 409, `Every row in that file is already on record (${result.duplicates} duplicates)`);
+    return fail(
+      res,
+      409,
+      `Every row in that file is already on record (${result.duplicates} duplicates${repeats})`,
+    );
   }
 
   return ok(
     res,
     result,
-    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped`,
+    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped${repeats}`,
   );
 }
 

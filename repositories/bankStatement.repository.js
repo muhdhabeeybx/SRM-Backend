@@ -22,7 +22,39 @@ function dedupKey({ txnDate, bankRef, amount, depositor }) {
   return crypto.createHash("sha256").update(payload).digest("hex").slice(0, 32);
 }
 
+/**
+ * The bank's own transaction id, where the reference column holds one.
+ *
+ * A composite fingerprint answers "is this the same ROW?" and that is not the
+ * same question as "is this the same TRANSACTION?". The date is part of the
+ * fingerprint, so the same credit read off two different exports of the same
+ * account — an .xlsx and a .csv that disagree by a day — produces two
+ * fingerprints and imports twice. That is exactly what happened on account 8
+ * on 16 September: 19 credits, N776,822,000, each sitting in the unmatched
+ * pool beside its own matched twin, indistinguishable from money that had
+ * arrived twice.
+ *
+ * A bank reference of this shape settles it. 34503253780 is Zenith's id for
+ * one transfer; it is issued once and never reused, so two rows carrying it
+ * are one transaction however their dates were parsed.
+ *
+ * The shape test is the whole safeguard. These mappings often point the
+ * reference column at the narration instead — "POOKIE ENERGY L/To FIDELITY
+ * BANK | SOROMAN NIGERIA" — which repeats every time that customer pays, and
+ * treating THAT as an identity is what made the first payment from a payer
+ * swallow every later one (see the rule this replaces). Digits only, eight or
+ * more: narration never looks like that, and every one of the 4,146 rows that
+ * does is unique per transaction on its account — verified against the live
+ * table, where the only repeats are the 19 double-imports above.
+ */
+const TRANSACTION_ID = /^\d{8,}$/;
+const transactionId = (ref) => {
+  const s = String(ref || "").trim();
+  return TRANSACTION_ID.test(s) ? s : null;
+};
+
 const bankStatementRepo = {
+  transactionId,
   dedupKey,
 
   // ── Column mapping ────────────────────────────────────────────────────────
@@ -78,10 +110,13 @@ const bankStatementRepo = {
     }));
 
     const existing = await client`
-      SELECT dedup_key FROM bank_statement_lines
+      SELECT dedup_key, bank_ref FROM bank_statement_lines
       WHERE bank_account_id = ${bankAccountId}
     `;
     const seenKeys = new Set(existing.map((e) => e.dedup_key));
+    const seenTxnIds = new Set(
+      existing.map((e) => transactionId(e.bank_ref)).filter(Boolean),
+    );
 
     /**
      * A row is a duplicate only if the WHOLE of it matches — date, reference,
@@ -104,19 +139,33 @@ const bankStatementRepo = {
      * missing line looks exactly like money that never arrived, while a
      * doubled one is visible and can be deleted. The composite key still
      * catches the case this was meant to catch — the same file uploaded twice.
+     *
+     * What it does NOT catch is the same transaction arriving with two
+     * different dates, because the date is part of the key. A bank's own
+     * transaction id does catch that, and is checked second — see
+     * `transactionId` above for why only that shape of reference is trusted
+     * with it.
      */
     const fresh = [];
     let duplicates = 0;
+    let repeatedTransactions = 0;
     for (const r of prepared) {
       if (seenKeys.has(r.dedup)) {
         duplicates++;
         continue;
       }
+      const txnId = transactionId(r.bankRef);
+      if (txnId && seenTxnIds.has(txnId)) {
+        duplicates++;
+        repeatedTransactions++;
+        continue;
+      }
       seenKeys.add(r.dedup);
+      if (txnId) seenTxnIds.add(txnId);
       fresh.push(r);
     }
 
-    if (!fresh.length) return { added: 0, duplicates, statement: null };
+    if (!fresh.length) return { added: 0, duplicates, repeatedTransactions, statement: null };
 
     /**
      * The date as it was printed, and nothing else.
@@ -155,7 +204,7 @@ const bankStatementRepo = {
       `;
     }
 
-    return { added: fresh.length, duplicates, statement };
+    return { added: fresh.length, duplicates, repeatedTransactions, statement };
   },
 
   async listStatements(bankAccountId) {
