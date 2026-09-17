@@ -1,6 +1,6 @@
 const { escapeHtml } = require("./email");
 const {
-  INK, MUTED, TINT, CREDIT, BALANCE, FONT_STACK,
+  INK, MUTED, TINT, FONT_STACK,
   TABLE, KEY_S, CREDIT_S, BALANCE_S,
   cell, hcell, m, n0, ordinalDate,
 } = require("./reportTable");
@@ -166,36 +166,6 @@ const idCell = (text) => cell(`<strong>${escapeHtml(up(text))}</strong>`, KEY);
 /** A stock figure, tinted so the eye finds the two ends of the day's movement. */
 const stockCell = (html) => cell(html, { ...KEY, r: true });
 
-// ─── The at-a-glance band ───────────────────────────────────────────────────
-
-const TONE_COLOR = { credit: CREDIT, balance: BALANCE };
-
-/**
- * The whole day in one strip, before any table.
- *
- * A table rather than flex or grid: Outlook renders neither, and this is the
- * one block that has to survive every client intact.
- */
-const summaryBand = (cells) =>
-  `<table width="100%" border="0" cellpadding="10" cellspacing="0" style="border-collapse:collapse;margin:14px 0 4px;"><tr>` +
-  cells
-    .map(
-      (c) =>
-        // The font is named once on the cell, not on each of the three divs
-        // inside it. Outlook resets font-family at the TABLE boundary, so the
-        // <td> has to say it; the divs within a td inherit it everywhere.
-        `<td width="${Math.floor(100 / cells.length)}%" bgcolor="${TINT}" ` +
-        `style="vertical-align:top;font-family:${FONT};border-top:3px solid ${TONE_COLOR[c.tone] || INK};">` +
-        `<div style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:${MUTED};">` +
-        `${escapeHtml(c.label)}</div>` +
-        `<div style="font-size:17px;font-weight:700;color:${TONE_COLOR[c.tone] || INK};padding-top:3px;">` +
-        `${c.value}</div>` +
-        (c.note ? `<div style="font-size:10px;color:${MUTED};padding-top:2px;">${escapeHtml(c.note)}</div>` : "") +
-        `</td>`
-    )
-    .join("") +
-  `</tr></table>`;
-
 // ─── Depot sales ────────────────────────────────────────────────────────────
 
 /**
@@ -280,45 +250,77 @@ const gateReport = (pfis) => {
 // ─── Expenses ───────────────────────────────────────────────────────────────
 
 /**
- * What has been billed, what has left, and the gap.
+ * The day first, the running totals after it.
+ *
+ * This table used to be to-date columns only, listing every batch and category
+ * that had ever raised an expense — twenty-four rows of cumulative figures in
+ * which the three requests actually raised that day were invisible. A daily
+ * report whose expenses section says the same thing every day is a section
+ * people stop reading.
+ *
+ * So a row appears only if something happened on it TODAY — a request raised,
+ * or money paid out — and it leads with those two figures. The totals stay on
+ * the right, because "what is still owed on this batch" is the question the
+ * day's figures prompt and it should not need a second email to answer.
  *
  * General expenses sit in the same table under the batch rows. They are money
  * out like any other, and a separate table would invite the reader to add the
  * two up themselves. Labelled by category, because "General" as one number
  * answers nothing.
  */
-const expenseRow = (label, requested, paid) => {
-  const unpaid = Math.max(0, requested - paid);
+const expenseRow = (label, today, toDate) => {
+  const unpaid = Math.max(0, toDate.requested - toDate.paid);
+  const reqToday = m(today.requested);
+  const paidToday = m(today.paid);
+  const paid = m(toDate.paid);
   return (
     `<tr>` +
     idCell(label) +
-    cell(m(requested), { r: true }) +
-    cell(m(paid), credit(m(paid))) +
+    cell(reqToday, { ...KEY, r: true }) +
+    cell(paidToday, { ...credit(paidToday), s: paidToday === "—" ? KEY_S : KEY_S + CREDIT_S, bg: TINT }) +
+    cell(m(toDate.requested), { r: true }) +
+    cell(paid, credit(paid)) +
     cell(m(unpaid), balance(m(unpaid))) +
     `</tr>`
   );
 };
 
-const expenses = (pfis, general) => {
-  const rows = [
-    ...pfis
-      .filter((p) => p.expenses.toDate.count > 0)
-      .map((p) => expenseRow(p.pfiNumber, p.expenses.toDate.amount, p.expenses.toDate.paid)),
-    ...(general || [])
-      .filter((g) => g.toDate.count > 0)
-      .map((g) => expenseRow(`General — ${g.category}`, g.toDate.amount, g.toDate.paid)),
-  ];
+/**
+ * `expenseLines` arrives filtered to today's movement and already ordered —
+ * see buildPfiDailyReportData. It is the one section whose rows are not the
+ * active-batch list: a closed batch that spent money today is on it too, and
+ * only the service knows that batch's number.
+ */
+const expenses = (lines) => {
+  const rows = (lines || []).map((l) => expenseRow(l.label, l.today, l.toDate));
   if (!rows.length) return "";
   return (
-    section("Expenses", "across all categories") +
-    table(["PFI/Category", "Total amount requested", "Total amount paid", "Amount not yet paid"], rows)
+    section("Expenses", "raised or paid today") +
+    table(
+      [
+        "PFI/Category", "Requested today", "Paid today",
+        "Total requested", "Total paid", "Not yet paid",
+      ],
+      rows
+    )
   );
 };
 
 // ─── Commissions ────────────────────────────────────────────────────────────
 
 /**
- * What the day's orders earned agents, and what has gone out against it.
+ * What the day's orders earned agents, and what went out against it — then the
+ * running totals.
+ *
+ * The DUE column used to be the to-date outstanding figure sitting under a
+ * heading that read like a daily one, so a batch with ₦21m of accumulated
+ * arrears and no trading today reported ₦21m "commission due" on a day it
+ * earned nobody anything. Today's two figures lead now; the totals follow and
+ * are labelled as totals.
+ *
+ * A batch appears if something happened on it today — product sold, commission
+ * earned, or commission settled. A batch that only carries old arrears is not
+ * today's news, and its arrears are still on the line the day it next trades.
  *
  * LITRES SOLD TODAY is the batch's own order volume for the day — the figure
  * commission is worked out from — rather than a separate total kept on the
@@ -326,16 +328,24 @@ const expenses = (pfis, general) => {
  */
 const commissions = (pfis) => {
   const rows = pfis
-    .filter((p) => p.commission.entries > 0 || p.orders.today.litres > 0)
+    .filter(
+      (p) =>
+        p.orders.today.litres > 0 || p.commission.today.due > 0 || p.commission.today.paid > 0
+    )
     .map((p) => {
+      const c = p.commission;
       const sold = q0(p.orders.today.litres, p.unit);
-      const due = m(p.commission.due);
-      const paid = m(p.commission.paid);
+      const dueToday = m(c.today.due);
+      const paidToday = m(c.today.paid);
+      const due = m(c.due);
+      const paid = m(c.paid);
       return (
         `<tr>` +
         idCell(p.pfiNumber) +
         cell(escapeHtml(up(p.location)) || "—") +
-        cell(sold, credit(sold)) +
+        cell(sold, { ...credit(sold), s: sold === "—" ? KEY_S : KEY_S + CREDIT_S, bg: TINT }) +
+        cell(dueToday, { ...KEY, r: true }) +
+        cell(paidToday, { ...credit(paidToday), s: paidToday === "—" ? KEY_S : KEY_S + CREDIT_S, bg: TINT }) +
         cell(due, balance(due)) +
         cell(paid, credit(paid)) +
         `</tr>`
@@ -343,8 +353,14 @@ const commissions = (pfis) => {
     });
   if (!rows.length) return "";
   return (
-    section("Commissions", "by PFI") +
-    table(["PFI", "Location", "Litres sold today", "Commission due", "Commission paid"], rows)
+    section("Commissions", "earned or settled today") +
+    table(
+      [
+        "PFI", "Location", "Litres sold today", "Commission due today", "Commission paid today",
+        "Total still due", "Total paid",
+      ],
+      rows
+    )
   );
 };
 
@@ -634,20 +650,22 @@ const renderPfiDailyReportEmail = (d) => {
     `<p style="margin:0;font-size:13px;line-height:1.55;">` +
     `Please find below the summary of sales and operations across all locations for ` +
     `<strong>${escapeHtml(date)}</strong>.</p>` +
-    summaryBand([
-      // No unit on this one, deliberately: it is the day's volume across every
-      // batch, and the batches are not all measured in the same thing — the two
-      // LPG ones trade in kilograms. Naming a unit here would put a wrong one on
-      // the biggest figure in the document. The per-batch tables below carry the
-      // real units, which is where a reader who needs them looks.
-      { label: "Total volume sold today", value: n0(s.litresSold), note: "across all batches", tone: "credit" },
-      { label: "Sales value today", value: m(s.salesValue), tone: "credit" },
-      { label: "Amount received today", value: m(s.fundsReceived), tone: "credit" },
-      { label: "Outstanding balance", value: m(s.balance), tone: "balance" },
-    ]) +
+    /**
+     * There is deliberately no figure between the greeting and DEPOT SALES.
+     *
+     * A four-tile band sat here with the day in headline numbers, and the
+     * biggest of them could not be trusted: TOTAL VOLUME SOLD added litres of
+     * petrol to kilograms of gas, because the batches are not measured in the
+     * same thing, and no honest unit could be printed beside it. A summary
+     * whose first figure is wrong teaches the reader to distrust the tables
+     * underneath, which are right.
+     *
+     * The tables are the report. Each one carries its own units and its own
+     * totals, and every figure in them can be traced to the rows it came from.
+     */
     depotSales(pfis) +
     gateReport(pfis) +
-    expenses(pfis, d.generalExpenses) +
+    expenses(d.expenseLines) +
     commissions(pfis) +
     truckSales(d.truckSales || []) +
     stationGroups(d.stations || []) +
@@ -658,9 +676,12 @@ const renderPfiDailyReportEmail = (d) => {
   /**
    * The plain-text alternative.
    *
-   * What a text-only client, a watch and most screen readers actually render,
-   * so it carries the same four figures the band does and names the sections
-   * that follow rather than being three numbers and a shrug.
+   * What a text-only client, a watch and most screen readers actually render.
+   * It used to repeat the four headline figures the band showed; those went
+   * with the band, and for the same reason — a volume total that adds litres to
+   * kilograms is not a figure worth carrying anywhere. What is left says what
+   * the report covers and how much of it there is, and sends the reader to the
+   * tables, which are the report.
    */
   const text = [
     `SOROMAN Sales & Operations Report for ${date}`,
@@ -668,11 +689,6 @@ const renderPfiDailyReportEmail = (d) => {
     "Dear Sir,",
     "",
     `Please find below the summary of sales and operations across all locations for ${date}.`,
-    "",
-    `Total sold today        ${n0(s.litresSold)}`,
-    `Sales value today       ${m(s.salesValue)}`,
-    `Amount received today   ${m(s.fundsReceived)}`,
-    `Outstanding balance     ${m(s.balance)}`,
     "",
     `${s.activePfis || 0} active PFI(s), ${s.activeBatches || 0} truck-sales batch(es), ` +
       `${s.activeStations || 0} filling station(s).`,

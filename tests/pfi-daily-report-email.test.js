@@ -37,8 +37,15 @@ const pfi = (over = {}) => ({
     trucksLoadedToDate: 42, litresLoadedToDate: 1436806,
     trucksToDate: 42, litresTicketedToDate: 1436806,
   },
-  expenses: { today: { count: 1, amount: 500 }, toDate: { count: 9, amount: 666936121, paid: 15986121 } },
-  commission: { entries: 12, due: 640000, paid: 936806, litres: 718000 },
+  expenses: {
+    today: { count: 1, requested: 2400000, paid: 0 },
+    toDate: { count: 9, requested: 666936121, paid: 15986121 },
+  },
+  commission: {
+    entries: 12, litres: 718000,
+    today: { entries: 1, due: 105000, paid: 105000 },
+    due: 245000, paid: 1331806,
+  },
   ...over,
 });
 
@@ -67,6 +74,7 @@ const data = (over = {}) => ({
   },
   pfis: [pfi()],
   generalExpenses: [],
+  expenseLines: [],
   truckSales: [],
   stations: [],
   staffReports: [],
@@ -90,6 +98,17 @@ describe("sales & operations report — the envelope", () => {
     // And the text part carries both, for the clients that render nothing else.
     assert.match(text, /^SOROMAN Sales & Operations Report for 16th September 2026/);
     assert.match(text, /Dear Sir,/);
+  });
+
+  test("no headline figures stand between the greeting and the first table", () => {
+    // The band that used to sit here led with a volume total that added litres
+    // of petrol to kilograms of gas. A summary whose first figure is wrong
+    // teaches the reader to distrust the tables underneath, which are right.
+    const { html, text } = render({ pfis: [pfi(), gasPfi()] });
+    const intro = html.slice(0, html.indexOf("DEPOT SALES"));
+    assert.doesNotMatch(intro, /₦/, "no money figure before the first table");
+    assert.doesNotMatch(intro, /TOTAL VOLUME SOLD|OUTSTANDING BALANCE|AMOUNT RECEIVED TODAY/);
+    assert.doesNotMatch(text, /Total sold today|Outstanding balance/);
   });
 
   test("no attachment is offered and none is referred to", () => {
@@ -155,25 +174,76 @@ describe("sales & operations report — loading and exit gate", () => {
 });
 
 describe("sales & operations report — expenses", () => {
-  test("requested, paid, and the gap between them", () => {
-    const { html } = render({
-      generalExpenses: [
-        { category: "Audit Fees", today: { count: 0, amount: 0 }, toDate: { count: 3, amount: 19359250, paid: 19359250 } },
-      ],
-    });
-    assert.match(html, /TOTAL AMOUNT REQUESTED/);
-    assert.match(html, /TOTAL AMOUNT PAID/);
-    assert.match(html, /AMOUNT NOT YET PAID/);
+  const line = (over = {}) => ({
+    label: "PFI/46/26/MT BORA/WARRI/16KT",
+    today: { count: 1, requested: 2400000, paid: 0 },
+    toDate: { count: 9, requested: 666936121, paid: 15986121 },
+    ...over,
+  });
+
+  test("the day leads, and the running totals follow it", () => {
+    const { html } = render({ expenseLines: [line()] });
+    const cols = ["REQUESTED TODAY", "PAID TODAY", "TOTAL REQUESTED", "TOTAL PAID", "NOT YET PAID"];
+    for (const c of cols) assert.ok(html.includes(c), `${c} is missing from EXPENSES`);
+    // Today's figures come first in the row, not after two cumulative ones.
+    assert.ok(
+      html.indexOf("REQUESTED TODAY") < html.indexOf("TOTAL REQUESTED"),
+      "a reader scanning left to right must meet the day before the total"
+    );
+    assert.match(html, /₦2,400,000/, "what was raised today");
     // 666,936,121 billed less 15,986,121 paid.
     assert.match(html, /₦650,950,000/, "the unpaid balance is worked out, not left to the reader");
-    assert.match(html, /GENERAL — AUDIT FEES/, "expenses outside any batch are money out too");
+  });
+
+  test("expenses outside any batch are money out too", () => {
+    const { html } = render({
+      expenseLines: [line({ label: "General — Audit Fees" })],
+    });
+    assert.match(html, /GENERAL — AUDIT FEES/);
   });
 
   test("what is still owed is red and what has been settled is green", () => {
-    const { html } = render();
+    const { html } = render({ expenseLines: [line()] });
     const row = html.slice(html.indexOf("₦666,936,121"), html.indexOf("₦650,950,000") + 40);
     assert.ok(row.includes("#15803D"), "the paid figure carries the credit colour");
     assert.ok(row.includes("#B91C1C"), "the outstanding figure carries the balance colour");
+  });
+
+  test("a quiet day has no expenses section at all", () => {
+    // The service filters `expenseLines` to today's movement, so an empty list
+    // is exactly what a day with no expense activity produces. It must not
+    // leave a heading with nothing under it.
+    const { html } = render({ expenseLines: [] });
+    assert.doesNotMatch(html, /REQUESTED TODAY/);
+    assert.equal((html.match(/<div\b/g) || []).length, (html.match(/<\/div>/g) || []).length);
+  });
+});
+
+describe("sales & operations report — commissions", () => {
+  test("today's commission leads, and the arrears are labelled as totals", () => {
+    const { html } = render();
+    for (const c of ["COMMISSION DUE TODAY", "COMMISSION PAID TODAY", "TOTAL STILL DUE", "TOTAL PAID"]) {
+      assert.ok(html.includes(c), `${c} is missing from COMMISSIONS`);
+    }
+    assert.ok(
+      html.indexOf("COMMISSION DUE TODAY") < html.indexOf("TOTAL STILL DUE"),
+      "the day comes before the arrears"
+    );
+    assert.match(html, /₦105,000/, "earned today");
+    assert.match(html, /₦245,000/, "still owed in total");
+  });
+
+  test("a batch carrying only old arrears is not today's news", () => {
+    // Nothing sold, nothing earned, nothing settled — but ₦21m of accumulated
+    // arrears. Under the old to-date column this batch reported ₦21m
+    // "commission due" on a day it earned nobody anything.
+    const quiet = pfi({
+      orders: { today: { count: 0, litres: 0, value: 0, paid: 0 }, toDate: pfi().orders.toDate, outstanding: 0 },
+      commission: { entries: 4, litres: 0, today: { entries: 0, due: 0, paid: 0 }, due: 21718032, paid: 0 },
+    });
+    const { html } = render({ pfis: [quiet] });
+    assert.doesNotMatch(html, /₦21,718,032/);
+    assert.doesNotMatch(html, /COMMISSION DUE TODAY/, "no line moved, so there is no table");
   });
 });
 
