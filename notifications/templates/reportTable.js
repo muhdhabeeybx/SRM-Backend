@@ -51,15 +51,34 @@ const BALANCE = "#B91C1C";
  * Outlook honours, so padding and alignment cost nothing per cell and only the
  * border remains in CSS. Colour is inherited from the wrapper. Same rendering,
  * roughly a third of the bytes.
+ *
+ * The same reasoning retired three more declarations. `background:` became the
+ * `bgcolor` ATTRIBUTE, which every client including Outlook honours, and on a
+ * <th> both `font-weight` (a header cell is bold already) and the repeated
+ * background were restating what the element does. Across the ~150 header and
+ * tinted cells a day's report renders, that was several KB of a document Gmail
+ * clips at 102KB.
+ *
+ * The font is the one thing that had to be ADDED. Gmail and Apple Mail inherit
+ * `font-family` into a table happily; Outlook, which renders through Word, does
+ * not — it resets at the table boundary, so the prose came out in Satoshi and
+ * every figure beneath it in a serif.
  */
+const FONT_STACK =
+  "'Satoshi','Satoshi Variable',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif";
+
 const TABLE =
   '<table width="100%" border="1" bordercolor="#CCCCCC" cellpadding="6" cellspacing="0" ' +
-  'style="border-collapse:collapse;font-size:12px;">';
-const TH_S = "background:" + HEAD + ";color:#fff;font-weight:600;text-transform:uppercase;font-size:11px;letter-spacing:.3px;";
+  `style="border-collapse:collapse;font-size:12px;font-family:${FONT_STACK};">`;
+
+/** Header cells: white type on HEAD, which `hcell` paints with `bgcolor`. */
+const TH_S = "color:#fff;text-transform:uppercase;font-size:11px;letter-spacing:.3px;";
+
 // Opening and closing stock carry the report, so they are tinted: the eye
-// finds the two ends of the day's movement without reading the headers.
-const KEY_S = "background:" + TINT + ";font-weight:700;";
-const TH_KEY_S = TH_S + "background:" + HEAD_KEY + ";";
+// finds the two ends of the day's movement without reading the headers. The
+// tint itself is `bg: TINT` on the cell; this is the weight that goes with it.
+const KEY_S = "font-weight:700;";
+
 /** The two meaning-carrying colours, as cell styles. */
 const CREDIT_S = "color:" + CREDIT + ";font-weight:600;";
 const BALANCE_S = "color:" + BALANCE + ";font-weight:600;";
@@ -70,11 +89,12 @@ const BALANCE_S = "color:" + BALANCE + ";font-weight:600;";
  * spanned pays for CSS, and those are a handful per table rather than every
  * cell in it.
  */
-const cell = (html, { r = false, s = "", span = 0 } = {}) =>
-  `<td${r ? ' align="right"' : ""}${span ? ` colspan="${span}"` : ""}${s ? ` style="${s}"` : ""}>${html}</td>`;
+const cell = (html, { r = false, s = "", span = 0, bg = "" } = {}) =>
+  `<td${bg ? ` bgcolor="${bg}"` : ""}${r ? ' align="right"' : ""}` +
+  `${span ? ` colspan="${span}"` : ""}${s ? ` style="${s}"` : ""}>${html}</td>`;
 
-const hcell = (label, { r = false, s = "" } = {}) =>
-  `<th${r ? ' align="right"' : ""} style="${s || TH_S}">${escapeHtml(label)}</th>`;
+const hcell = (label, { r = false, s = "", bg = HEAD } = {}) =>
+  `<th bgcolor="${bg}"${r ? ' align="right"' : ""} style="${s || TH_S}">${escapeHtml(label)}</th>`;
 
 /** "₦1,504,000" — same rule, with the naira sign. */
 const m = (val) => {
@@ -104,7 +124,7 @@ const plural = (count, singular, pluralForm = `${singular}s`) =>
   `${count} ${count === 1 ? singular : pluralForm}`;
 
 module.exports = {
-  INK, MUTED, HEAD, HEAD_KEY, TINT, CREDIT, BALANCE,
-  TABLE, TH_S, KEY_S, TH_KEY_S, CREDIT_S, BALANCE_S,
+  INK, MUTED, HEAD, HEAD_KEY, TINT, CREDIT, BALANCE, FONT_STACK,
+  TABLE, TH_S, KEY_S, CREDIT_S, BALANCE_S,
   cell, hcell, m, n0, ordinalDate, plainDate, plural,
 };

@@ -1751,11 +1751,20 @@ const CATALOG = {
   ...expenseStages(),
 
   // ═══ Scheduled reports (email) ═════════════════════════════════════════════
+  //
+  // NOTHING DISPATCHES THE NEXT THREE TYPES. The nightly send and the Reports
+  // Hub's button both go through `reports.pfi_daily` below — one report, one
+  // format. These are the depot-grouped report Django sent, its on-demand twin,
+  // and the staff-sales workbook mail, kept as working code rather than deleted
+  // because the format took a long time to get right and a rollback should be a
+  // one-line change in services/dailyReportDispatch rather than an archaeology
+  // exercise. Do not wire one of them back up without deciding which report the
+  // desk is meant to be reading — two daily reports in one inbox is how both
+  // get ignored.
+  //
   // Django sent these from Celery Beat as a bare, unbranded HTML email — staff
   // entries, PFI stock and orders, one section per depot — built by
   // _build_combined_html_report()/send_report_email() (administration/tasks.py).
-  // There is no scheduler here yet, so it is triggered by `npm run report:daily`
-  // (or an admin endpoint); wiring a scheduler later changes only the trigger.
   //
   // Deliberately NOT run through reportEmail()/layout(): the source format has
   // no wrapper, no CSS classes, no branding — every style is inline, matched to
@@ -1793,10 +1802,9 @@ const CATALOG = {
       }),
   },
 
-  // Sent on demand from the Reports Hub's "Email report" button — same
-  // combined report as `reports.daily` (buildCombinedDailyReportData() for
-  // the requested date), just triggered by a click instead of the scheduled
-  // job, to a recipient list typed in on the spot rather than a fixed env var.
+  // WAS sent on demand from the Reports Hub's "Email report" button — the same
+  // combined report as `reports.daily`, to a recipient list typed in on the
+  // spot. That button now sends `reports.pfi_daily`; see the note above.
   //
   // data: reportDate, totals, locations — identical shape to reports.daily.
   "reports.hub_email": {
@@ -1816,41 +1824,34 @@ const CATALOG = {
   },
 
   /**
-   * The day's trading assembled per PFI rather than per depot.
+   * THE daily report: the day's trading assembled per PFI.
    *
-   * A separate type, not a replacement for `reports.daily`: the combined
-   * report is what the desk reads today, and swapping the format underneath
-   * it on the strength of an untested template is how a daily report gets
-   * distrusted. Both can run until this one has been read a few times.
+   * Sent by the 23:50 cron (services/dailyReportDispatch) and by the Reports
+   * Hub's "Email report" button, which is the point — one report, one format,
+   * whether it goes out on a schedule or on a click. It replaced the
+   * depot-grouped `reports.daily` above, which is kept only for the Hub's
+   * older on-demand path.
    *
    * data comes from services/pfiDailyReport.service.js's
-   * buildPfiDailyReportData(): { reportDate, summary, pfis, truckSales }.
+   * buildPfiDailyReportData(): { reportDate, summary, pfis, truckSales,
+   * stations, staffReports }.
+   *
+   * No attachment. It used to carry the Hub's workbook when the client sent
+   * one; the body now says everything the workbook did, and a spreadsheet
+   * nobody opens is a spreadsheet that makes the email look like homework.
+   * The Hub's Download button still produces it for anyone who wants to work
+   * the numbers at a desk.
    */
   "reports.pfi_daily": {
     audience: "staff",
     category: "reports",
     priority: "normal",
     channels: EMAIL_ONLY,
-    title: (d) => `Soroman Daily Report - ${formatDate(d.reportDate)}`,
+    title: (d) => `SOROMAN Sales & Operations Report for ${formatDate(d.reportDate)}`,
     body: (d) =>
       `${d.summary?.activePfis ?? 0} active PFI(s), ${d.summary?.activeBatches ?? 0} truck-sales batch(es).`,
     entity: (d) => ({ type: "report", id: String(d.reportDate || "") }),
-    /**
-     * The readable summary, with the Hub's own workbook attached when the
-     * caller sent one.
-     *
-     * The two are not alternatives. The summary is what gets read on a phone
-     * in a car; the workbook is what gets worked on at a desk, and it is the
-     * SAME file the Download button produces — built by the client that was
-     * looking at the filtered day, so what lands in the inbox is exactly what
-     * the sender was looking at, not a re-derivation that could have moved.
-     */
-    email: (d) => ({
-      ...renderPfiDailyReportEmail(d),
-      ...(d.attachmentBase64 && d.filename
-        ? { attachments: [{ filename: d.filename, content: d.attachmentBase64 }] }
-        : {}),
-    }),
+    email: (d) => renderPfiDailyReportEmail(d),
   },
 
   // ═══ Delivery / truck flow (SMS) ══════════════════════════════════════════

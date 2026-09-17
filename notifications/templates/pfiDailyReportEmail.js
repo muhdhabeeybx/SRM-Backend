@@ -1,17 +1,25 @@
 const { escapeHtml } = require("./email");
 const {
-  INK, MUTED, TABLE, KEY_S, CREDIT_S, BALANCE_S,
+  INK, MUTED, TINT, CREDIT, BALANCE, FONT_STACK,
+  TABLE, KEY_S, CREDIT_S, BALANCE_S,
   cell, hcell, m, n0, ordinalDate,
 } = require("./reportTable");
 
+const {
+  qty,
+  FORMATTERS, NUMERIC_FORMATS,
+  ROLE_FIELDS,
+  HAS_PRICE_BANDS, HAS_TOP_CUSTOMERS,
+} = require("./roleFields");
+
 /**
- * The Soroman daily report.
+ * The Soroman Sales & Operations Report.
  *
  * `buildPfiDailyReportData` (services/pfiDailyReport.service.js) supplies `d`;
- * this file only renders it. Same constraints as the combined report — bare
- * markup, every style inline, no wrapper, because mail clients strip <style>
- * blocks and Gmail ignores classes — and the same palette, imported rather
- * than copied, so green means money in and red means still owed in both.
+ * this file only renders it. Bare markup, every style inline, no
+ * <html>/<head>/<body> wrapper, because mail clients strip <style> blocks and
+ * Gmail ignores classes — the constraint the original Django port was written
+ * under, and it has not changed.
  *
  * ── Tables, not sections ──────────────────────────────────────────────────
  *
@@ -22,270 +30,661 @@ const {
  *
  * ── Wording ───────────────────────────────────────────────────────────────
  *
- * The labels are the dashboard's own: SALES VALUE, FUNDS RECEIVED, BALANCE,
+ * The labels are the dashboard's own: SALES VALUE, AMOUNT RECEIVED, BALANCE,
  * OPENING STOCK, COMMISSION DUE. Not "collected", not "outstanding". A report
  * that renames the things it reports makes the reader translate before they
  * can read, and eventually they translate one of them wrong.
+ *
+ * ── Units belong to the batch ─────────────────────────────────────────────
+ *
+ * Every quantity is printed with ITS OWN batch's unit, never a hard-coded "L".
+ * Two of the live batches are LPG and trade in kilograms; printing 160,000 kg
+ * of gas as "160,000 L" is not a formatting slip, it is a wrong number on a
+ * report people trade on. `pfis.product_unit` is the authority and roleFields
+ * normalises its three spellings.
  */
 
 const up = (v) => String(v == null ? "" : v).toUpperCase();
 
-/** "product_manager" → "PRODUCT MANAGER" */
-const roleLabel = (r) => up(String(r || "").replace(/_/g, " "));
+/** The tint that anchors a row, as the options the cell helpers take. */
+const KEY = { s: KEY_S, bg: TINT };
+
+/**
+ * Satoshi, where the client will have it.
+ *
+ * Mail clients do not download web fonts with any reliability — Gmail strips
+ * @import, Outlook ignores @font-face outright — so this is a preference, not
+ * a guarantee, and the stack behind it is what most readers will actually see.
+ * The <style> block is worth the 120 bytes for the clients that do honour it
+ * (Apple Mail, Thunderbird, Gmail's web client), and costs nothing where it is
+ * dropped. What matters is that the fallbacks are a deliberate choice rather
+ * than whatever the client defaults to: -apple-system and Segoe UI are the
+ * two faces that ship on the devices this is read on.
+ */
+const FONT = FONT_STACK;
+const FONT_LINK =
+  `<style>@import url('https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900&display=swap');` +
+  `table,td,th,p,div,span{font-family:${FONT};}</style>`;
+
+// ─── Section furniture ──────────────────────────────────────────────────────
+
+/**
+ * Telling the sections apart by WEIGHT, not by hue.
+ *
+ * Colour in this document already means something — green is money in, red is
+ * what is still owed or still standing — and giving each section its own
+ * colour would spend that meaning on decoration, making the figures harder to
+ * read again. So the levels are told apart by weight:
+ *
+ *   section   a solid black bar, white type, full width — unmissable
+ *   group     a grey band with a black left rule — clearly subordinate
+ *
+ * Both are single-cell tables rather than styled divs, because Outlook drops
+ * `background` on a div and would render a bar as bare text on white.
+ */
+/** Grey enough to sit quietly on black; MUTED would disappear into it. */
+const NOTE_ON_INK = "#BDBDBD";
+
+/**
+ * The note sits at the right-hand end of the bar, in the bar's own weight
+ * undone: not bold, not uppercase, not tracked out. It is an aside about the
+ * section, and it has to read as one or it competes with the heading.
+ */
+const barNote = (note, color) =>
+  note
+    ? `<span style="float:right;font-weight:400;letter-spacing:0;text-transform:none;` +
+      `color:${color};font-size:11px;">${escapeHtml(note)}</span>`
+    : "";
+
+const bar = (label, note, { bg, color, size, noteColor, extra = "" }) =>
+  `<table width="100%" border="0" cellpadding="0" cellspacing="0" style="border-collapse:collapse;"><tr>` +
+  `<td bgcolor="${bg}" style="color:${color};padding:8px 11px;font-size:${size}px;font-weight:700;` +
+  `text-transform:uppercase;letter-spacing:.7px;font-family:${FONT};${extra}">` +
+  `${escapeHtml(up(label))}${barNote(note, noteColor)}</td>` +
+  `</tr></table>`;
 
 const section = (label, note = "") =>
-  `<tr><td colspan="99" style="padding:26px 0 8px;border:0;">` +
-  `<div style="font-size:13px;font-weight:700;letter-spacing:.6px;color:${INK};border-bottom:2px solid ${INK};padding-bottom:5px;">` +
-  `${escapeHtml(up(label))}` +
-  (note ? `<span style="float:right;font-weight:400;letter-spacing:0;color:${MUTED};font-size:11px;">${escapeHtml(note)}</span>` : "") +
-  `</div></td></tr>`;
+  `<div style="margin-top:32px;">` +
+  bar(label, note, { bg: INK, color: "#ffffff", size: 13, noteColor: NOTE_ON_INK }) +
+  `<div style="height:8px;line-height:8px;">&nbsp;</div>`;
 
-/** Litres, always with the unit — a bare number beside money misreads. */
-const L = (v) => (Number(v || 0) === 0 ? "—" : `${n0(v)} L`);
+/** A PFI inside FILLING STATIONS, a desk inside STAFF REPORTS. */
+const group = (label, note = "") =>
+  `<div style="margin-top:18px;">` +
+  bar(label, note, {
+    bg: "#EDEDED", color: INK, size: 11, noteColor: MUTED,
+    extra: `border-left:4px solid ${INK};`,
+  }) +
+  `<div style="height:5px;line-height:5px;">&nbsp;</div>`;
+
+/**
+ * An empty section, in one line — and the `</div>` its heading opened.
+ *
+ * The closing tag lives here rather than at the call site because `section`
+ * and `group` open a div and `table` is the only thing that ever follows them;
+ * both of `table`'s branches have to close it or every later section nests one
+ * level deeper. See `table` below.
+ */
+const nothing = (text) =>
+  `<p style="margin:2px 0 0;color:${MUTED};font-size:12px;font-family:${FONT};">${escapeHtml(text)}</p></div>`;
+
+// ─── Cells ──────────────────────────────────────────────────────────────────
+
+/** A count that prints 0 as an em-dash — a zero truck count is not news. */
 const c0 = (v) => (Number(v || 0) === 0 ? "—" : n0(v));
+
+/** A quantity that prints 0 as an em-dash, in the batch's own unit. */
+const q0 = (v, unit) => (Number(v || 0) === 0 ? "—" : qty(v, unit));
 
 /** A figure the data cannot support. Never a zero, never a negative. */
 const UNKNOWN = `<span style="color:${MUTED};">N/A</span>`;
 
+const MUTED_S = `color:${MUTED};`;
+
+/** Green only when there is something there: a green em-dash reads as money. */
+const credit = (html) => ({ r: true, s: html === "—" ? "" : CREDIT_S });
+const balance = (html) => ({ r: true, s: html === "—" ? "" : BALANCE_S });
+
 const headRow = (labels) => `<tr>${labels.map((l, i) => hcell(up(l), { r: i > 0 })).join("")}</tr>`;
-const table = (labels, rows) => (rows.length ? `${TABLE}${headRow(labels)}${rows.join("")}</table>` : "");
-const block = (html) => `<tr><td colspan="99" style="border:0;padding:0;">${html}</td></tr>`;
+
+/**
+ * Closes the section or group `div` its heading opened, on BOTH branches.
+ *
+ * A table that rendered nothing used to return an empty string, leaving that
+ * div open — which in a mail client means every section after it nests one
+ * level deeper and the margins compound down the page. An empty section says
+ * so in a line instead.
+ */
+const table = (labels, rows, empty = "Nothing to report.") =>
+  rows.length
+    ? `<div style="overflow-x:auto;">${TABLE}<thead>${headRow(labels)}</thead><tbody>${rows.join("")}</tbody></table></div></div>`
+    : nothing(empty);
 
 /** The row label column: uppercase, tinted, bold. Every table opens with one. */
-const idCell = (text) => cell(`<strong>${escapeHtml(up(text))}</strong>`, { s: KEY_S });
+const idCell = (text) => cell(`<strong>${escapeHtml(up(text))}</strong>`, KEY);
 
-const renderPfiDailyReportEmail = (d) => {
-  const date = ordinalDate(d.reportDate);
-  const subject = `Soroman Daily Report for ${date}`;
-  const s = d.summary || {};
-  const out = [];
+/** A stock figure, tinted so the eye finds the two ends of the day's movement. */
+const stockCell = (html) => cell(html, { ...KEY, r: true });
 
-  out.push(
-    `<div style="font-family:Arial,Helvetica,sans-serif;color:${INK};max-width:1100px;">`,
-    `<div style="font-size:20px;font-weight:700;letter-spacing:.5px;">SOROMAN DAILY REPORT</div>`,
-    `<div style="font-size:13px;color:${MUTED};margin-top:2px;">${escapeHtml(up(date))}</div>`,
-    `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">`
+// ─── The at-a-glance band ───────────────────────────────────────────────────
+
+const TONE_COLOR = { credit: CREDIT, balance: BALANCE };
+
+/**
+ * The whole day in one strip, before any table.
+ *
+ * A table rather than flex or grid: Outlook renders neither, and this is the
+ * one block that has to survive every client intact.
+ */
+const summaryBand = (cells) =>
+  `<table width="100%" border="0" cellpadding="10" cellspacing="0" style="border-collapse:collapse;margin:14px 0 4px;"><tr>` +
+  cells
+    .map(
+      (c) =>
+        // The font is named once on the cell, not on each of the three divs
+        // inside it. Outlook resets font-family at the TABLE boundary, so the
+        // <td> has to say it; the divs within a td inherit it everywhere.
+        `<td width="${Math.floor(100 / cells.length)}%" bgcolor="${TINT}" ` +
+        `style="vertical-align:top;font-family:${FONT};border-top:3px solid ${TONE_COLOR[c.tone] || INK};">` +
+        `<div style="font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:${MUTED};">` +
+        `${escapeHtml(c.label)}</div>` +
+        `<div style="font-size:17px;font-weight:700;color:${TONE_COLOR[c.tone] || INK};padding-top:3px;">` +
+        `${c.value}</div>` +
+        (c.note ? `<div style="font-size:10px;color:${MUTED};padding-top:2px;">${escapeHtml(c.note)}</div>` : "") +
+        `</td>`
+    )
+    .join("") +
+  `</tr></table>`;
+
+// ─── Depot sales ────────────────────────────────────────────────────────────
+
+/**
+ * Opening, what moved, closing — with the batch it was bought as either side.
+ *
+ * INITIAL STOCK is the batch as purchased and never changes; OPENING and
+ * CLOSING are today's two ends. Three stock columns rather than two because
+ * they answer different questions: "how much of this batch is gone" needs the
+ * initial figure, "what happened today" needs the other two. The row reads
+ * straight across — opening − sold today = closing.
+ */
+const depotSales = (pfis) =>
+  section("Depot sales", "stock and orders, by PFI") +
+  table(
+    [
+      "PFI", "Location", "Initial stock", "Opening stock today", "Total sold today",
+      "Closing stock today", "Sales value today", "Total PFI revenue",
+    ],
+    pfis.map((p) => {
+      const sold = q0(p.stock.soldToday, p.unit);
+      const value = m(p.orders.today.value);
+      const revenue = m(p.orders.toDate.paid);
+      return (
+        `<tr>` +
+        idCell(p.pfiNumber) +
+        cell(escapeHtml(up(p.location)) || "—") +
+        stockCell(qty(p.stock.starting, p.unit)) +
+        stockCell(qty(p.stock.openingToday, p.unit)) +
+        cell(sold, credit(sold)) +
+        cell(qty(p.stock.remaining, p.unit), { r: true, s: KEY_S + BALANCE_S, bg: TINT }) +
+        cell(value, credit(value)) +
+        cell(revenue, credit(revenue)) +
+        `</tr>`
+      );
+    })
   );
 
-  out.push(section("Summary"));
-  out.push(
-    block(
-      `${TABLE}` +
-        headRow(["Total Litres Sold Today", "Total Sales Value", "Total Revenue"]) +
+// ─── Loading and exit gate ──────────────────────────────────────────────────
+
+/**
+ * Loaded and exited are two different events, and both are reported.
+ *
+ * The volume columns hang off the gantry's `loaded_at`, not off the security
+ * barrier: a truck that loads at 18:00 and sleeps in the yard loaded today and
+ * exits tomorrow, and a "litres loaded today" measured on the way out reports
+ * nothing for it.
+ */
+const gateReport = (pfis) => {
+  const rows = pfis
+    .filter((p) => p.movements.trucksToDate > 0)
+    .map((p) => {
+      const mv = p.movements;
+      const loaded = q0(mv.litresLoadedToday, p.unit);
+      const total = q0(mv.litresLoadedToDate, p.unit);
+      return (
         `<tr>` +
-        cell(L(s.litresSold), { s: KEY_S }) +
-        cell(m(s.salesValue), { r: true, s: CREDIT_S }) +
-        cell(m(s.fundsReceived), { r: true, s: CREDIT_S }) +
-        `</tr></table>`
+        idCell(p.pfiNumber) +
+        cell(escapeHtml(up(p.location)) || "—") +
+        cell(loaded, credit(loaded)) +
+        cell(c0(mv.enteredToday), { r: true }) +
+        cell(c0(mv.exitedToday), { r: true }) +
+        cell(c0(mv.onSite), balance(c0(mv.onSite))) +
+        cell(c0(mv.trucksLoadedToDate), { r: true }) +
+        cell(total, credit(total)) +
+        `</tr>`
+      );
+    });
+
+  if (!rows.length) return "";
+  return (
+    section("Loading and exit gate report", "across locations") +
+    table(
+      [
+        "PFI", "Location", "Litres loaded today", "Trucks entered today", "Trucks exited today",
+        "On site now", "Total trucks loaded", "Total litres loaded",
+      ],
+      rows
     )
   );
+};
 
-  const pfis = d.pfis || [];
-  if (pfis.length) {
-    out.push(section("Depot sales", "stock and orders, by PFI"));
-    out.push(
-      block(
-        table(
-          ["PFI", "Type", "Location", "Opening Stock", "Total Sold", "Closing Stock", "Orders", "Litres sold Today", "Sales value", "Revenue received", "Outstanding"],
-          pfis.map((p) => {
-            const t = p.orders.today;
-            return (
-              `<tr>` +
-              idCell(p.pfiNumber) +
-              cell(escapeHtml(up(p.type))) +
-              cell(escapeHtml(up(p.location))) +
-              cell(L(p.stock.starting), { r: true }) +
-              cell(L(p.stock.sold), { r: true }) +
-              cell(L(p.stock.remaining), { r: true, s: BALANCE_S }) +
-              cell(c0(t.count), { r: true }) +
-              cell(L(t.litres), { r: true }) +
-              cell(m(t.value), { r: true, s: t.value ? CREDIT_S : "" }) +
-              cell(m(t.paid), { r: true, s: t.paid ? CREDIT_S : "" }) +
-              cell(m(p.orders.outstanding), { r: true, s: p.orders.outstanding ? BALANCE_S : "" }) +
-              `</tr>`
-            );
-          })
-        )
-      )
-    );
+// ─── Expenses ───────────────────────────────────────────────────────────────
 
-    const moveRows = pfis
-      .filter((p) => p.movements.trucksToDate > 0)
-      .map((p) => {
-        const mv = p.movements;
+/**
+ * What has been billed, what has left, and the gap.
+ *
+ * General expenses sit in the same table under the batch rows. They are money
+ * out like any other, and a separate table would invite the reader to add the
+ * two up themselves. Labelled by category, because "General" as one number
+ * answers nothing.
+ */
+const expenseRow = (label, requested, paid) => {
+  const unpaid = Math.max(0, requested - paid);
+  return (
+    `<tr>` +
+    idCell(label) +
+    cell(m(requested), { r: true }) +
+    cell(m(paid), credit(m(paid))) +
+    cell(m(unpaid), balance(m(unpaid))) +
+    `</tr>`
+  );
+};
+
+const expenses = (pfis, general) => {
+  const rows = [
+    ...pfis
+      .filter((p) => p.expenses.toDate.count > 0)
+      .map((p) => expenseRow(p.pfiNumber, p.expenses.toDate.amount, p.expenses.toDate.paid)),
+    ...(general || [])
+      .filter((g) => g.toDate.count > 0)
+      .map((g) => expenseRow(`General — ${g.category}`, g.toDate.amount, g.toDate.paid)),
+  ];
+  if (!rows.length) return "";
+  return (
+    section("Expenses", "across all categories") +
+    table(["PFI/Category", "Total amount requested", "Total amount paid", "Amount not yet paid"], rows)
+  );
+};
+
+// ─── Commissions ────────────────────────────────────────────────────────────
+
+/**
+ * What the day's orders earned agents, and what has gone out against it.
+ *
+ * LITRES SOLD TODAY is the batch's own order volume for the day — the figure
+ * commission is worked out from — rather than a separate total kept on the
+ * commission rows, so the column can be checked against DEPOT SALES above it.
+ */
+const commissions = (pfis) => {
+  const rows = pfis
+    .filter((p) => p.commission.entries > 0 || p.orders.today.litres > 0)
+    .map((p) => {
+      const sold = q0(p.orders.today.litres, p.unit);
+      const due = m(p.commission.due);
+      const paid = m(p.commission.paid);
+      return (
+        `<tr>` +
+        idCell(p.pfiNumber) +
+        cell(escapeHtml(up(p.location)) || "—") +
+        cell(sold, credit(sold)) +
+        cell(due, balance(due)) +
+        cell(paid, credit(paid)) +
+        `</tr>`
+      );
+    });
+  if (!rows.length) return "";
+  return (
+    section("Commissions", "by PFI") +
+    table(["PFI", "Location", "Litres sold today", "Commission due", "Commission paid"], rows)
+  );
+};
+
+// ─── Truck sales ────────────────────────────────────────────────────────────
+
+/**
+ * The delivery batches, which are a different identity system on purpose.
+ *
+ * `delivery_sales.allocation_code` ("PFI-14B") and `pfis.pfi_number`
+ * ("PFI/43/26/DANGOTE/PMS/3ML/AUG") do not meet — there is no key joining
+ * them, and "43B" and "43/26" being the same batch is a business fact, not a
+ * string fact. So this half is reported under the code, which is the only
+ * identity the data has and the one the desk uses out loud. The hyphen is
+ * dropped for reading; nothing else about the code is touched.
+ */
+const batchLabel = (code) => String(code || "").replace(/^PFI-/i, "PFI ");
+
+const truckSales = (batches) => {
+  if (!batches.length) return "";
+  return (
+    section("Truck sales", "active allocations") +
+    table(
+      [
+        "PFI", "Trucks allocated", "Trucks sold", "Unsold trucks",
+        "Total sales value", "Amount received", "Balance to be paid",
+      ],
+      batches.map((b) => {
+        const value = m(b.salesValue);
+        const received = m(b.fundsReceived);
+        const bal = m(b.balance);
         return (
           `<tr>` +
-          idCell(p.pfiNumber) +
-          cell(c0(mv.enteredToday), { r: true }) +
-          cell(c0(mv.loadedToday), { r: true }) +
-          cell(c0(mv.exitedToday), { r: true }) +
-          cell(L(mv.litresOutToday), { r: true, s: mv.litresOutToday ? CREDIT_S : "" }) +
-          cell(c0(mv.onSite), { r: true, s: mv.onSite ? BALANCE_S : "" }) +
-          cell(n0(mv.trucksToDate), { r: true }) +
-          cell(L(mv.litresTicketedToDate), { r: true }) +
+          idCell(batchLabel(b.code)) +
+          // A batch with no allocation rows has an UNKNOWN count, not a zero
+          // one: a confident 0 against a batch still selling is a worse answer
+          // than an honest blank.
+          cell(b.trucksAllocated ? n0(b.trucksAllocated) : UNKNOWN, { r: true }) +
+          cell(c0(b.trucksSold), { r: true }) +
+          // n0, not c0: in this column a zero means "all of them sold", which
+          // is the best news on the row and has to be readable as such. An
+          // em-dash here would sit beside the N/A that means "we do not know
+          // how many were allocated" and the two would be indistinguishable.
+          cell(b.unsoldTrucks === null ? UNKNOWN : n0(b.unsoldTrucks), {
+            r: true,
+            s: b.unsoldTrucks ? BALANCE_S : "",
+          }) +
+          cell(value, credit(value)) +
+          cell(received, credit(received)) +
+          cell(bal, balance(bal)) +
+          `</tr>`
+        );
+      })
+    )
+  );
+};
+
+// ─── Filling stations, grouped by PFI ───────────────────────────────────────
+
+/**
+ * Grouped by batch, with the stations under it.
+ *
+ * A station holds stock from several batches at once and draws each down
+ * separately, so "Kano Filling Station" is not a row — it is a row PER BATCH.
+ * Flat, that table repeated the same station name five times and the reader
+ * had to sort it themselves to answer "how is 14B going". Under a batch
+ * heading the question is answered by looking.
+ *
+ * Stations are customers, not places: a filling station is a row in
+ * `delivery_customers` reached through the sale's customer_id. Grouping on the
+ * customer retired a whole class of spelling problem the free-text `location`
+ * had (JOS/JOSE, KADUNA/KADUAN) — and stopped DAMATURU and KADUNA, which are
+ * cities, being listed as stations.
+ */
+const STATION_HEADERS = [
+  "Station", "Initial stock", "Opening stock today", "Volume sold today", "Total volume sold",
+  "Stock remaining", "Sales value today", "Total amount received", "Balance",
+];
+
+/**
+ * Station volumes are litres, and that is an assumption worth naming.
+ *
+ * Unlike a depot batch, a station's figures are summed across `delivery_sales`
+ * rows that carry no unit of their own — the allocation does, on
+ * `delivery_inventory.pfi_product`, but the sale does not, and the two are
+ * joined on a free-text code. Every station on the ledger sells PMS, so litres
+ * is right today. The day one holds gas, this line is where it is wrong, and
+ * the fix is to carry the unit through the allocation rather than to change
+ * this constant.
+ */
+const STATION_UNIT = "Litres";
+
+const stationGroups = (stations) => {
+  if (!stations.length) return "";
+
+  const byCode = new Map();
+  for (const st of stations) {
+    if (!byCode.has(st.code)) byCode.set(st.code, []);
+    byCode.get(st.code).push(st);
+  }
+
+  const groups = [...byCode.entries()]
+    .map(([code, rows]) => {
+      const body = rows.map((st) => {
+        const soldToday = q0(st.litresToday, STATION_UNIT);
+        const sold = q0(st.litres, STATION_UNIT);
+        const value = m(st.salesValueToday);
+        const received = m(st.fundsReceived);
+        const bal = m(st.balance);
+        return (
+          `<tr>` +
+          idCell(st.party) +
+          cell(st.allocatedLitres ? qty(st.allocatedLitres, STATION_UNIT) : UNKNOWN, { ...KEY, r: true }) +
+          // Opening is derived from what remains, so it is only as knowable as
+          // that is: a station that has sold more than was ever allocated to it
+          // has no honest opening figure, and prints none rather than a
+          // negative one.
+          cell(st.stockKnown ? qty(st.openingLitresToday, STATION_UNIT) : UNKNOWN, { ...KEY, r: true }) +
+          cell(soldToday, credit(soldToday)) +
+          cell(sold, credit(sold)) +
+          cell(st.stockKnown ? qty(st.remainingLitres, STATION_UNIT) : UNKNOWN, {
+            r: true,
+            bg: TINT,
+            s: KEY_S + (st.stockKnown && st.remainingLitres ? BALANCE_S : ""),
+          }) +
+          cell(value, credit(value)) +
+          cell(received, credit(received)) +
+          cell(bal, balance(bal)) +
           `</tr>`
         );
       });
-    if (moveRows.length) {
-      out.push(section("Exit Gate Report", "across locations"));
-      out.push(
-        block(
-          table(
-            ["PFI", "Trucks entered", "Trucks loaded", "Trucks exited", "Total Litres", "On site now", "Total Trucks Exited", "Total Litres Exited"],
-            moveRows
-          )
-        )
+      return group(batchLabel(code), `${rows.length} station${rows.length === 1 ? "" : "s"}`) +
+        table(STATION_HEADERS, body);
+    })
+    .join("");
+
+  return section("Filling stations", "active stock, by PFI") + `</div>` + groups;
+};
+
+// ─── Staff reports ──────────────────────────────────────────────────────────
+
+/**
+ * Prices, the customer list and remarks are COLUMNS, not notes under the row.
+ *
+ * They used to render as a second full-width row beneath each entry, each
+ * prefixed with its own little "Prices:" / "Top customers:" / "Remarks:"
+ * label — three lines of hint text per sheet filed. Across five roles and
+ * several PFIs that becomes most of the section, and a reader following a
+ * column of figures has to step over prose to reach the next number.
+ *
+ * A column only appears when at least one sheet in that table actually filled
+ * it in: an empty "Top customers" column on every compliance table is the same
+ * noise wearing a different hat.
+ */
+const priceBandsText = (bands, unit) =>
+  (bands || []).map((b) => `${qty(b.litres, unit)} @ ₦${n0(b.price)}`).join("<br>");
+
+const topCustomersText = (list, unit) =>
+  (list || []).map((c) => `${escapeHtml(c.name) || "—"} &mdash; ${qty(c.litres, unit)}`).join("<br>");
+
+/** An array with something in it, or a string that is not just whitespace. */
+const filled = (v) => (Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "");
+
+const EXTRA_COLUMNS = [
+  { key: "priceBands", label: "Prices", roles: HAS_PRICE_BANDS, render: priceBandsText },
+  { key: "topCustomers", label: "Top customers", roles: HAS_TOP_CUSTOMERS, render: topCustomersText },
+  // Every role can leave a remark, so this one is not restricted by role.
+  { key: "remarks", label: "Remarks", roles: null, render: (v) => escapeHtml(String(v)) },
+];
+
+const TONE_STYLE = { credit: CREDIT_S, balance: BALANCE_S };
+
+/**
+ * One table per desk, under the desk's own headings, listing every batch.
+ *
+ * ── Why each role gets its own columns ────────────────────────────────────
+ *
+ * This was one 12-column table with fixed headers that every role was forced
+ * through, and the five daily reports do not share those fields: the gate
+ * sheet's `trucksEntered` had no column at all, every commission figure was
+ * absent while its `amountPaid` showed under a heading meaning cash banked,
+ * and a filed compliance sheet rendered as a row of dashes. So each role now
+ * declares its own columns (roleFields.js), in the same order and under the
+ * same labels as the form that collects them and the Reports Hub that lists
+ * them.
+ *
+ * ── Why a batch that filed nothing still gets a row ───────────────────────
+ *
+ * The section used to list the sheets that arrived and say nothing about the
+ * ones that did not, so a desk that filed nothing all day looked exactly like
+ * a desk that does not exist. Reading this at the end of a day, who has NOT
+ * reported is the question. Every active batch appears under every role, and
+ * one that filed nothing says so.
+ *
+ * There is no approval badge beside the filer's name. Whether a manager has
+ * since signed a sheet off is a workflow state that belongs in the Reports
+ * Hub; a green or red chip against a person's name in a document circulated to
+ * the whole company reads as a verdict on them.
+ */
+const roleTable = ({ type, label, filed: filedCount, rows }) => {
+  const fields = ROLE_FIELDS[type] || [];
+  const entries = rows.filter((r) => r.reported);
+
+  const extraCols = EXTRA_COLUMNS.filter(
+    (c) => (!c.roles || c.roles.has(type)) && entries.some((e) => filled(e[c.key]))
+  );
+
+  const headers = [
+    "Staff name", "PFI",
+    ...fields.map((f) => f.label),
+    ...extraCols.map((c) => c.label),
+  ];
+
+  const body = rows.map((e) => {
+    if (!e.reported) {
+      // The first cell says it; the rest of the row is one span rather than a
+      // dash per column. Across five desks and eleven batches that difference
+      // is several KB of a document Gmail clips.
+      return (
+        `<tr>` +
+        cell(`<em>Not reported</em>`, { s: MUTED_S }) +
+        cell(escapeHtml(up(e.pfiNumber)) || "—", { s: MUTED_S }) +
+        // Math.max, because a colspan of 0 is not a span — it would emit a
+        // third cell into a two-column table. No role declares zero columns
+        // today; a role that did would silently break the table.
+        cell("—", { s: MUTED_S, span: Math.max(1, headers.length - 2) }) +
+        `</tr>`
       );
     }
 
-    const expRows = pfis
-      .filter((p) => p.expenses.toDate.count > 0)
-      .map((p) => (
-        `<tr>` +
-        idCell(p.pfiNumber) +
-        cell(c0(p.expenses.today.count), { r: true }) +
-        cell(m(p.expenses.today.amount), { r: true }) +
-        cell(n0(p.expenses.toDate.count), { r: true }) +
-        cell(m(p.expenses.toDate.amount), { r: true }) +
-        cell(m(p.expenses.toDate.paid), { r: true, s: CREDIT_S }) +
-        cell(m(Math.max(0, p.expenses.toDate.amount - p.expenses.toDate.paid)), { r: true, s: BALANCE_S }) +
-        `</tr>`
-      ));
-    /**
-     * General expenses sit in the same table, under the batch rows.
-     *
-     * They are money out like any other, and a separate table would invite the
-     * reader to add the two up themselves. Labelled by category, because
-     * "General" as one number answers nothing.
-     */
-    const genRows = (d.generalExpenses || [])
-      .filter((g) => g.toDate.count > 0)
-      .map((g) => (
-        `<tr>` +
-        idCell(`GENERAL — ${g.category}`) +
-        cell(c0(g.today.count), { r: true }) +
-        cell(m(g.today.amount), { r: true }) +
-        cell(n0(g.toDate.count), { r: true }) +
-        cell(m(g.toDate.amount), { r: true }) +
-        cell(m(g.toDate.paid), { r: true, s: CREDIT_S }) +
-        cell(m(Math.max(0, g.toDate.amount - g.toDate.paid)), { r: true, s: BALANCE_S }) +
-        `</tr>`
-      ));
+    const figures = fields
+      .map((f) => {
+        const fmt = FORMATTERS[f.fmt] || FORMATTERS.text;
+        const value = fmt(e[f.key], e.unit);
+        // An em-dash means "not filled in" and is not a figure, so it never
+        // takes a colour — a red dash reads as a problem where there is none.
+        const tone = f.tone && value !== "—" ? TONE_STYLE[f.tone] : "";
+        return cell(value, { r: NUMERIC_FORMATS.has(f.fmt), s: tone });
+      })
+      .join("");
 
-    if (expRows.length || genRows.length) {
-      out.push(section("Expenses", "Across all categories"));
-      out.push(
-        block(
-          table(
-            ["PFI/Category", "Requests today", "Amount Today", "Total Entries", "TotalAmount", "Amount Paid", "Not yet paid"],
-            [...expRows, ...genRows]
-          )
-        )
-      );
-    }
+    const extras = extraCols
+      .map((c) => cell(filled(e[c.key]) ? c.render(e[c.key], e.unit) : "—"))
+      .join("");
 
-    const comRows = pfis
-      .filter((p) => p.commission.entries > 0)
-      .map((p) => (
-        `<tr>` +
-        idCell(p.pfiNumber) +
-        cell(n0(p.commission.entries), { r: true }) +
-        cell(L(p.commission.litres), { r: true }) +
-        cell(m(p.commission.due), { r: true, s: p.commission.due ? BALANCE_S : "" }) +
-        cell(m(p.commission.paid), { r: true, s: p.commission.paid ? CREDIT_S : "" }) +
-        `</tr>`
-      ));
-    if (comRows.length) {
-      out.push(section("Commissions", "by PFI"));
-      out.push(block(table(["PFI", "Entries", "Litres", "Commission due", "Commission paid"], comRows)));
-    }
-  }
-
-  const batches = d.truckSales || [];
-  if (batches.length) {
-    out.push(section("Truck sales", "active allocations"));
-    out.push(
-      block(
-        table(
-          ["Batch", "Customers", "Trucks sold today", "Trucks sold to date", "Sales value", "Funds received", "Balance"],
-          batches.map((b) => (
-            `<tr>` +
-            idCell(b.code) +
-            cell(n0(b.customers), { r: true }) +
-            cell(c0(b.trucksSoldToday), { r: true }) +
-            cell(n0(b.trucksSold), { r: true }) +
-            cell(m(b.salesValue), { r: true, s: CREDIT_S }) +
-            cell(m(b.fundsReceived), { r: true, s: CREDIT_S }) +
-            cell(m(b.balance), { r: true, s: b.balance ? BALANCE_S : "" }) +
-            `</tr>`
-          ))
-        )
-      )
+    return (
+      `<tr>` +
+      cell(`<strong>${escapeHtml(e.submittedBy) || "—"}</strong>`) +
+      cell(escapeHtml(up(e.pfiNumber)) || "—", KEY) +
+      figures +
+      extras +
+      `</tr>`
     );
-  }
+  });
 
-  const stations = d.stations || [];
-  if (stations.length) {
-    out.push(section("Filling stations", "active stock"));
-    out.push(
-      block(
-        table(
-          ["Station", "Batch", "Opening stock", "Litres sold today", "Litres sold to date", "Stock remaining", "Sales value", "Funds received", "Balance"],
-          stations.map((st) => (
-            `<tr>` +
-            idCell(st.party) +
-            cell(escapeHtml(up(st.code))) +
-            cell(st.allocatedLitres ? L(st.allocatedLitres) : UNKNOWN, { r: true }) +
-            cell(L(st.litresToday), { r: true }) +
-            cell(L(st.litres), { r: true }) +
-            cell(st.stockKnown ? L(st.remainingLitres) : UNKNOWN, { r: true, s: st.stockKnown && st.remainingLitres ? BALANCE_S : "" }) +
-            cell(m(st.salesValue), { r: true, s: st.salesValue ? CREDIT_S : "" }) +
-            cell(m(st.fundsReceived), { r: true, s: st.fundsReceived ? CREDIT_S : "" }) +
-            cell(m(st.balance), { r: true, s: st.balance ? BALANCE_S : "" }) +
-            `</tr>`
-          ))
-        )
-      )
-    );
-  }
+  const note = filedCount
+    ? `${filedCount} sheet${filedCount === 1 ? "" : "s"} filed`
+    : "nothing filed today";
 
-  const entries = d.staffEntries || [];
-  if (entries.length) {
-    out.push(section("Staff entries", `${entries.length} sheet(s) filed`));
-    out.push(
-      block(
-        table(
-          ["Role", "Location", "PFI", "Submitted by", "Litres sold", "Sales value", "Amount paid", "Status"],
-          entries.map((e) => (
-            `<tr>` +
-            idCell(roleLabel(e.role)) +
-            cell(escapeHtml(up(e.location || "—"))) +
-            cell(escapeHtml(up(e.pfi_number || "—"))) +
-            cell(escapeHtml(e.submitted_by_name || "—")) +
-            cell(e.litres_sold == null ? "—" : L(e.litres_sold), { r: true }) +
-            cell(m(e.sales_value), { r: true, s: Number(e.sales_value) ? CREDIT_S : "" }) +
-            cell(m(e.amount_paid), { r: true, s: Number(e.amount_paid) ? CREDIT_S : "" }) +
-            cell(escapeHtml(up(e.status || "—"))) +
-            `</tr>`
-          ))
-        )
-      )
-    );
-  }
+  return group(label, note) + table(headers, body);
+};
 
-  out.push(`</table></div>`);
+const staffReports = (reports) => {
+  if (!reports || !reports.length) return "";
+  return section("Staff reports", "every desk, every PFI") + `</div>` + reports.map(roleTable).join("");
+};
 
+// ─── Assembly ────────────────────────────────────────────────────────────────
+
+const renderPfiDailyReportEmail = (d) => {
+  const date = ordinalDate(d.reportDate);
+  const subject = `SOROMAN Sales & Operations Report for ${date}`;
+  const s = d.summary || {};
+  const pfis = d.pfis || [];
+
+  const body =
+    FONT_LINK +
+    `<div style="font-family:${FONT};font-size:13px;color:${INK};max-width:1100px;">` +
+    `<div style="font-size:22px;font-weight:900;letter-spacing:1px;">SOROMAN</div>` +
+    `<div style="font-size:14px;font-weight:700;letter-spacing:.4px;color:${INK};margin-top:1px;">` +
+    `Sales &amp; Operations Report</div>` +
+    `<div style="font-size:12px;color:${MUTED};margin-top:2px;">${escapeHtml(up(date))}</div>` +
+    `<div style="height:1px;line-height:1px;background:${INK};margin:12px 0 16px;">&nbsp;</div>` +
+    // The greeting, in the words the desk reads it in. Deliberately the first
+    // prose in the document and deliberately before any figure: somebody
+    // opening this on a phone should know what it is in one line.
+    `<p style="margin:0 0 6px;font-size:13px;">Dear Sir,</p>` +
+    `<p style="margin:0;font-size:13px;line-height:1.55;">` +
+    `Please find below the summary of sales and operations across all locations for ` +
+    `<strong>${escapeHtml(date)}</strong>.</p>` +
+    summaryBand([
+      // No unit on this one, deliberately: it is the day's volume across every
+      // batch, and the batches are not all measured in the same thing — the two
+      // LPG ones trade in kilograms. Naming a unit here would put a wrong one on
+      // the biggest figure in the document. The per-batch tables below carry the
+      // real units, which is where a reader who needs them looks.
+      { label: "Total volume sold today", value: n0(s.litresSold), note: "across all batches", tone: "credit" },
+      { label: "Sales value today", value: m(s.salesValue), tone: "credit" },
+      { label: "Amount received today", value: m(s.fundsReceived), tone: "credit" },
+      { label: "Outstanding balance", value: m(s.balance), tone: "balance" },
+    ]) +
+    depotSales(pfis) +
+    gateReport(pfis) +
+    expenses(pfis, d.generalExpenses) +
+    commissions(pfis) +
+    truckSales(d.truckSales || []) +
+    stationGroups(d.stations || []) +
+    staffReports(d.staffReports) +
+    `<p style="margin:34px 0 0;font-size:13px;color:${INK};">Best regards,<br/>Soroman System</p>` +
+    `</div>`;
+
+  /**
+   * The plain-text alternative.
+   *
+   * What a text-only client, a watch and most screen readers actually render,
+   * so it carries the same four figures the band does and names the sections
+   * that follow rather than being three numbers and a shrug.
+   */
   const text = [
-    `SOROMAN DAILY REPORT — ${up(date)}`,
+    `SOROMAN Sales & Operations Report for ${date}`,
     "",
-    `Litres sold      ${L(s.litresSold)}`,
-    `Sales value      ${m(s.salesValue)}`,
-    `Revenue          ${m(s.fundsReceived)}`,
+    "Dear Sir,",
     "",
-    `${s.activePfis || 0} active PFI(s), ${s.activeBatches || 0} batch(es), ${s.activeStations || 0} station(s).`,
+    `Please find below the summary of sales and operations across all locations for ${date}.`,
+    "",
+    `Total sold today        ${n0(s.litresSold)}`,
+    `Sales value today       ${m(s.salesValue)}`,
+    `Amount received today   ${m(s.fundsReceived)}`,
+    `Outstanding balance     ${m(s.balance)}`,
+    "",
+    `${s.activePfis || 0} active PFI(s), ${s.activeBatches || 0} truck-sales batch(es), ` +
+      `${s.activeStations || 0} filling station(s).`,
+    "",
+    "Depot sales, loading and exit gate, expenses, commissions, truck sales,",
+    "filling stations and staff reports follow in the HTML version of this email.",
+    "",
+    "Best regards,",
+    "Soroman System",
   ].join("\n");
 
-  return { subject, html: out.join(""), text };
+  return { subject, html: body, text };
 };
 
 module.exports = { renderPfiDailyReportEmail };

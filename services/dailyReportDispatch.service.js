@@ -1,5 +1,5 @@
 /**
- * Sending the daily reports — the one path, used by both callers.
+ * Sending the daily report — the one path, used by both callers.
  *
  * There are two triggers: `scripts/send-daily-report.js`, run by hand, and the
  * pg-boss cron in jobs/scheduler.js that fires at 23:50 Africa/Lagos. They must
@@ -22,12 +22,31 @@
  * idempotent, and "send an email" is not.
  */
 const { notifyAndWait } = require("../notifications");
-const { buildStaffSalesReport } = require("./reportWorkbook.service");
-const { buildCombinedDailyReportData, dayBounds } = require("./dailyCombinedReport.service");
+const { buildPfiDailyReportData } = require("./pfiDailyReport.service");
+const { dayBounds } = require("./dailyCombinedReport.service");
 const { client } = require("../db");
 
-/** Both reports, or just one. */
-const REPORTS = Object.freeze({ DAILY: "daily", STAFF_SALES: "staff-sales" });
+/**
+ * One report goes out at night, and it is the Sales & Operations Report.
+ *
+ * There were two. The depot-grouped combined report was the body of the mail,
+ * and a second mail carried the staff-sales workbook as an .xlsx and nothing
+ * else. Both are retired here:
+ *
+ *   * the nightly body is now the per-PFI report (`reports.pfi_daily`) — the
+ *     same one the Reports Hub's button has been sending, so the scheduled
+ *     report and the hand-sent one are finally the same document. The old
+ *     format stays in the code behind `reports.hub_email`, unscheduled.
+ *   * the workbook mail is gone. The report body now carries everything it
+ *     held, and the Hub's Download button still produces the file for anyone
+ *     who wants to work the numbers at a desk.
+ *
+ * There is deliberately no STAFF_SALES name left to pass. An `--only=staff-sales`
+ * still in somebody's shell history now throws by name below, rather than
+ * matching nothing and quietly sending the daily report in its place — which is
+ * what the old `only !== STAFF_SALES` shape would have done.
+ */
+const REPORTS = Object.freeze({ DAILY: "daily" });
 
 /**
  * Who gets it.
@@ -73,7 +92,7 @@ const resolveRecipients = (override) => {
  * with both actor ids null — which is exactly what a cron send is.
  */
 const dateKey = (reportDate) => Number(reportDate.replace(/-/g, ""));
-const ACTION = { [REPORTS.DAILY]: "report.sent.daily", [REPORTS.STAFF_SALES]: "report.sent.staff_sales" };
+const ACTION = { [REPORTS.DAILY]: "report.sent.daily" };
 
 const alreadySent = async (reportDate, kind) => {
   const rows = await client`
@@ -104,7 +123,7 @@ const markSent = async (reportDate, kind, recipients) => {
  * @param {object}  opts
  * @param {Date}    [opts.date]        defaults to now
  * @param {string}  [opts.to]          comma-separated override
- * @param {string}  [opts.only]        one of REPORTS, or omit for both
+ * @param {string}  [opts.only]        one of REPORTS, or omit
  * @param {boolean} [opts.force]       send even if already logged as sent
  * @returns {Promise<{reportDate, sent: string[], skipped: string[], recipients: string[]}>}
  * @throws if there are no recipients, or if any send fails
@@ -123,33 +142,19 @@ const dispatchDailyReports = async ({ date = new Date(), to, only, force = false
   const sent = [];
   const skipped = [];
 
-  if (only !== REPORTS.STAFF_SALES) {
-    if (!force && (await alreadySent(reportDate, REPORTS.DAILY))) {
-      skipped.push(REPORTS.DAILY);
-    } else {
-      const data = await buildCombinedDailyReportData(date);
-      await notifyAndWait("reports.daily", { to: addressed, data });
-      await markSent(reportDate, REPORTS.DAILY, recipients);
-      sent.push(REPORTS.DAILY);
-    }
+  if (only && only !== REPORTS.DAILY) {
+    // Loudly, rather than sending the daily report to a caller who asked for
+    // something else. See REPORTS above.
+    throw new Error(`Unknown report "${only}". The only report is "${REPORTS.DAILY}".`);
   }
 
-  if (only !== REPORTS.DAILY) {
-    if (!force && (await alreadySent(reportDate, REPORTS.STAFF_SALES))) {
-      skipped.push(REPORTS.STAFF_SALES);
-    } else {
-      const workbook = await buildStaffSalesReport(date);
-      await notifyAndWait("reports.daily_staff_sales", {
-        to: addressed,
-        data: {
-          reportDate,
-          filename: workbook.filename,
-          attachmentBase64: workbook.buffer.toString("base64"),
-        },
-      });
-      await markSent(reportDate, REPORTS.STAFF_SALES, recipients);
-      sent.push(REPORTS.STAFF_SALES);
-    }
+  if (!force && (await alreadySent(reportDate, REPORTS.DAILY))) {
+    skipped.push(REPORTS.DAILY);
+  } else {
+    const data = await buildPfiDailyReportData(date);
+    await notifyAndWait("reports.pfi_daily", { to: addressed, data });
+    await markSent(reportDate, REPORTS.DAILY, recipients);
+    sent.push(REPORTS.DAILY);
   }
 
   return { reportDate, sent, skipped, recipients };

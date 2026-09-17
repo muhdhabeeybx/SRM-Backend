@@ -224,16 +224,17 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
 });
 
 const emailDailyReports = asyncHandler(async (req, res) => {
-  const { recipients, reportDate, attachmentBase64, filename } = req.body;
+  const { recipients, reportDate } = req.body;
 
   /**
-   * The button sends the per-PFI report.
+   * The button sends the Sales & Operations Report — the same one the 23:50
+   * cron sends (see dailyReportDispatch). One report, one format, whether it
+   * goes out on a schedule or on a click.
    *
-   * The nightly cron still sends the depot-grouped one (see
-   * dailyReportDispatch), deliberately: the automatic send is the one nobody
-   * is watching when it goes, so it stays on the format the desk has read for
-   * months while this one is used on demand. Switch that over once this has
-   * been read a few times — it is the same two-line change as here.
+   * Body only. The request may still carry `attachmentBase64`/`filename` from
+   * an older dashboard build; it is ignored rather than rejected, because a
+   * stale client should still be able to send the report. The Hub's Download
+   * button remains the way to get the workbook.
    *
    * One known gap, dormant rather than fixed: this report groups depot trading
    * by PFI, so an order with no pfi_id has nowhere to appear and is missing
@@ -245,11 +246,7 @@ const emailDailyReports = asyncHandler(async (req, res) => {
   const data = await buildPfiDailyReportData(reportDate ? new Date(reportDate) : new Date());
   const result = await notifyAndWait("reports.pfi_daily", {
     to: recipients.map((email) => ({ email })),
-    // The Hub's workbook rides along when the client sent one, so the email
-    // carries the very report the sender was looking at — same filters, same
-    // rows, same file as the Download button. Optional: the scheduled send
-    // and any older client post nothing, and get the summary alone.
-    data: { ...data, ...(attachmentBase64 && filename ? { attachmentBase64, filename } : {}) },
+    data,
   });
 
   // notifyAndWait never throws — a provider outage must not read as a 500 — so

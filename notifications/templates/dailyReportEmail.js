@@ -44,128 +44,25 @@ const { buildDailySummary, summaryText } = require("./dailyReportSummary");
  */
 const {
   INK, MUTED, HEAD, HEAD_KEY, TINT, CREDIT, BALANCE,
-  TABLE, TH_S, KEY_S, TH_KEY_S, CREDIT_S, BALANCE_S,
+  TABLE, KEY_S, CREDIT_S, BALANCE_S,
   cell, hcell, m, n0, ordinalDate, plainDate, plural,
 } = require("./reportTable");
 
-// ─── Field formatting ───────────────────────────────────────────────────────
-
 /**
- * Null is not zero.
- *
- * The commission and gate figures are nullable with no default precisely so
- * that "nobody filled this in" stays distinguishable from "the answer is
- * zero" on a sheet somebody files in stages. A null renders as an em-dash; a
- * real 0 renders as 0.
+ * Field formatting, units and the per-role column sets now live in
+ * ./roleFields, shared with the per-PFI report for the same reason the palette
+ * is: two emails that disagree about what `truckCount` means, because the
+ * column list was copied rather than shared, is worse than either choice made
+ * once. The reasoning behind each rule moved with it.
  */
-const FORMATTERS = {
-  litres: (v, unit) => (v === null || v === undefined ? "—" : `${n0(v)} ${unitOf(unit)}`),
-  money: (v) => (v === null || v === undefined ? "—" : `₦${n0(v)}`),
-  rate: (v, unit) =>
-    v === null || v === undefined || Number(v) === 0 ? "—" : `₦${n0(v)} per ${rateWord(unit)}`,
-  count: (v) => (v === null || v === undefined ? "—" : n0(v)),
-  text: (v) => escapeHtml(String(v ?? "")) || "—",
-};
-
-const NUMERIC_FORMATS = new Set(["litres", "money", "rate", "count"]);
+const {
+  unitOf, rateWord,
+  FORMATTERS, NUMERIC_FORMATS,
+  ROLE_FIELDS, HAS_PRICE_BANDS, HAS_TOP_CUSTOMERS,
+} = require("./roleFields");
 
 const TONE_STYLE = { credit: CREDIT_S, balance: BALANCE_S };
 
-/**
- * The unit, spelled out.
- *
- * These columns used to abbreviate to "L" to stay narrow. It read as
- * engineering shorthand rather than as a report — "300,000 L" is a gauge
- * reading, "300,000 Litres" is a sentence — so the word is written in full and
- * the table is simply allowed to be wider; it already scrolls on its own.
- * `pfis.product_unit` spells the same unit several ways, and an unrecognised
- * one passes through as written rather than being guessed at.
- */
-const UNIT_LABEL = {
-  l: "Litres",
-  litres: "Litres",
-  litre: "Litres",
-  liters: "Litres",
-  kilograms: "Kg",
-  kilogram: "Kg",
-  kg: "Kg",
-  tonnes: "MT",
-  mt: "MT",
-};
-const unitOf = (u) => UNIT_LABEL[String(u || "").toLowerCase()] || String(u || "Litres");
-
-/**
- * The denominator in a rate: "₦1,200 per litre", not "₦1,200/Litres".
- * A rate reads as prose, so the unit goes singular and lower-case.
- */
-const RATE_WORD = { Litres: "litre", Kg: "kg", MT: "MT" };
-const rateWord = (u) => RATE_WORD[unitOf(u)] || unitOf(u).toLowerCase();
-
-/**
- * What each desk reports, in the order its own form asks for it.
- *
- * Keys are the API's column names — the same ones the dashboard form posts and
- * the Reports Hub lists — so a field added to a form needs one line here and
- * nothing else. Labels match the form's labels, with the two that mean
- * different things per role spelled out: `truckCount` is "Trucks exited" on the
- * gate sheet and "Trucks sold/loaded" everywhere else, and `amountPaid` is
- * "Commission paid" on the commission sheet and cash banked elsewhere.
- *
- * `tone` is the only place colour is decided for these tables: "credit" for a
- * figure that means money in or product moved, "balance" for one that means
- * what is left standing or not yet paid. A field with no tone prints in ink,
- * which is most of them — that is the point.
- */
-const ROLE_FIELDS = {
-  security_gate: [
-    { key: "trucksEntered", label: "Trucks entered", fmt: "count" },
-    { key: "truckCount", label: "Trucks exited", fmt: "count" },
-  ],
-  sales_manager: [
-    { key: "openingStock", label: "Opening balance", fmt: "litres" },
-    { key: "litresSold", label: "Litres sold", fmt: "litres", tone: "credit" },
-    { key: "avgPrice", label: "Avg price", fmt: "rate" },
-    { key: "totalSalesAmount", label: "Total sales", fmt: "money", tone: "credit" },
-    { key: "truckCount", label: "Trucks sold", fmt: "count" },
-    { key: "amountPaid", label: "Amount paid", fmt: "money", tone: "credit" },
-    { key: "totalInflow", label: "Total inflow", fmt: "money", tone: "credit" },
-    { key: "differentials", label: "Differentials", fmt: "money" },
-    { key: "yesterdayDeficitPayment", label: "Yest. deficit", fmt: "money" },
-    { key: "yesterdaySurplusPayment", label: "Yest. surplus", fmt: "money" },
-    { key: "bankName", label: "Bank", fmt: "text" },
-    { key: "accountNumber", label: "Account no.", fmt: "text" },
-  ],
-  product_manager: [
-    { key: "openingStock", label: "Opening (b/f)", fmt: "litres" },
-    { key: "receivedStock", label: "Ordered today", fmt: "litres" },
-    { key: "litresSold", label: "Loaded today", fmt: "litres", tone: "credit" },
-    { key: "loadingLeftOver", label: "Loading left over", fmt: "litres" },
-    { key: "tankBalance", label: "Tank balance", fmt: "litres", tone: "balance" },
-    { key: "truckCount", label: "Trucks loaded", fmt: "count" },
-    { key: "differentials", label: "Differentials", fmt: "money" },
-  ],
-  commissions: [
-    { key: "fundsReceived", label: "Funds received", fmt: "money", tone: "credit" },
-    { key: "litresSold", label: "Litres sold", fmt: "litres", tone: "credit" },
-    { key: "truckCount", label: "Trucks sold", fmt: "count" },
-    { key: "customerCount", label: "Customers", fmt: "count" },
-    { key: "orderCount", label: "Orders", fmt: "count" },
-    { key: "commissionDue", label: "Commission due", fmt: "money" },
-    { key: "amountPaid", label: "Commission paid", fmt: "money", tone: "credit" },
-    { key: "commissionOutstanding", label: "Not yet paid", fmt: "money", tone: "balance" },
-    { key: "fundsRemaining", label: "Funds remaining", fmt: "money", tone: "balance" },
-  ],
-  it_compliance: [
-    { key: "orderCount", label: "Orders", fmt: "count" },
-    { key: "litresSold", label: "Litres ordered", fmt: "litres", tone: "credit" },
-    { key: "avgPrice", label: "Avg price", fmt: "rate" },
-    { key: "totalSalesAmount", label: "Total value", fmt: "money", tone: "credit" },
-  ],
-};
-
-/** Which roles collect a price table, and which collect a customer list. */
-const HAS_PRICE_BANDS = new Set(["sales_manager", "it_compliance"]);
-const HAS_TOP_CUSTOMERS = new Set(["it_compliance"]);
 
 // No approval badge beside the filer's name. The report says what each desk
 // filed; whether a manager has since signed it off is a workflow state that
@@ -228,7 +125,7 @@ function stockTable(pfiStock) {
   }
 
   const header = STOCK_HEADERS.map((h) =>
-    hcell(h.label, { r: h.key || h.r, s: h.key ? TH_KEY_S : "" })
+    hcell(h.label, { r: h.key || h.r, bg: h.key ? HEAD_KEY : HEAD })
   ).join("");
 
   const rows = pfiStock
@@ -238,13 +135,13 @@ function stockTable(pfiStock) {
         "<tr>" +
         cell(escapeHtml(r.pfiNumber)) +
         cell(escapeHtml(r.productName) || "—", { s: `color:${MUTED};` }) +
-        cell(`${n0(r.openingStock)} ${u}`, { r: true, s: KEY_S }) +
+        cell(`${n0(r.openingStock)} ${u}`, { r: true, s: KEY_S, bg: TINT }) +
         cell(r.orderedQty ? `${n0(r.orderedQty)} ${u}` : "—", { r: true, s: CREDIT_S }) +
         cell(m(r.orderedValue), { r: true, s: CREDIT_S }) +
         cell(r.confirmedQty ? `${n0(r.confirmedQty)} ${u}` : "—", { r: true, s: CREDIT_S }) +
         cell(m(r.confirmedValue), { r: true, s: CREDIT_S }) +
         cell(r.avgRate ? `₦${n0(r.avgRate)} per ${rateWord(r.unit)}` : "—", { r: true }) +
-        cell(`${n0(r.closingStock)} ${u}`, { r: true, s: KEY_S + BALANCE_S }) +
+        cell(`${n0(r.closingStock)} ${u}`, { r: true, s: KEY_S + BALANCE_S, bg: TINT }) +
         cell(m(r.totalRevenue), { r: true, s: CREDIT_S }) +
         "</tr>"
       );

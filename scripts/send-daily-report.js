@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 /**
- * Build and send the daily reports.
+ * Build and send the daily report.
  *
- *   npm run report:daily                 both reports, for today
+ *   npm run report:daily                 today's report
  *   npm run report:daily -- --date=2026-08-09
- *   npm run report:daily -- --dry        build the files, send nothing
+ *   npm run report:daily -- --dry        write the HTML, send nothing
  *   npm run report:daily -- --to=a@b.com,c@d.com
- *   npm run report:daily -- --only=staff-sales
  *
  * Django ran these from Celery Beat. The scheduled trigger now lives in
  * jobs/scheduler.js, as a pg-boss cron at 23:50 Africa/Lagos — and it calls the
@@ -19,11 +18,11 @@
  *
  *   --force  send again even though tonight's is already logged as sent
  *
- * The two reports are shaped differently on purpose:
- *   "daily"        the combined HTML report (staff entries / PFI stock / orders
- *                   per depot) — matches Django's _build_combined_html_report(),
- *                   sent as the email body itself, no attachment.
- *   "staff-sales"  the staff sales workbook, unchanged — an .xlsx attachment.
+ * One report goes out: the SOROMAN Sales & Operations Report — depot sales,
+ * loading and exit gate, expenses, commissions, truck sales, filling stations
+ * and every desk's sheet — sent as the email body itself, no attachment. The
+ * depot-grouped combined report and the staff-sales .xlsx it used to send
+ * alongside are both retired; see services/dailyReportDispatch.
  *
  * Recipients come from REPORT_RECIPIENTS (comma-separated) unless --to is given.
  * With neither set the script refuses rather than silently mailing nobody —
@@ -34,9 +33,8 @@ require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
-const { buildStaffSalesReport } = require("../services/reportWorkbook.service");
-const { buildCombinedDailyReportData } = require("../services/dailyCombinedReport.service");
-const { renderDailyReportEmail } = require("../notifications/templates/dailyReportEmail");
+const { buildPfiDailyReportData } = require("../services/pfiDailyReport.service");
+const { renderPfiDailyReportEmail } = require("../notifications/templates/pfiDailyReportEmail");
 const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
 const { client } = require("../db");
 
@@ -61,28 +59,28 @@ const flag = (name) => process.argv.includes(`--${name}`);
   // --dry never sends, so it never goes through the dispatcher: it builds the
   // same artefacts and writes them to disk for inspection.
   if (dry) {
-    const reportDate = new Date(date).toISOString().slice(0, 10);
-    if (only !== "staff-sales") {
-      const data = await buildCombinedDailyReportData(date);
-      const { html, text, subject } = renderDailyReportEmail(data);
-      const out = path.join(process.cwd(), `daily-report-${data.reportDate}.html`);
-      fs.writeFileSync(out, html);
-      console.log(
-        `→ reports.daily  ${data.locations.length} location(s), ${data.totals.orderCount} order(s), ` +
-          `${data.totals.qtyLitres.toLocaleString()} L, ₦${data.totals.amountNaira.toLocaleString()}`
-      );
-      console.log(`  subject: ${subject}`);
-      console.log(`  text part:\n${text.split("\n").map((l) => `    ${l}`).join("\n")}`);
-      console.log(`  html written to ${out} — nothing sent (--dry)`);
-    }
-    if (only !== "daily") {
-      const result = await buildStaffSalesReport(date);
-      const out = path.join(process.cwd(), result.filename);
-      fs.writeFileSync(out, result.buffer);
-      console.log(`→ ${result.filename}  (${result.buffer.length.toLocaleString()} bytes)`);
-      console.log(`  written to ${out} — nothing sent (--dry)`);
-    }
-    void reportDate;
+    const data = await buildPfiDailyReportData(date);
+    const { html, text, subject } = renderPfiDailyReportEmail(data);
+    const out = path.join(process.cwd(), `daily-report-${data.reportDate}.html`);
+    fs.writeFileSync(out, html);
+
+    const s = data.summary;
+    console.log(`→ reports.pfi_daily  ${data.reportDate}`);
+    console.log(`  subject: ${subject}`);
+    console.log(
+      `  ${s.activePfis} active PFI(s), ${s.activeBatches} truck-sales batch(es), ` +
+        `${s.activeStations} filling station(s)`
+    );
+    console.log(
+      `  sold ${Number(s.litresSold).toLocaleString("en-NG")}  ` +
+        `value ₦${Math.round(s.salesValue).toLocaleString("en-NG")}  ` +
+        `received ₦${Math.round(s.fundsReceived).toLocaleString("en-NG")}`
+    );
+    console.log(`  text part:\n${text.split("\n").map((l) => `    ${l}`).join("\n")}`);
+    // Gmail clips a message at ~102KB and the cut lands mid-table, which is the
+    // one failure a daily report cannot have. Worth seeing on every dry run.
+    console.log(`  html written to ${out}  (${Math.round(html.length / 1024)}KB — Gmail clips at 102KB)`);
+    console.log(`  nothing sent (--dry)`);
   } else {
     const recipients = resolveRecipients(arg("to"));
     if (recipients.length === 0) {

@@ -37,8 +37,91 @@
  */
 const { client } = require("../db");
 const { dayBounds, REPORT_TZ } = require("./dailyCombinedReport.service");
+// The desks, in reading order, and the columns each one's form collects. Shared
+// with the combined report so the two cannot describe the same sheet
+// differently — see notifications/templates/roleFields.js.
+const { ROLE_ORDER, ROLE_LABELS } = require("../notifications/templates/roleFields");
 
 const num = (v) => Number(v || 0);
+
+/**
+ * Truck sales roll up to the batch: the customer is not the unit here.
+ *
+ * Extracted and exported so the three rules below can be tested without a
+ * database. Every one of them was got wrong at least once, and none of them
+ * throws when it is — they just print a number that is quietly not the number.
+ *
+ * ── Rolled up from EVERY customer, listed only if one is live ─────────────
+ *
+ * Those are two different questions, and answering both with the live filter
+ * gave a wrong figure rather than a partial one: PFI-14B reported 60 trucks
+ * allocated against 62 on the batch, because customers who had finished paying
+ * were dropped — so "unsold trucks" came out 34 when it is 36, and the batch's
+ * sales value was short by whatever those customers had bought. A batch total
+ * that quietly omits the settled customers is not a total.
+ *
+ * ── The balance is a SUM of debts, not a difference of totals ─────────────
+ *
+ * Not the same number once somebody has overpaid. Each customer's own balance
+ * is clamped at zero by the caller — an overpayment is a real thing, but it is
+ * not a debt — and `salesValue - fundsReceived` at the batch level quietly
+ * un-clamps it, letting one customer's credit cancel another's debt. On 16
+ * September that hid ₦456,452 and, worse, made the headline OUTSTANDING
+ * BALANCE disagree with the column of balances printed directly underneath it.
+ * A headline that cannot be added up from the rows below is the fastest way to
+ * lose a reader.
+ *
+ * ── Unsold trucks are never negative and never invented ───────────────────
+ *
+ * More sales than allocations is a real state — a truck sold against an
+ * allocation nobody keyed in — and it means "none left to sell", not "minus
+ * four trucks". A batch with no allocation rows at all gets null, which the
+ * template prints as N/A: a confident 0 against a batch still selling is a
+ * worse answer than an honest blank.
+ *
+ * @param {object[]} all      every delivery row, live and dormant
+ * @param {object[]} liveRows the subset that is still trading — see isLive
+ */
+const rollUpTruckSales = (all, liveRows) => {
+  const isTruckSale = (r) => r.customerType !== "filling_station";
+
+  const batches = new Map();
+  for (const r of all.filter(isTruckSale)) {
+    if (!batches.has(r.code)) {
+      batches.set(r.code, {
+        code: r.code, customers: 0,
+        trucksAllocated: 0, trucksSoldToday: 0, trucksSold: 0,
+        salesValue: 0, salesValueToday: 0,
+        fundsReceived: 0, fundsReceivedToday: 0, expenses: 0, balance: 0,
+      });
+    }
+    const b = batches.get(r.code);
+    b.customers += 1;
+    b.trucksAllocated += r.trucksAllocated;
+    b.trucksSoldToday += r.loadsToday;
+    b.trucksSold += r.loads;
+    b.salesValue += r.salesValue;
+    b.salesValueToday += r.salesValueToday;
+    b.fundsReceived += r.fundsReceived;
+    b.fundsReceivedToday += r.fundsReceivedToday;
+    b.expenses += r.expenses;
+    b.balance += r.balance;
+  }
+
+  /** The codes with at least one live customer on them. */
+  const liveCodes = new Set(liveRows.filter(isTruckSale).map((r) => r.code));
+
+  return [...batches.values()]
+    // '(unassigned)' is sales whose allocation_code was never filled in. It is
+    // a data gap wearing the costume of a batch, and listing it invites the
+    // reader to treat it as one.
+    .filter((b) => b.code !== "(unassigned)" && liveCodes.has(b.code))
+    .map((b) => ({
+      ...b,
+      unsoldTrucks: b.trucksAllocated > 0 ? Math.max(0, b.trucksAllocated - b.trucksSold) : null,
+    }))
+    .sort((a, b) => b.salesValue - a.salesValue);
+};
 
 /**
  * Everything the per-PFI report needs, for one Lagos day.
@@ -67,6 +150,11 @@ const buildPfiDailyReportData = async (date = new Date()) => {
   // ── The batches themselves ──────────────────────────────────────────────
   const pfiRows = await client`
     SELECT id, pfi_number, pfi_type::text AS pfi_type, location_name, product_name,
+           -- Not every batch is measured in litres: the LPG ones are in kg, and
+           -- the column spells the same unit three ways across the live rows
+           -- ('Litres', 'Liters', 'kg'). Carried through so the report prints
+           -- what the batch is actually traded in rather than assuming.
+           product_unit,
            starting_qty_litres, sold_qty_litres, unit_price::numeric AS unit_price,
            ticket_count
       FROM pfis
@@ -119,14 +207,24 @@ const buildPfiDailyReportData = async (date = new Date()) => {
      GROUP BY o.pfi_id`;
 
   // ── Gate and gantry movements, from the truck's own timestamps ──────────
+  //
+  // LOADED and EXITED are two different events and the report shows both. The
+  // volume columns hang off `loaded_at` — what actually went into trucks at the
+  // gantry — rather than off the exit timestamp, which is the security barrier
+  // lifting and can be hours later or (for a truck still on site) never. A
+  // "litres loaded today" measured on the way out reports nothing for a truck
+  // that loaded at 18:00 and sleeps in the yard.
   const truckRows = await client`
     SELECT o.pfi_id,
            COUNT(*) FILTER (WHERE t.security_entered_at >= ${startIso} AND t.security_entered_at < ${endIso}) AS entered_today,
            COUNT(*) FILTER (WHERE t.loaded_at          >= ${startIso} AND t.loaded_at          < ${endIso}) AS loaded_today,
            COUNT(*) FILTER (WHERE t.security_exited_at >= ${startIso} AND t.security_exited_at < ${endIso}) AS exited_today,
+           COALESCE(SUM(t.quantity) FILTER (WHERE t.loaded_at >= ${startIso} AND t.loaded_at < ${endIso}), 0) AS litres_loaded_today,
            COALESCE(SUM(t.quantity) FILTER (WHERE t.security_exited_at >= ${startIso} AND t.security_exited_at < ${endIso}), 0) AS litres_out_today,
            -- On site now: through the gate, not yet back out.
            COUNT(*) FILTER (WHERE t.security_entered_at IS NOT NULL AND t.security_exited_at IS NULL) AS on_site,
+           COUNT(*) FILTER (WHERE t.loaded_at IS NOT NULL)                                AS trucks_loaded_all,
+           COALESCE(SUM(t.quantity) FILTER (WHERE t.loaded_at IS NOT NULL), 0)            AS litres_loaded_all,
            COUNT(*)                                        AS trucks_all,
            COALESCE(SUM(t.quantity), 0)                    AS litres_ticketed_all
       FROM order_trucks t
@@ -212,18 +310,35 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     const valueAll = num(o.value_all);
     const paidAll = num(o.paid_all);
 
+    /**
+     * Opening stock TODAY, derived rather than stored.
+     *
+     * `sold_qty_litres` is the running total to date, so closing stock is
+     * starting − sold and the day opened wherever it closed plus whatever went
+     * out today. Derived in that direction on purpose: closing is the figure
+     * that has to agree with the batch record, and deriving opening from it
+     * means the row reads straight across — opening − sold today = closing —
+     * however the two halves were recorded.
+     */
+    const closing = Math.max(0, starting - sold);
+    const soldToday = num(o.litres_today);
+
     return {
       id: Number(p.id),
       pfiNumber: p.pfi_number,
       type: p.pfi_type,
       location: p.location_name || "",
       product: p.product_name || "",
+      /** 'Litres', 'Liters' or 'kg' — see the query. */
+      unit: p.product_unit || "Litres",
       unitPrice: num(p.unit_price),
 
       stock: {
         starting,
         sold,
-        remaining: Math.max(0, starting - sold),
+        openingToday: closing + soldToday,
+        soldToday,
+        remaining: closing,
         percentSold: starting > 0 ? (sold / starting) * 100 : 0,
       },
 
@@ -237,8 +352,11 @@ const buildPfiDailyReportData = async (date = new Date()) => {
         enteredToday: Number(t.entered_today || 0),
         loadedToday: Number(t.loaded_today || 0),
         exitedToday: Number(t.exited_today || 0),
+        litresLoadedToday: num(t.litres_loaded_today),
         litresOutToday: num(t.litres_out_today),
         onSite: Number(t.on_site || 0),
+        trucksLoadedToDate: Number(t.trucks_loaded_all || 0),
+        litresLoadedToDate: num(t.litres_loaded_all),
         trucksToDate: Number(t.trucks_all || 0),
         litresTicketedToDate: num(t.litres_ticketed_all),
       },
@@ -314,16 +432,28 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       LEFT JOIN delivery_customers dc ON dc.id = ds.customer_id
      GROUP BY 1, 2, 3`;
 
-  /** Stock put on the ground, per station. Stations only — see above. */
+  /**
+   * What has been allocated, per batch and party.
+   *
+   * This used to ask only about filling stations, because only a station's
+   * stock-on-the-ground was being reported. Truck sales need the same rows for
+   * a different question: a batch's UNSOLD trucks are the ones allocated to it
+   * that have not been sold, and without the allocation there is no
+   * denominator — "18 trucks sold" says nothing until you know whether 18 or
+   * 65 went out.
+   *
+   * So the customer-type filter is gone and the type comes back on the row
+   * instead, to be split the same way the sales are.
+   */
   const stockRows = await client`
     SELECT COALESCE(NULLIF(TRIM(di.allocation_code), ''), '(unassigned)') AS code,
+           COALESCE(dc.customer_type, 'customer') AS customer_type,
            COALESCE(NULLIF(TRIM(dc.name), ''), NULLIF(TRIM(di.customer_name), ''), '(unnamed)') AS party,
            COUNT(*)                             AS trucks,
            COALESCE(SUM(di.quantity_allocated), 0) AS allocated
       FROM delivery_inventory di
       LEFT JOIN delivery_customers dc ON dc.id = di.customer_id
-     WHERE dc.customer_type = 'filling_station'
-     GROUP BY 1, 2`;
+     GROUP BY 1, 2, 3`;
 
   const key = (code, party) => `${code}\u0000${party}`;
   const rowsBy = new Map();
@@ -363,7 +493,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     row.fundsReceivedToday += num(r.paid_today);
   }
   for (const r of stockRows) {
-    const row = at(r.code, r.party, "filling_station");
+    const row = at(r.code, r.party, r.customer_type);
     row.allocatedLitres += num(r.allocated);
     row.trucksAllocated += Number(r.trucks || 0);
   }
@@ -374,6 +504,11 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     // and summing it against other lines would understate what is owed.
     balance: Math.max(0, r.salesValue - r.fundsReceived),
     remainingLitres: r.allocatedLitres - r.litres,
+    // What was on the ground when the day opened — today's sales put back.
+    // Derived from what remains for the same reason the depot's opening stock
+    // is: the remaining figure is the one that has to agree with the
+    // allocation, so the row reads straight across from it.
+    openingLitresToday: r.allocatedLitres - r.litres + r.litresToday,
     stockKnown: r.allocatedLitres > 0 && r.allocatedLitres >= r.litres,
   }));
 
@@ -397,39 +532,10 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     // chase. Dropping it would hide N1.6bn of debt to tidy the page up.
     r.balance > 0;
 
-  const byValue = (a, b) => b.salesValue - a.salesValue;
   const liveRows = all.filter(isLive);
   const dormant = all.filter((r) => !isLive(r));
 
-  /** Truck sales roll up to the batch: the customer is not the unit here. */
-  const batches = new Map();
-  for (const r of liveRows.filter((x) => x.customerType !== "filling_station")) {
-    if (!batches.has(r.code)) {
-      batches.set(r.code, {
-        code: r.code, customers: 0,
-        trucksSoldToday: 0, trucksSold: 0,
-        salesValue: 0, salesValueToday: 0,
-        fundsReceived: 0, fundsReceivedToday: 0, expenses: 0,
-      });
-    }
-    const b = batches.get(r.code);
-    b.customers += 1;
-    b.trucksSoldToday += r.loadsToday;
-    b.trucksSold += r.loads;
-    b.salesValue += r.salesValue;
-    b.salesValueToday += r.salesValueToday;
-    b.fundsReceived += r.fundsReceived;
-    b.fundsReceivedToday += r.fundsReceivedToday;
-    b.expenses += r.expenses;
-  }
-
-  const truckSales = [...batches.values()]
-    // '(unassigned)' is sales whose allocation_code was never filled in. It is
-    // a data gap wearing the costume of a batch, and listing it invites the
-    // reader to treat it as one.
-    .filter((b) => b.code !== "(unassigned)")
-    .map((b) => ({ ...b, balance: b.salesValue - b.fundsReceived }))
-    .sort(byValue);
+  const truckSales = rollUpTruckSales(all, liveRows);
 
   const stations = liveRows
     .filter((r) => r.customerType === "filling_station")
@@ -448,20 +554,45 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     { lines: 0, salesValue: 0, fundsReceived: 0, balance: 0 }
   );
 
+  /** pfi_number → the unit that batch trades in, for the sheets filed against it. */
+  const unitByPfi = new Map(
+    pfis.map((p) => [String(p.pfiNumber || "").trim().toUpperCase().replace(/\s+/g, " "), p.unit])
+  );
+
   /**
    * The sheets each desk filed today.
    *
    * daily_reports carries pfi_number, so a sheet can be read against the batch
    * it was filed for rather than only against a location.
    */
-  const staffEntries = await client`
+  const staffRows = await client`
     SELECT report_type::text AS role, location, pfi_number, product_name,
-           submitted_by_name, litres_sold::numeric AS litres_sold,
-           total_sales_amount::numeric AS sales_value,
-           amount_paid::numeric AS amount_paid,
-           opening_stock::numeric AS opening_stock,
-           tank_balance::numeric AS tank_balance,
-           trucks_entered, truck_count, status::text AS status, remarks
+           submitted_by_name, status::text AS status, remarks,
+           -- Every column the role's own form collects, because the report now
+           -- renders each desk under ITS OWN headings (see roleFields.js)
+           -- rather than forcing five different sheets through one set of
+           -- twelve generic columns. A commission sheet used to arrive as a row
+           -- of dashes with its entire point — funds received, commission due,
+           -- what is still owed — absent, because the query never asked for it.
+           opening_stock::numeric             AS opening_stock,
+           received_stock::numeric            AS received_stock,
+           litres_sold::numeric               AS litres_sold,
+           loading_left_over::numeric         AS loading_left_over,
+           tank_balance::numeric              AS tank_balance,
+           avg_price::numeric                 AS avg_price,
+           total_sales_amount::numeric        AS total_sales_amount,
+           amount_paid::numeric               AS amount_paid,
+           total_inflow::numeric              AS total_inflow,
+           differentials::numeric             AS differentials,
+           yesterday_deficit_payment::numeric AS yesterday_deficit_payment,
+           yesterday_surplus_payment::numeric AS yesterday_surplus_payment,
+           funds_received::numeric            AS funds_received,
+           commission_due::numeric            AS commission_due,
+           commission_outstanding::numeric    AS commission_outstanding,
+           funds_remaining::numeric           AS funds_remaining,
+           bank_name, account_number,
+           customer_count, order_count, truck_count, trucks_entered,
+           price_bands, top_customers
       FROM daily_reports
      WHERE report_date = ${dayStr}
      -- report_type::text, not report_type: it is an enum, and a bare enum sorts
@@ -470,6 +601,100 @@ const buildPfiDailyReportData = async (date = new Date()) => {
      ORDER BY COALESCE(NULLIF(TRIM(pfi_number), ''), 'ZZZZ') ASC,
               report_type::text ASC,
               location ASC`;
+
+  /**
+   * A figure somebody typed, or nothing at all.
+   *
+   * The nullable columns — every commission figure, the gate's trucksEntered —
+   * are nullable precisely so that "not filled in yet" stays distinguishable
+   * from "the answer is zero" on a sheet filed in stages. Number(null) is 0,
+   * so coercing here would destroy exactly the distinction the schema went out
+   * of its way to keep, and the template would print a confident 0 where
+   * nobody has answered.
+   */
+  const numOrNull = (v) => (v === null || v === undefined ? null : Number(v));
+
+  /**
+   * `daily_reports.pfi_number` is typed on a form, `pfis.pfi_number` is the
+   * record — same string in practice, but only after the spacing and case a
+   * form picks up are taken off it.
+   */
+  const pfiKey = (v) => String(v || "").trim().toUpperCase().replace(/\s+/g, " ");
+
+  const staffEntries = staffRows.map((r) => ({
+    role: r.role,
+    location: r.location || "",
+    pfiNumber: r.pfi_number || "",
+    productName: r.product_name || "",
+    submittedBy: r.submitted_by_name || "",
+    status: r.status,
+    remarks: r.remarks || "",
+    openingStock: numOrNull(r.opening_stock),
+    receivedStock: numOrNull(r.received_stock),
+    litresSold: numOrNull(r.litres_sold),
+    loadingLeftOver: numOrNull(r.loading_left_over),
+    tankBalance: numOrNull(r.tank_balance),
+    avgPrice: numOrNull(r.avg_price),
+    totalSalesAmount: numOrNull(r.total_sales_amount),
+    amountPaid: numOrNull(r.amount_paid),
+    totalInflow: numOrNull(r.total_inflow),
+    differentials: numOrNull(r.differentials),
+    yesterdayDeficitPayment: numOrNull(r.yesterday_deficit_payment),
+    yesterdaySurplusPayment: numOrNull(r.yesterday_surplus_payment),
+    fundsReceived: numOrNull(r.funds_received),
+    commissionDue: numOrNull(r.commission_due),
+    commissionOutstanding: numOrNull(r.commission_outstanding),
+    fundsRemaining: numOrNull(r.funds_remaining),
+    bankName: r.bank_name || "",
+    accountNumber: r.account_number || "",
+    customerCount: numOrNull(r.customer_count),
+    orderCount: numOrNull(r.order_count),
+    truckCount: numOrNull(r.truck_count),
+    trucksEntered: numOrNull(r.trucks_entered),
+    priceBands: Array.isArray(r.price_bands) ? r.price_bands : [],
+    topCustomers: Array.isArray(r.top_customers) ? r.top_customers : [],
+    // The unit belongs to the batch, not to the sheet: a gas sheet's "litres
+    // sold" is kilograms, and the form has no column saying so.
+    unit: unitByPfi.get(pfiKey(r.pfi_number)) || "Litres",
+  }));
+
+  /**
+   * Silence is a finding.
+   *
+   * The section used to list the sheets that arrived and say nothing about the
+   * ones that did not — so a desk that filed nothing all day looked exactly
+   * like a desk that does not exist, and the reader had to hold eleven batches
+   * and five roles in their head to notice. The whole reason this section is
+   * read at the end of a day is to see who has NOT reported.
+   *
+   * So the grid is built from the batches rather than from the rows: every
+   * active PFI appears under every role, and one that filed nothing says so in
+   * its own row. A sheet filed against a batch that is no longer active is
+   * still listed — it was really filed, and dropping it would be the same
+   * silence in the other direction.
+   */
+  const staffReports = ROLE_ORDER.map((type) => {
+    const forRole = staffEntries.filter((e) => e.role === type);
+    const seen = new Set();
+    const rows = [];
+
+    for (const p of pfis) {
+      const filed = forRole.filter((e) => pfiKey(e.pfiNumber) === pfiKey(p.pfiNumber));
+      filed.forEach((e) => seen.add(e));
+      if (filed.length) rows.push(...filed);
+      else rows.push({ role: type, pfiNumber: p.pfiNumber, location: p.location, unit: p.unit, reported: false });
+    }
+    // Filed against something not in the active list — an old batch, or a
+    // pfi_number left blank on the form.
+    for (const e of forRole) if (!seen.has(e)) rows.push(e);
+
+    return {
+      type,
+      label: ROLE_LABELS[type],
+      filed: forRole.length,
+      rows: rows.map((r) => ({ reported: true, ...r })),
+    };
+  });
 
   // ── One line for the top of the email ───────────────────────────────────
   const depotTotals = pfis.reduce(
@@ -551,8 +776,11 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     })),
     truckSales,
     stations,
+    /** Flat, as filed. */
     staffEntries,
+    /** The same sheets as a role × batch grid, including the gaps. */
+    staffReports,
   };
 };
 
-module.exports = { buildPfiDailyReportData };
+module.exports = { buildPfiDailyReportData, rollUpTruckSales };

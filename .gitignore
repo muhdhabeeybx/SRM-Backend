@@ -27,5 +27,10 @@ PR2_PLAN.md
 # Pre-repair table snapshots: production customer data, never committed.
 scripts/backups/
 
-# Local previews from scripts/send-pfi-report.js
+# Local previews from scripts/send-daily-report.js --dry and send-pfi-report.js
 pfi-report-*.html
+daily-report-*.html
+
+# Rollback snapshots written beside the repair script that took them. Same
+# reason as scripts/backups/ above: production rows, including staff names.
+scripts/rollback-*.json
