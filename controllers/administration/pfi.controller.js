@@ -7,7 +7,11 @@ const {
   productRepo,
   staffRepo,
   orderRepo,
+  orderPfiAllocationRepo,
 } = require("../../repositories");
+const { db } = require("../../config/db");
+const { eq } = require("drizzle-orm");
+const { pfiMovements } = require("../../db/schema");
 const { computeFinancials, explainFinancials } = require("../../lib/pfiFinance");
 const { resolveBooking, actorFor, vendorFor } = require("./expense.controller");
 const { isWithinScope } = require("../../lib/scopeFilter");
@@ -665,6 +669,49 @@ const getStockSummary = asyncHandler(async (req, res) => {
  *
  * Each order is checked independently and reported on independently — one bad
  * order in a batch of forty must not cost you the other thirty-nine.
+ *
+ * ── Why this does more than set orders.pfi_id ──────────────────────────────
+ *
+ * It used to do exactly that, and nothing else:
+ *
+ *     await orderRepo.update(orderId, { pfiId: Number(pfi.id) });
+ *
+ * `pfis.sold_qty_litres` is not derived — it is a counter that only
+ * reserveStock raises and only releaseStock lowers. So a bulk assignment moved
+ * an order's litres in the orders table while leaving the reservation behind
+ * on the batch the order came from and never adding it to the batch it went
+ * to. Both batches ended up wrong, in opposite directions, and nothing said
+ * so.
+ *
+ * That is the whole of the drift found on 38 of 47 batches: the Create Order
+ * page reads `starting_qty_litres - sold_qty_litres`, so a batch that had
+ * orders assigned INTO it offered litres it had already sold (PFI 42 was
+ * offering 2.79M litres that were gone), while one assigned OUT of held litres
+ * nobody could buy (PFI 45, 270,000). See
+ * scripts/reconcile-pfi-stock-counters.js, which repairs the arithmetic this
+ * function was getting wrong.
+ *
+ * So an assignment now does what the other two paths that move an order
+ * between batches already did — updateOrder's PFI branch in
+ * services/order.service.js, and scripts/move-orders-to-pfi.js:
+ *
+ *   release the old batch's reservation   so it stops holding sold litres
+ *   reserve on the new batch              so it stops offering them
+ *   rewrite order_pfi_allocations         the per-order record of both
+ *   repoint pfi_movements                 tickets follow the order
+ *   markFinishedIfComplete                a batch that is now sold out says so
+ *
+ * All of it inside one transaction per order, so an order cannot end up
+ * pointing at a batch that never reserved for it — which is the exact state
+ * this function used to create on purpose.
+ *
+ * ── When the destination has not got the litres ────────────────────────────
+ *
+ * reserveStock refuses rather than overselling, and that refusal is reported
+ * against the order instead of being swallowed. This is a real behaviour
+ * change: assignments that used to "succeed" while quietly overselling a batch
+ * now fail and say why. scripts/move-orders-to-pfi.js remains the deliberate
+ * override for a correction that has to land regardless.
  */
 const assignOrdersToPfi = asyncHandler(async (req, res) => {
   const pfiId = req.body.pfi_id ?? req.body.pfiId;
@@ -722,8 +769,46 @@ const assignOrdersToPfi = asyncHandler(async (req, res) => {
         continue;
       }
 
-      await orderRepo.update(orderId, { pfiId: Number(pfi.id) });
-      assigned.push({ orderId, orderNumber: order.orderNumber });
+      const fromPfiId = order.pfiId == null ? null : Number(order.pfiId);
+
+      await db.transaction(async (tx) => {
+        // Give back whatever the order currently holds, wherever it holds it.
+        // Allocation rows are the per-PFI record; an order predating them (or
+        // one a previous bulk assign left without any) falls back to its own
+        // quantity against the PFI it points at.
+        if (fromPfiId != null) {
+          const allocations = await orderPfiAllocationRepo.findByOrderId(orderId, tx);
+          if (allocations.length > 0) {
+            for (const alloc of allocations) {
+              await pfiRepo.releaseStock(alloc.pfiId, alloc.quantity, tx);
+            }
+            await orderPfiAllocationRepo.deleteByOrderId(orderId, tx);
+          } else {
+            await pfiRepo.releaseStock(fromPfiId, order.quantity, tx);
+          }
+        }
+
+        const reserved = await pfiRepo.reserveStock(pfi.id, order.quantity, tx);
+        if (!reserved) {
+          // Rolls back the releases above — the order keeps the batch it had
+          // rather than being left holding nothing anywhere.
+          throw httpErr(
+            400,
+            `${pfi.pfiNumber} has not got ${Number(order.quantity).toLocaleString("en-NG")} litres left to give this order`
+          );
+        }
+        await orderPfiAllocationRepo.create([{ pfiId: pfi.id, quantity: order.quantity }], orderId, tx);
+
+        // A ticket already cut for this order recorded its litres against
+        // whichever batch was current then. The tickets move with the order,
+        // or the two disagree about where the product came from.
+        await tx.update(pfiMovements).set({ pfiId: pfi.id }).where(eq(pfiMovements.orderId, orderId));
+
+        await orderRepo.update(orderId, { pfiId: Number(pfi.id) }, tx);
+        await pfiRepo.markFinishedIfComplete(pfi.id, tx);
+      });
+
+      assigned.push({ orderId, orderNumber: order.orderNumber, movedFrom: fromPfiId });
     } catch (err) {
       errors.push({ orderId: rawId, error: err.message || "Could not assign this order" });
     }
