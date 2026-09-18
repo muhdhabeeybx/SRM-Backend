@@ -2,7 +2,7 @@ const { eq } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orderTrucks } = require("../db/schema");
 const commissionRepo = require("../repositories/commission.repository");
-const { orderRepo } = require("../repositories");
+const { orderRepo, customerRepo } = require("../repositories");
 const auditLogRepo = require("../repositories/auditLog.repository");
 
 /**
@@ -46,6 +46,40 @@ const auditLogRepo = require("../repositories/auditLog.repository");
  * If no rate is configured, commission is created with rate=0 so it
  * still appears on the page — admin can set the rate later.
  */
+/**
+ * What this order's commission is priced at, and where that price came from.
+ *
+ * Two steps, most specific first:
+ *
+ *   1. The customer's own agreed rate. Set on the customer and applied
+ *      wherever they buy, because the agreement is with them and not with a
+ *      depot.
+ *   2. The depot + product table — the usual rate, and what almost every
+ *      order is priced at.
+ *
+ * `!= null`, not truthiness. A customer on an agreed 0.00 earns nothing, and
+ * that is a decision somebody made; falling through to the depot's ₦1.00
+ * because the agreed figure happened to be zero would pay them a commission
+ * they were explicitly not given. NULL on the column is the "no agreement"
+ * case, and only that.
+ *
+ * The caller decides what to do with a rate of zero — see createForOrder,
+ * which raises a not-payable row rather than a ₦0 one that sits in the desk's
+ * queue forever.
+ */
+async function resolveRate(order) {
+  const customer = await customerRepo.findById(order.customerId);
+  if (customer && customer.commissionRate != null) {
+    return { rate: parseFloat(customer.commissionRate), source: "customer" };
+  }
+
+  const rateEntry = await commissionRepo.getRate(order.depotId, order.productId);
+  return {
+    rate: rateEntry ? parseFloat(rateEntry.commissionRate) : null,
+    source: "depot_product",
+  };
+}
+
 async function createForOrder(orderId) {
   const order = await orderRepo.findById(orderId);
   if (!order) return null;
@@ -91,8 +125,7 @@ async function createForOrder(orderId) {
    * paid, and unpaying somebody because a rate was later removed would be far
    * worse than the untidiness.
    */
-  const rateEntry = await commissionRepo.getRate(order.depotId, order.productId);
-  const configuredRate = rateEntry ? parseFloat(rateEntry.commissionRate) : null;
+  const { rate: configuredRate, source: rateSource } = await resolveRate(order);
   if (configuredRate == null || !(configuredRate > 0)) {
     if (existing) return existing;
     return commissionRepo.create({
@@ -104,6 +137,7 @@ async function createForOrder(orderId) {
       commissionRate: "0",
       commissionAmount: "0",
       status: "skipped",
+      rateSource: "none",
       skipReason: "No commission rate set for this location and product",
     });
   }
@@ -113,11 +147,16 @@ async function createForOrder(orderId) {
 
   if (existing) {
     // Nothing moved — the ordinary retry case, still a no-op.
-    if (Number(existing.quantity) === quantity && parseFloat(existing.commissionRate) === commissionRate) {
+    if (
+      Number(existing.quantity) === quantity &&
+      parseFloat(existing.commissionRate) === commissionRate &&
+      existing.rateSource === rateSource
+    ) {
       return existing;
     }
     return commissionRepo.update(existing.id, {
       quantity,
+      rateSource,
       commissionRate: String(commissionRate),
       commissionAmount: String(commissionAmount.toFixed(2)),
     });
@@ -130,6 +169,7 @@ async function createForOrder(orderId) {
     productId: order.productId,
     quantity,
     commissionRate: String(commissionRate),
+    rateSource,
     commissionAmount: String(commissionAmount.toFixed(2)),
     status: "pending",
   });
@@ -360,18 +400,85 @@ async function recomputeForRate(depotId, productId) {
   const rateEntry = await commissionRepo.getRate(depotId, productId);
   const rate = rateEntry ? parseFloat(rateEntry.commissionRate) : 0;
 
+  /**
+   * A customer on their own agreed rate is not repriced by a depot edit.
+   *
+   * findPendingFor selects every pending row at this depot and product, and
+   * it has no idea who bought. Without this, the first time anybody adjusted
+   * the Warri/PMS rate, every ₦2.00 customer's pending commission would be
+   * quietly rewritten to the depot's ₦1.00 — no error, no audit trail, and
+   * nothing on the page to say it had happened. It is the single way this
+   * feature breaks silently, so the guard is here rather than in the query:
+   * the exclusion is a rule about money and belongs where it can be read.
+   *
+   * Their rows move when THEIR rate changes — see recomputeForCustomer.
+   */
+  const overridden = await commissionRepo.customersWithOwnRate(
+    pending.map((c) => c.customerId),
+  );
+
   const updated = [];
+  let skipped = 0;
   for (const c of pending) {
+    if (overridden.has(Number(c.customerId))) {
+      skipped++;
+      continue;
+    }
     const amount = Number(c.quantity) * rate;
-    if (parseFloat(c.commissionRate) === rate) continue;
+    if (parseFloat(c.commissionRate) === rate && c.rateSource === "depot_product") continue;
     updated.push(
       await commissionRepo.update(c.id, {
         commissionRate: String(rate),
+        rateSource: "depot_product",
         commissionAmount: String(amount.toFixed(2)),
       }),
     );
   }
-  return { considered: pending.length, updated: updated.length, rate };
+  return { considered: pending.length, updated: updated.length, skipped, rate };
+}
+
+/**
+ * Bring a customer's pending commissions onto their own rate — or off it.
+ *
+ * The counterpart to recomputeForRate, and needed for the same reason: a rate
+ * that only applies to orders placed after it was set leaves the desk looking
+ * at a queue priced under an agreement that no longer holds, with no way to
+ * tell which rows are stale.
+ *
+ * Clearing the rate sends each row back to its depot's figure rather than to
+ * zero, because "no agreement" means the usual rate applies, not that the
+ * customer earns nothing.
+ *
+ * Pending only, exactly as above: a paid commission settled at the rate in
+ * force when it was paid, and repricing history is a rewrite, not a
+ * recalculation.
+ */
+async function recomputeForCustomer(customerId) {
+  const customer = await customerRepo.findById(customerId);
+  if (!customer) return { considered: 0, updated: 0 };
+
+  const pending = await commissionRepo.findPendingForCustomer(customerId);
+  const own = customer.commissionRate != null ? parseFloat(customer.commissionRate) : null;
+
+  const updated = [];
+  for (const c of pending) {
+    let rate = own;
+    let source = "customer";
+    if (own == null) {
+      const entry = await commissionRepo.getRate(c.depotId, c.productId);
+      rate = entry ? parseFloat(entry.commissionRate) : 0;
+      source = "depot_product";
+    }
+    if (parseFloat(c.commissionRate) === rate && c.rateSource === source) continue;
+    updated.push(
+      await commissionRepo.update(c.id, {
+        commissionRate: String(rate),
+        rateSource: source,
+        commissionAmount: String((Number(c.quantity) * rate).toFixed(2)),
+      }),
+    );
+  }
+  return { considered: pending.length, updated: updated.length, rate: own };
 }
 
 module.exports = {
@@ -381,4 +488,6 @@ module.exports = {
   resolveMany,
   revertToPending,
   recomputeForRate,
+  recomputeForCustomer,
+  resolveRate,
 };

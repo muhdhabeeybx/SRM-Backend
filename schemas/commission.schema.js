@@ -52,4 +52,18 @@ const dailyReport = z.object({
   remarks: z.string().trim().max(2000).optional().default(""),
 });
 
-module.exports = { listCommissions, idParam, skipCommission, revertCommission, bulkResolve, upsertRate, dailyReport };
+/**
+ * A customer's own commission rate.
+ *
+ * `nullable`, and required to be present: null clears the agreement and hands
+ * the customer back to the depot's rate, which is a different instruction from
+ * 0 ("they earn nothing") and from omitting the field entirely. Making it
+ * required means a request always says which of the two it means.
+ */
+const setCustomerRate = z.object({
+  customerId: z.coerce.number().int().positive(),
+  commissionRate: z.coerce.number().finite().nonnegative().nullable(),
+});
+
+module.exports = {
+  setCustomerRate, listCommissions, idParam, skipCommission, revertCommission, bulkResolve, upsertRate, dailyReport };

@@ -1,6 +1,8 @@
 const asyncHandler = require("express-async-handler");
 const commissionRepo = require("../../repositories/commission.repository");
 const commissionService = require("../../services/commission.service");
+const { customerRepo } = require("../../repositories");
+const auditLogRepo = require("../../repositories/auditLog.repository");
 
 const getCommissions = asyncHandler(async (req, res) => {
   const { search, status, depotId, customerId, dateFrom, dateTo, page, limit } = req.query;
@@ -146,6 +148,63 @@ const upsertRate = asyncHandler(async (req, res) => {
   });
 });
 
+/** Who is on a rate other than the usual one, and what they are owed. */
+const getCustomerRates = asyncHandler(async (req, res) => {
+  const rates = await commissionRepo.customerRates();
+  res.json({ success: true, data: { rates } });
+});
+
+/**
+ * Set — or clear — a customer's own commission rate.
+ *
+ * Its own endpoint rather than a field on the customer form: this decides what
+ * the company owes somebody, and it belongs with the other rate that does,
+ * where it reprices the pending queue in the same breath and leaves the same
+ * kind of record.
+ *
+ * `null` clears the agreement and sends the customer back to the usual depot
+ * rate. That is deliberately different from 0, which is an agreement that they
+ * earn nothing — see db/migrations/0042.
+ */
+const setCustomerRate = asyncHandler(async (req, res) => {
+  const { customerId, commissionRate } = req.body;
+
+  const customer = await customerRepo.findById(customerId);
+  if (!customer) {
+    return res.status(404).json({ success: false, message: "Customer not found" });
+  }
+
+  const was = customer.commissionRate;
+  await customerRepo.update(customerId, {
+    commissionRate: commissionRate == null ? null : String(commissionRate),
+  });
+
+  // Bring what is already waiting onto the new agreement, the same way setting
+  // a depot rate does. A queue priced under an agreement that no longer holds
+  // is the defect this avoids.
+  const repriced = await commissionService.recomputeForCustomer(customerId);
+
+  await auditLogRepo.record({
+    entityType: "customer",
+    entityId: customerId,
+    action: "commission.customer_rate_set",
+    actor: req.user?.id ? { type: "staff", staffId: req.user.id } : { type: "system" },
+    metadata: {
+      from: was == null ? null : String(was),
+      to: commissionRate == null ? null : String(commissionRate),
+      repriced: repriced.updated,
+    },
+  });
+
+  res.json({
+    success: true,
+    message: repriced.updated
+      ? `Rate saved — ${repriced.updated} pending commission${repriced.updated === 1 ? "" : "s"} repriced`
+      : "Rate saved",
+    data: { customerId, commissionRate: commissionRate ?? null, repriced },
+  });
+});
+
 const generateDailyReport = asyncHandler(async (req, res) => {
   const {
     location, pfi, date, litresSold, truckCount,
@@ -233,6 +292,8 @@ const generateDailyReport = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  setCustomerRate,
+  getCustomerRates,
   getCommissions,
   getCommissionById,
   confirmPayment,

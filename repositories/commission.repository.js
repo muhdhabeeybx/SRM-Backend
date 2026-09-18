@@ -1,5 +1,6 @@
-const { eq, and, or, ilike, desc, count, sql, between, gte, lte } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, count, sql, between, gte, lte, inArray, isNotNull } = require("drizzle-orm");
 const { db } = require("../config/db");
+const { client } = require("../db");
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
 const { scopeCondition } = require("../lib/scopeFilter");
 const {
@@ -196,6 +197,17 @@ const findAll = async ({
         customerCommissionBankName: customers.commissionBankName,
         customerCommissionAccountName: customers.commissionAccountName,
         customerCommissionAccountNumber: customers.commissionAccountNumber,
+        /**
+         * Where this row's rate came from, and what the customer is on now.
+         *
+         * A ₦2.00 row beside a column of ₦1.00 rows is indistinguishable from
+         * a typo without these. `rateSource` is the snapshot — what priced
+         * THIS row — and `customerCommissionRate` is the live agreement, so a
+         * row raised before an agreement changed can be told apart from one
+         * raised after it.
+         */
+        rateSource: commissions.rateSource,
+        customerCommissionRate: customers.commissionRate,
         // The batch the order drew on. The desk settles commissions a PFI at
         // a time, so it is a column and a sort key, not a detail.
         pfiId: orders.pfiId,
@@ -302,6 +314,8 @@ const findById = async (id) => {
       customerCommissionBankName: customers.commissionBankName,
       customerCommissionAccountName: customers.commissionAccountName,
       customerCommissionAccountNumber: customers.commissionAccountNumber,
+      rateSource: commissions.rateSource,
+      customerCommissionRate: customers.commissionRate,
       depotId: commissions.depotId,
       depotName: depots.name,
       productId: commissions.productId,
@@ -432,6 +446,73 @@ const findPendingFor = async (depotId, productId) =>
     );
 
 /**
+ * Every customer on a rate of their own, with what they are pending.
+ *
+ * The answer to "who are we paying something other than the usual?", which is
+ * a question nobody could ask before: the agreement lived nowhere, so the only
+ * record of it was whoever remembered. Ordered by rate then name, so the ₦2.00
+ * arrangements read as a group.
+ */
+const customerRates = async () => {
+  const rows = await client`
+    SELECT c.id,
+           c.name,
+           c.company_name,
+           c.phone,
+           c.commission_rate::text AS commission_rate,
+           COALESCE(p.pending, 0)::int    AS pending_count,
+           COALESCE(p.amount, 0)::text    AS pending_amount
+      FROM customers c
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS pending, SUM(commission_amount) AS amount
+          FROM commissions
+         WHERE customer_id = c.id AND status = 'pending'
+      ) p ON true
+     WHERE c.commission_rate IS NOT NULL
+     ORDER BY c.commission_rate DESC, c.name
+  `;
+  return rows.map((r) => ({
+    id: Number(r.id),
+    name: r.name,
+    companyName: r.company_name,
+    phone: r.phone,
+    commissionRate: r.commission_rate,
+    pendingCount: r.pending_count,
+    pendingAmount: r.pending_amount,
+  }));
+};
+
+/**
+ * Of these customers, which hold a commission rate of their own.
+ *
+ * A Set of ids rather than a per-row lookup: recomputeForRate walks every
+ * pending commission at a depot and would otherwise ask the customers table
+ * once per row.
+ *
+ * `IS NOT NULL`, not `> 0`. A customer on an agreed 0.00 has an agreement, and
+ * a depot edit must not reprice them up to ₦1.00 any more than it may reprice
+ * a ₦2.00 customer down.
+ */
+const customersWithOwnRate = async (customerIds) => {
+  const ids = [...new Set((customerIds || []).map(Number).filter(Number.isFinite))];
+  if (!ids.length) return new Set();
+  const rows = await db
+    .select({ id: customers.id })
+    .from(customers)
+    .where(and(inArray(customers.id, ids), isNotNull(customers.commissionRate)));
+  return new Set(rows.map((r) => Number(r.id)));
+};
+
+/** Every commission still owed to one customer, whatever depot it came from. */
+const findPendingForCustomer = async (customerId) =>
+  db
+    .select()
+    .from(commissions)
+    .where(
+      and(eq(commissions.customerId, parseInt(customerId)), eq(commissions.status, "pending")),
+    );
+
+/**
  * Back to pending, and forget how it got settled.
  *
  * Both settlement stamps are cleared, not just the one that applied: a row
@@ -522,6 +603,9 @@ module.exports = {
   markAsSkipped,
   revertToPending,
   findPendingFor,
+  findPendingForCustomer,
+  customersWithOwnRate,
+  customerRates,
   findWalletCreditFor,
   getSummary,
 };

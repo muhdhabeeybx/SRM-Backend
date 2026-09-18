@@ -51,6 +51,20 @@ const customers = pgTable(
     virtualAccountBank: varchar("virtual_account_bank", { length: 100 }).default(""),
     virtualAccountName: varchar("virtual_account_name", { length: 255 }).default(""),
     dvaSubaccountCode: varchar("dva_subaccount_code", { length: 100 }).default(""),
+    /**
+     * Per-litre commission agreed with this customer, wherever they buy.
+     *
+     * Overrides depot_product_commissions, which is keyed on the depot and the
+     * product and knows nothing about who is buying. Nullable with no default,
+     * and the distinction matters: NULL means "no agreement, use the usual
+     * rate", while 0 means "this customer earns nothing" — a real agreement
+     * somebody made. A NOT NULL DEFAULT 0 would turn every customer in the
+     * book into the second one overnight.
+     *
+     * Only ever decides what the NEXT order snapshots. See
+     * services/commission.service.js.
+     */
+    commissionRate: decimal("commission_rate", { precision: 15, scale: 2 }),
     // Commission payout bank details — where the company sends commission payments.
     commissionBankName: varchar("commission_bank_name", { length: 255 }).default(""),
     commissionAccountName: varchar("commission_account_name", { length: 255 }).default(""),

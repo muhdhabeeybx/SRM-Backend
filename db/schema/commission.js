@@ -4,6 +4,7 @@ const {
   integer,
   decimal,
   text,
+  varchar,
   timestamp,
   index,
   check,
@@ -35,6 +36,15 @@ const commissions = pgTable(
     quantity: integer("quantity").notNull(),
     commissionRate: decimal("commission_rate", { precision: 15, scale: 2 }).notNull(),
     commissionAmount: decimal("commission_amount", { precision: 15, scale: 2 }).notNull(),
+    /**
+     * Where that rate came from — 'customer', 'depot_product' or 'none'.
+     *
+     * A ₦2.00 row in a column of ₦1.00 rows looks like a keying error, and
+     * without this the desk cannot tell an agreed rate from a typo without
+     * asking somebody. It also separates "nobody configured a rate" from "the
+     * depot pays nothing", which otherwise both read as ₦0.00.
+     */
+    rateSource: varchar("rate_source", { length: 20 }).default("depot_product").notNull(),
     status: commissionStatusEnum("status").default("pending").notNull(),
     paidAt: timestamp("paid_at", { withTimezone: true }),
     paidBy: integer("paid_by").references(() => staff.id, { onDelete: "set null" }),
