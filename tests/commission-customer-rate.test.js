@@ -65,8 +65,9 @@ describe("a customer's own commission rate", () => {
     assert.equal(source, "depot_product");
   });
 
-  test("an agreed rate wins wherever the customer buys", async (t) => {
+  test("an agreed rate wins where the depot pays something", async (t) => {
     if (!ready) return t.skip("schema or fixtures unavailable");
+    await commissionRepo.upsertRate(depotId, productId, 1);
     await customerRepo.update(customerId, { commissionRate: "2.00" });
 
     const { rate, source } = await commissionService.resolveRate({
@@ -76,10 +77,37 @@ describe("a customer's own commission rate", () => {
     assert.equal(source, "customer");
   });
 
+  test("an agreed rate does NOT open up a depot that pays nobody", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+
+    /*
+     * The depot+product rate decides WHETHER an order earns; the customer's
+     * rate only decides HOW MUCH once it does. Resolving the customer first
+     * would have started paying ₦2.00 at Dangote Refinery and AIPEC Lagos —
+     * 200 paid orders and 26.4m litres in sixty days where nobody earns
+     * anything today.
+     */
+    const unrated = await client`
+      SELECT p.id FROM products p
+       WHERE NOT EXISTS (
+         SELECT 1 FROM depot_product_commissions d
+          WHERE d.depot_id = ${depotId} AND d.product_id = p.id)
+       LIMIT 1`;
+    if (!unrated.length) return t.skip("every product at this depot has a rate");
+
+    await customerRepo.update(customerId, { commissionRate: "2.00" });
+    const { rate, source } = await commissionService.resolveRate({
+      customerId, depotId, productId: Number(unrated[0].id),
+    });
+    assert.equal(rate, null, "no depot rate means no commission, agreement or not");
+    assert.equal(source, "depot_product");
+  });
+
   test("an agreed rate of zero is an agreement, not an absence", async (t) => {
     if (!ready) return t.skip("schema or fixtures unavailable");
     // The defect this pins: `customer.commissionRate || depotRate` reads 0 as
     // missing and pays ₦1.00 to a customer explicitly given nothing.
+    await commissionRepo.upsertRate(depotId, productId, 1);
     await customerRepo.update(customerId, { commissionRate: "0.00" });
 
     const { rate, source } = await commissionService.resolveRate({

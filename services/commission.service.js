@@ -49,35 +49,49 @@ const auditLogRepo = require("../repositories/auditLog.repository");
 /**
  * What this order's commission is priced at, and where that price came from.
  *
- * Two steps, most specific first:
+ * Two questions in order, and they are genuinely different:
  *
- *   1. The customer's own agreed rate. Set on the customer and applied
- *      wherever they buy, because the agreement is with them and not with a
- *      depot.
- *   2. The depot + product table — the usual rate, and what almost every
- *      order is priced at.
+ *   1. Does this order earn anything at all?  The depot + product rate
+ *      answers it. Where no rate is configured — Dangote Refinery, AIPEC
+ *      Lagos, Dangote Direct — nothing is earned, by anybody.
+ *   2. If it earns, how much?  The customer's own agreed rate answers that
+ *      where they have one, otherwise the depot's figure stands.
  *
- * `!= null`, not truthiness. A customer on an agreed 0.00 earns nothing, and
- * that is a decision somebody made; falling through to the depot's ₦1.00
- * because the agreed figure happened to be zero would pay them a commission
- * they were explicitly not given. NULL on the column is the "no agreement"
- * case, and only that.
+ * ── Why the depot rate gates, rather than being just another candidate ────
  *
- * The caller decides what to do with a rate of zero — see createForOrder,
- * which raises a not-payable row rather than a ₦0 one that sits in the desk's
- * queue forever.
+ * The first version resolved the customer FIRST, so a customer on ₦2.00 would
+ * have started earning ₦2.00 at the refinery too — 200 paid orders and 26.4m
+ * litres in sixty days where nobody earns anything today. "We give them ₦2
+ * instead of the usual ₦1" is an instruction about the rate, not about which
+ * depots pay commission, and it should not quietly open up the ones that pay
+ * none.
+ *
+ * ── `!= null`, not truthiness ─────────────────────────────────────────────
+ *
+ * A customer on an agreed 0.00 earns nothing, and that is a decision somebody
+ * made. Falling through to the depot's ₦1.00 because the agreed figure
+ * happened to be zero would pay them a commission they were explicitly not
+ * given. NULL on the column is the "no agreement" case, and only that.
+ *
+ * @param {object} order     needs customerId, depotId, productId
+ * @param {object} [customer] pre-loaded, so a sweep over many rows does not
+ *                            re-read the same customer once per row
  */
-async function resolveRate(order) {
-  const customer = await customerRepo.findById(order.customerId);
-  if (customer && customer.commissionRate != null) {
-    return { rate: parseFloat(customer.commissionRate), source: "customer" };
+async function resolveRate(order, customer = undefined) {
+  const rateEntry = await commissionRepo.getRate(order.depotId, order.productId);
+  const depotRate = rateEntry ? parseFloat(rateEntry.commissionRate) : null;
+
+  // Nothing is earned here, whoever is buying. The caller raises a
+  // not-payable row — see createForOrder.
+  if (depotRate == null || !(depotRate > 0)) {
+    return { rate: depotRate, source: "depot_product" };
   }
 
-  const rateEntry = await commissionRepo.getRate(order.depotId, order.productId);
-  return {
-    rate: rateEntry ? parseFloat(rateEntry.commissionRate) : null,
-    source: "depot_product",
-  };
+  const buyer = customer === undefined ? await customerRepo.findById(order.customerId) : customer;
+  if (buyer && buyer.commissionRate != null) {
+    return { rate: parseFloat(buyer.commissionRate), source: "customer" };
+  }
+  return { rate: depotRate, source: "depot_product" };
 }
 
 async function createForOrder(orderId) {
@@ -137,8 +151,16 @@ async function createForOrder(orderId) {
       commissionRate: "0",
       commissionAmount: "0",
       status: "skipped",
-      rateSource: "none",
-      skipReason: "No commission rate set for this location and product",
+      /*
+       * Two ways to earn nothing, and they are not the same conversation. The
+       * desk configures its way out of the first; the second is an agreement
+       * somebody made and there is nothing to fix.
+       */
+      rateSource: rateSource === "customer" ? "customer" : "none",
+      skipReason:
+        rateSource === "customer"
+          ? "This customer's own commission rate is \u20a60.00"
+          : "No commission rate set for this location and product",
     });
   }
 
@@ -458,27 +480,34 @@ async function recomputeForCustomer(customerId) {
   if (!customer) return { considered: 0, updated: 0 };
 
   const pending = await commissionRepo.findPendingForCustomer(customerId);
-  const own = customer.commissionRate != null ? parseFloat(customer.commissionRate) : null;
 
   const updated = [];
   for (const c of pending) {
-    let rate = own;
-    let source = "customer";
-    if (own == null) {
-      const entry = await commissionRepo.getRate(c.depotId, c.productId);
-      rate = entry ? parseFloat(entry.commissionRate) : 0;
-      source = "depot_product";
-    }
-    if (parseFloat(c.commissionRate) === rate && c.rateSource === source) continue;
+    /*
+     * Through resolveRate, and with the customer handed in so this does not
+     * re-read them once per row. Sharing the resolver is what stops the sweep
+     * and the create path ever disagreeing about a price — including about
+     * the depots that pay nobody, where an agreed rate must NOT apply.
+     */
+    const { rate, source } = await resolveRate(
+      { customerId, depotId: c.depotId, productId: c.productId },
+      customer,
+    );
+    const effective = rate == null ? 0 : rate;
+    if (parseFloat(c.commissionRate) === effective && c.rateSource === source) continue;
     updated.push(
       await commissionRepo.update(c.id, {
-        commissionRate: String(rate),
+        commissionRate: String(effective),
         rateSource: source,
-        commissionAmount: String((Number(c.quantity) * rate).toFixed(2)),
+        commissionAmount: String((Number(c.quantity) * effective).toFixed(2)),
       }),
     );
   }
-  return { considered: pending.length, updated: updated.length, rate: own };
+  return {
+    considered: pending.length,
+    updated: updated.length,
+    rate: customer.commissionRate == null ? null : parseFloat(customer.commissionRate),
+  };
 }
 
 module.exports = {
