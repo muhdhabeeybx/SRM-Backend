@@ -114,7 +114,10 @@ const daysBetween = (from, to) => {
 };
 
 /** An empty bucket, so no accumulator ever has to check for undefined. */
-const emptyBucket = () => ({ qty: 0, value: 0, orders: 0, inflow: 0, statementInflow: 0 });
+const emptyBucket = () => ({
+  qty: 0, value: 0, orders: 0,
+  inflow: 0, statementInflow: 0, legacyInflow: 0, transferIn: 0, transferOut: 0,
+});
 
 /**
  * Should this PFI appear on this day's sheet?
@@ -196,6 +199,19 @@ const buildRow = ({ pfi, day, running, dayBucket, entry, editorName }) => {
     bankInflow: round2(running.inflow),
     /** Of that inflow, how much a bank statement line stands behind. */
     statementInflow: round2(running.statementInflow),
+    /**
+     * What the rest of it is, so "72% bank-backed" is a statement somebody can
+     * act on rather than a number that only raises a question.
+     *
+     *   legacy       recorded before payments were kept against orders. Real
+     *                money, no bank line, and none can be produced.
+     *   transferIn   surplus moved onto this PFI's orders from elsewhere. The
+     *                bank line exists — on the order it came from.
+     *   transferOut  negative. Money this PFI gave away.
+     */
+    legacyInflow: round2(running.legacyInflow),
+    transferIn: round2(running.transferIn),
+    transferOut: round2(running.transferOut),
   };
   computed.stockBalance = round2(computed.initialQty - computed.cumulativeVolume);
   computed.surplusDeficit = round2(computed.bankInflow - computed.salesValue);
@@ -331,6 +347,9 @@ const build = async ({
     const b = openingBy.get(Number(r.pfi_id)) || emptyBucket();
     b.inflow = num(r.amount);
     b.statementInflow = num(r.statement_amount);
+    b.legacyInflow = num(r.legacy_amount);
+    b.transferIn = num(r.transfer_in_amount);
+    b.transferOut = num(r.transfer_out_amount);
     openingBy.set(Number(r.pfi_id), b);
   }
 
@@ -350,6 +369,9 @@ const build = async ({
     const b = bucketFor(Number(r.pfi_id), dayKey(r.day));
     b.inflow = num(r.amount);
     b.statementInflow = num(r.statement_amount);
+    b.legacyInflow = num(r.legacy_amount);
+    b.transferIn = num(r.transfer_in_amount);
+    b.transferOut = num(r.transfer_out_amount);
   }
 
   const spanBy = new Map(
@@ -382,6 +404,9 @@ const build = async ({
       run.orders += bucket.orders;
       run.inflow = round2(run.inflow + bucket.inflow);
       run.statementInflow = round2(run.statementInflow + bucket.statementInflow);
+      run.legacyInflow = round2(run.legacyInflow + bucket.legacyInflow);
+      run.transferIn = round2(run.transferIn + bucket.transferIn);
+      run.transferOut = round2(run.transferOut + bucket.transferOut);
 
       const entry = entryBy.get(`${pfi.id}|${day}`);
       const listed =

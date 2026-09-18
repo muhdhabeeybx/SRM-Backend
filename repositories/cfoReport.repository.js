@@ -182,7 +182,21 @@ const inflowByDay = async ({ tz, from, to, pfiIds }) => {
     SELECT o.pfi_id                       AS pfi_id,
            ${from ? day : client`NULL::date`} AS day,
            SUM(op.amount)::numeric        AS amount,
-           SUM(op.amount) FILTER (WHERE op.source = 'statement')::numeric AS statement_amount
+           /*
+            * The same total, split by what kind of money it is — so the report
+            * can say not just HOW MUCH of the inflow a bank statement stands
+            * behind, but what the rest of it actually is.
+            *
+            * "72% bank-backed" on its own is a number that raises a question
+            * and answers none of it. The missing 28% is either wallet-era
+            * money with no statement line ever recorded against it, or surplus
+            * moved here from another order — two completely different
+            * conversations, and the desk needs to know which before it can act.
+            */
+           COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'statement'), 0)::numeric    AS statement_amount,
+           COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'legacy'), 0)::numeric       AS legacy_amount,
+           COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'transfer_in'), 0)::numeric  AS transfer_in_amount,
+           COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'transfer_out'), 0)::numeric AS transfer_out_amount
       FROM order_payments op
       JOIN orders o ON o.id = op.order_id
      WHERE o.pfi_id IS NOT NULL
