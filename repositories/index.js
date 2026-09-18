@@ -34,6 +34,9 @@ module.exports = {
   auditEventRepo: require("./auditEvent.repository"),
   fleetTruckRepo: require("./fleetTruck.repository"),
   dailyReportRepo: require("./dailyReport.repository"),
+  // The CFO report reads orders and order_payments directly; it owns no
+  // table but cfo_report_entries, which holds only the corrections.
+  cfoReportRepo: require("./cfoReport.repository"),
   incidentRecordRepo: require("./incidentRecord.repository"),
   offlineSaleRepo: require("./offlineSale.repository"),
   dangoteProductRepo: require("./dangoteProduct.repository"),

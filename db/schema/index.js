@@ -78,6 +78,8 @@ const staffPageOverrideSchema = require("./staffPageOverride");
 // After ./staff — messageTemplate destructures it at load time.
 const messageTemplateSchema = require("./messageTemplate");
 const messageCampaignSchema = require("./messageCampaign");
+// After ./pfi and ./staff — cfoReportEntry destructures both at load time.
+const cfoReportEntrySchema = require("./cfoReportEntry");
 
 module.exports = {
   ...enums,
@@ -145,4 +147,5 @@ module.exports = {
   ...staffPageOverrideSchema,
   ...messageTemplateSchema,
   ...messageCampaignSchema,
+  ...cfoReportEntrySchema,
 };

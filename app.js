@@ -84,6 +84,9 @@ app.use("/api/expected-payments", require("./routes/administration/expectedPayme
 app.use("/api/bank-accounts", require("./routes/administration/bankAccount.route"));
 app.use("/api/vendors", require("./routes/administration/vendor.route"));
 app.use("/api/finance-report", require("./routes/administration/financeReport.route"));
+// Sales and money per batch per day — the CFO's own sheet. See
+// services/cfoReport.service.js for how every column is arrived at.
+app.use("/api/cfo-report", require("./routes/administration/cfoReport.route"));
 app.use("/api/bank-statements", require("./routes/administration/bankStatement.route"));
 app.use("/api/settlements", require("./routes/administration/settlement.route"));
 app.use("/api/order-expiry", require("./routes/administration/orderExpiry.route"));

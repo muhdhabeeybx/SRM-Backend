@@ -39,6 +39,7 @@ const API_PERMISSIONS = {
   "/api/expenses": { read: null },
   "/api/vendors": { read: null },
   "/api/finance-report": { read: null },
+  "/api/cfo-report": { read: null },
   "/api/pfis": { read: null },
   "/api/deposits": { read: null },
   "/api/expected-payments": { read: null },
