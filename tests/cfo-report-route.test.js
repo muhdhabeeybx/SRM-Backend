@@ -1,12 +1,12 @@
 // Must precede any require that reaches config/db.
 require("dotenv").config();
 
-const { test, describe, after } = require("node:test");
+const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const request = require("supertest");
 
 const app = require("../app");
-const { staffToken, closeDb } = require("./helpers");
+const { staffToken, staffTokenWithRoles, closeDb } = require("./helpers");
 const { client } = require("../config/db");
 
 const URL = "/api/cfo-report";
@@ -19,14 +19,55 @@ const URL = "/api/cfo-report";
  * so the page loads, the request 403s, and the screen shows an error that
  * looks like a permissions problem with the user rather than a missing line
  * in a table. Everything else here is the validation contract.
+ *
+ * ── The report is allowlisted ─────────────────────────────────────────────
+ *
+ * Every case below needs a caller who has been GRANTED the page, because the
+ * report is restricted to three named people and nothing else opens it — not
+ * admin, not super_admin, which is what the fixture staff holds. So the grant
+ * is written in `before` and removed in `after`, and the rule itself is tested
+ * once, over HTTP, against a caller who does not have it. The rule's own
+ * edge cases live in tests/cfo-report-access.test.js, which needs no database.
  */
 describe("CFO report endpoint", () => {
+  let grantedStaffId;
+
+  before(async () => {
+    // Log in first so the fixture row exists, then grant it the page.
+    await staffToken(request, app);
+    const [row] = await client`SELECT id FROM staff WHERE email = 'test-staff@soroman.test'`;
+    grantedStaffId = Number(row.id);
+    await client`
+      INSERT INTO staff_page_overrides (staff_id, route_path, allowed)
+      VALUES (${grantedStaffId}, '/cfo-report', TRUE)
+      ON CONFLICT (staff_id, route_path) DO UPDATE SET allowed = TRUE`;
+  });
+
   after(async () => {
     await client`DELETE FROM cfo_report_entries WHERE report_date = '2026-01-03'`.catch(() => {});
+    // Leave no standing grant behind — the allowlist in migration 0041 is the
+    // record of who may see this report, and a fixture must not add to it.
+    if (grantedStaffId) {
+      await client`
+        DELETE FROM staff_page_overrides
+         WHERE staff_id = ${grantedStaffId} AND route_path = '/cfo-report'`.catch(() => {});
+    }
     await closeDb();
   });
 
-  test("a signed-in staff member can reach it", async () => {
+  test("a staff member who has not been granted the page is refused", async () => {
+    // admin + super_admin and still out: only an explicit grant opens this.
+    const { accessToken } = await staffTokenWithRoles(["admin", "super_admin"]);
+    const res = await request(app)
+      .get(URL)
+      .query({ dateFrom: "2026-09-15", dateTo: "2026-09-17" })
+      .set("Authorization", `Bearer ${accessToken}`);
+
+    assert.equal(res.status, 403, JSON.stringify(res.body));
+    assert.match(res.body.message, /CFO report/i);
+  });
+
+  test("a granted staff member can reach it", async () => {
     const token = await staffToken(request, app);
     const res = await request(app)
       .get(URL)
