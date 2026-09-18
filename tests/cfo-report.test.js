@@ -63,54 +63,54 @@ describe("CFO report — the day range", () => {
   });
 });
 
-describe("CFO report — which batches appear on a day", () => {
+describe("CFO report — which PFIs appear on a day", () => {
   const span = { firstDay: "2026-08-01", lastDay: "2026-09-10" };
   const active = { status: "active", closureDay: null };
   const finished = { status: "finished", closureDay: null };
 
-  test("a batch that traded is listed however else it reads", () => {
+  test("a PFI that traded is listed however else it reads", () => {
     assert.equal(
-      isListed({ day: "2026-09-20", batch: finished, span, dayQty: 5000 }),
+      isListed({ day: "2026-09-20", pfi: finished, span, dayQty: 5000 }),
       true
     );
   });
 
-  test("a batch is not listed before its first confirmed sale", () => {
-    assert.equal(isListed({ day: "2026-07-31", batch: active, span, dayQty: 0 }), false);
+  test("a PFI is not listed before its first confirmed sale", () => {
+    assert.equal(isListed({ day: "2026-07-31", pfi: active, span, dayQty: 0 }), false);
   });
 
-  test("a batch with no confirmed sale at all is never listed", () => {
+  test("a PFI with no confirmed sale at all is never listed", () => {
     assert.equal(
-      isListed({ day: "2026-09-01", batch: active, span: { firstDay: null, lastDay: null }, dayQty: 0 }),
+      isListed({ day: "2026-09-01", pfi: active, span: { firstDay: null, lastDay: null }, dayQty: 0 }),
       false
     );
   });
 
-  test("an open batch stays listed on a quiet day after its last sale", () => {
+  test("an open PFI stays listed on a quiet day after its last sale", () => {
     // Stock sitting in a tank with nothing moving is the thing a CFO most
     // wants to see, so silence must not remove the row.
-    assert.equal(isListed({ day: "2026-09-20", batch: active, span, dayQty: 0 }), true);
+    assert.equal(isListed({ day: "2026-09-20", pfi: active, span, dayQty: 0 }), true);
   });
 
-  test("a finished batch drops off after its last trading day", () => {
-    assert.equal(isListed({ day: "2026-09-10", batch: finished, span, dayQty: 0 }), true);
-    assert.equal(isListed({ day: "2026-09-11", batch: finished, span, dayQty: 0 }), false);
+  test("a finished PFI drops off after its last trading day", () => {
+    assert.equal(isListed({ day: "2026-09-10", pfi: finished, span, dayQty: 0 }), true);
+    assert.equal(isListed({ day: "2026-09-11", pfi: finished, span, dayQty: 0 }), false);
   });
 
-  test("a finished batch closed later stays until its closure date", () => {
+  test("a finished PFI closed later stays until its closure date", () => {
     const closedLate = { status: "finished", closureDay: "2026-09-15" };
-    assert.equal(isListed({ day: "2026-09-14", batch: closedLate, span, dayQty: 0 }), true);
-    assert.equal(isListed({ day: "2026-09-16", batch: closedLate, span, dayQty: 0 }), false);
+    assert.equal(isListed({ day: "2026-09-14", pfi: closedLate, span, dayQty: 0 }), true);
+    assert.equal(isListed({ day: "2026-09-16", pfi: closedLate, span, dayQty: 0 }), false);
   });
 
-  test("includeAll lists a started batch whatever its state", () => {
+  test("includeAll lists a started PFI whatever its state", () => {
     assert.equal(
-      isListed({ day: "2026-09-20", batch: finished, span, dayQty: 0, includeAll: true }),
+      isListed({ day: "2026-09-20", pfi: finished, span, dayQty: 0, includeAll: true }),
       true
     );
-    // Still not before it existed — "all" is all the batches, not all of time.
+    // Still not before it existed — "all" is all the PFIs, not all of time.
     assert.equal(
-      isListed({ day: "2026-07-01", batch: finished, span, dayQty: 0, includeAll: true }),
+      isListed({ day: "2026-07-01", pfi: finished, span, dayQty: 0, includeAll: true }),
       false
     );
   });
@@ -153,7 +153,7 @@ function row(over = {}) {
 }
 
 describe("CFO report — a row, computed and corrected", () => {
-  const batch = {
+  const pfi = {
     id: 7, pfiNumber: "PFI/01/26/TEST", locationName: "Warri", productName: "Petrol",
     productUnit: "Litres", status: "active", pfiType: "coastal", startingQty: 1000000,
   };
@@ -161,7 +161,7 @@ describe("CFO report — a row, computed and corrected", () => {
   const dayBucket = { qty: 50000, value: 65000000, orders: 2, inflow: 0, statementInflow: 0 };
 
   test("with no correction, the row is the computed figures", () => {
-    const r = buildRow({ batch, day: "2026-09-17", running, dayBucket, entry: null });
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: null });
     assert.equal(r.initialQty, 1000000);
     assert.equal(r.cumulativeVolume, 400000);
     assert.equal(r.dayVolume, 50000);
@@ -171,19 +171,19 @@ describe("CFO report — a row, computed and corrected", () => {
   });
 
   test("stock balance is initial minus cumulative, always", () => {
-    const r = buildRow({ batch, day: "2026-09-17", running, dayBucket, entry: null });
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: null });
     assert.equal(r.stockBalance, 600000);
     assert.equal(r.stockBalance, r.initialQty - r.cumulativeVolume);
   });
 
   test("surplus/deficit is inflow minus sales value, and negative when owed", () => {
-    const r = buildRow({ batch, day: "2026-09-17", running, dayBucket, entry: null });
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: null });
     assert.equal(r.surplusDeficit, -20000000, "20m still owed reads as a deficit");
   });
 
   test("an override replaces the figure and is declared", () => {
     const entry = { bankInflow: "520000000", remarks: "Transfer matched by hand" };
-    const r = buildRow({ batch, day: "2026-09-17", running, dayBucket, entry });
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry });
     assert.equal(r.bankInflow, 520000000);
     assert.deepEqual(r.edited, ["bankInflow"]);
     assert.equal(r.remarks, "Transfer matched by hand");
@@ -192,7 +192,7 @@ describe("CFO report — a row, computed and corrected", () => {
   test("the derived figures follow the override, so the row still adds up", () => {
     // The whole reason stock balance and surplus/deficit are not storable.
     const entry = { bankInflow: "520000000", cumulativeVolume: "450000" };
-    const r = buildRow({ batch, day: "2026-09-17", running, dayBucket, entry });
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry });
     assert.equal(r.surplusDeficit, 0, "corrected inflow now settles the sales value exactly");
     assert.equal(r.stockBalance, 550000, "1,000,000 − 450,000");
     assert.equal(r.stockBalance, r.initialQty - r.cumulativeVolume);
@@ -202,7 +202,7 @@ describe("CFO report — a row, computed and corrected", () => {
   test("an override of zero is honoured, not treated as absent", () => {
     // The defect this pins: `entry.bankInflow || computed` reads 0 as missing
     // and silently prints the system's figure over a deliberate correction.
-    const r = buildRow({ batch, day: "2026-09-17", running, dayBucket, entry: { bankInflow: "0" } });
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: { bankInflow: "0" } });
     assert.equal(r.bankInflow, 0);
     assert.deepEqual(r.edited, ["bankInflow"]);
     assert.equal(r.surplusDeficit, -520000000);
@@ -210,7 +210,7 @@ describe("CFO report — a row, computed and corrected", () => {
 
   test("a null override means the computed figure stands", () => {
     const r = buildRow({
-      batch, day: "2026-09-17", running, dayBucket,
+      pfi, day: "2026-09-17", running, dayBucket,
       entry: { bankInflow: null, remarks: "cleared" },
     });
     assert.equal(r.bankInflow, 500000000);
@@ -219,7 +219,7 @@ describe("CFO report — a row, computed and corrected", () => {
   });
 
   test("what the system said is always kept beside what was typed", () => {
-    const r = buildRow({ batch, day: "2026-09-17", running, dayBucket, entry: { bankInflow: "1" } });
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: { bankInflow: "1" } });
     assert.equal(r.computed.bankInflow, 500000000);
     assert.equal(r.bankInflow, 1);
     assert.equal(r.computed.statementInflow, 450000000, "and how much of it a bank line backs");
@@ -268,7 +268,7 @@ describe("CFO report — the corrections table", () => {
       reportDate: "2026-01-02", pfiId, values: { bankInflow: "99.00" }, staffId: null,
     });
     const rows = await cfoReportRepo.findEntries({ from: "2026-01-02", to: "2026-01-02", pfiIds: [pfiId] });
-    assert.equal(rows.length, 1, "one row per batch per day, still");
+    assert.equal(rows.length, 1, "one row per PFI per day, still");
     assert.equal(Number(rows[0].bankInflow), 99);
     assert.equal(rows[0].remarks, "checked against UBA statement", "an absent key leaves the remark alone");
   });
@@ -292,10 +292,10 @@ describe("CFO report — the corrections table", () => {
     assert.equal(await cfoReportRepo.deleteEntry({ reportDate: "2026-01-02", pfiId }), null);
   });
 
-  test("an empty scope means no batches, not every batch", async (t) => {
+  test("an empty scope means no PFIs, not every PFI", async (t) => {
     if (!available) return t.skip("no database");
     // The defect this pins: treating an empty id list as "no filter" handed a
-    // user scoped to a depot with no batches the whole company's book.
+    // user scoped to a depot with no PFIs the whole company's book.
     const rows = await cfoReportRepo.findEntries({ from: "2026-01-01", to: "2026-12-31", pfiIds: [] });
     assert.deepEqual(rows, []);
   });

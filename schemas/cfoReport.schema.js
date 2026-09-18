@@ -18,7 +18,7 @@ const cfoReportQuerySchema = z
     depotId: z.coerce.number().int().positive().optional(),
     pfiId: z.coerce.number().int().positive().optional(),
     /**
-     * Every batch that had started by the date, rather than only the ones
+     * Every PFI that had started by the date, rather than only the ones
      * trading. Off by default: a sheet listing forty finished cargoes at
      * zero buries the twelve that matter.
      */
@@ -60,7 +60,7 @@ const cfoReportQuerySchema = z
  * impossible to un-correct. See db/migrations/0040.
  *
  * Not `nonnegative`. A cumulative volume cannot sensibly be negative but a
- * bank inflow can — a batch that gave more surplus away than it ever received
+ * bank inflow can — a PFI that gave more surplus away than it ever received
  * nets below zero — and a report that refuses to record what happened is
  * worse than one showing an uncomfortable figure.
  */

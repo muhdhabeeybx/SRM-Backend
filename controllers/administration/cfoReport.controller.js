@@ -4,7 +4,7 @@ const cfoReportService = require("../../services/cfoReport.service");
 const { CFO_OVERRIDE_FIELDS } = require("../../db/schema/cfoReportEntry");
 
 /**
- * The CFO report — one block per day, one row per batch.
+ * The CFO report — one block per day, one row per PFI.
  *
  * All of the arithmetic is in services/cfoReport.service.js, including a full
  * account of where each column comes from. This only unpacks the query and
@@ -17,7 +17,7 @@ const getCfoReport = asyncHandler(async (req, res) => {
     depotId: req.query.depotId,
     pfiId: req.query.pfiId,
     includeAll: req.query.includeAll,
-    // Location/PFI scope still narrows which batches a non-super_admin sees,
+    // Location/PFI scope still narrows which PFIs a non-super_admin sees,
     // the same way it does on every other report.
     scopeUser: req.user,
   });
@@ -26,7 +26,7 @@ const getCfoReport = asyncHandler(async (req, res) => {
 });
 
 /**
- * Save a correction against one batch on one date.
+ * Save a correction against one PFI on one date.
  *
  * ── Present-versus-absent, not truthy-versus-falsy ─────────────────────────
  *
@@ -34,7 +34,7 @@ const getCfoReport = asyncHandler(async (req, res) => {
  * sent as null clears its override; a field left out is not touched. Building
  * it from truthiness instead would make 0 unsavable and null indistinguishable
  * from "leave it alone" — and 0 is a real correction on a report where a
- * batch legitimately sold nothing.
+ * PFI legitimately sold nothing.
  */
 const saveCfoReportEntry = asyncHandler(async (req, res) => {
   const { reportDate, pfiId, remarks } = req.body;

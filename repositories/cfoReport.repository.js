@@ -3,7 +3,7 @@ const { cfoReportEntries } = require("../db/schema");
 const { and, eq, gte, lte, inArray } = require("drizzle-orm");
 
 /**
- * The raw material for the CFO report: every figure, bucketed by batch and by
+ * The raw material for the CFO report: every figure, bucketed by PFI and by
  * calendar day, and nothing assembled.
  *
  * Assembly — running totals, the trading window, applying overrides — is in
@@ -26,7 +26,7 @@ const { and, eq, gte, lte, inArray } = require("drizzle-orm");
  * The same rule, on the same column, that the PFI page uses for its Total
  * Sold (pfiExpense.repository's `sold` query) and that the finance report
  * uses for its Total Quantity. Sharing it by construction is what makes the
- * CFO report's cumulative column reconcile against the batch page to the
+ * CFO report's cumulative column reconcile against the PFI page to the
  * litre instead of approximately.
  */
 const SALE = client`o.payment_status = 'Paid'`;
@@ -123,14 +123,14 @@ const PAYMENT_DAY = (tz) => client`
 `;
 
 /**
- * Restrict to a set of batches.
+ * Restrict to a set of PFIs.
  *
  * `null` means no restriction. An ARRAY means exactly these — and an EMPTY
  * array means none, which is the case that matters: a user scoped to a depot
- * that holds no batches must get an empty report, not the whole book. Treating
+ * that holds no PFIs must get an empty report, not the whole book. Treating
  * an empty list as "no filter" is the same falsy-versus-absent confusion that
  * null overrides guard against elsewhere in this feature, and here it would
- * hand a scoped user every batch in the company.
+ * hand a scoped user every PFI in the company.
  */
 const pfiFilter = (pfiIds) => {
   if (!Array.isArray(pfiIds)) return client``;
@@ -139,12 +139,12 @@ const pfiFilter = (pfiIds) => {
 };
 
 /**
- * Sales per batch per day, over a window.
+ * Sales per PFI per day, over a window.
  *
  * `upTo` with no `from` gives the opening position — everything that happened
- * strictly before the window, in one row per batch — which is what the
+ * strictly before the window, in one row per PFI — which is what the
  * service seeds its running totals with. Without it, opening a report on the
- * 15th would show a batch three months into its life as though it had sold
+ * 15th would show a PFI three months into its life as though it had sold
  * nothing.
  */
 const salesByDay = async ({ tz, from, to, pfiIds }) => {
@@ -167,14 +167,14 @@ const salesByDay = async ({ tz, from, to, pfiIds }) => {
 };
 
 /**
- * Money received per batch per day, over a window. Same `from`/`to` contract
+ * Money received per PFI per day, over a window. Same `from`/`to` contract
  * as salesByDay.
  *
- * Summed over ALL payment rows, transfer legs included and signed, so a batch
+ * Summed over ALL payment rows, transfer legs included and signed, so a PFI
  * that gave surplus away nets down to what it kept rather than being reported
  * as holding money that has gone. This is `received` in the finance report's
  * language, not `amountPaidIn` — a stock-and-money report is about what the
- * batch has, and the outgoing leg of a transfer is money it does not have.
+ * PFI has, and the outgoing leg of a transfer is money it does not have.
  */
 const inflowByDay = async ({ tz, from, to, pfiIds }) => {
   const day = PAYMENT_DAY(tz);
@@ -197,10 +197,10 @@ const inflowByDay = async ({ tz, from, to, pfiIds }) => {
 };
 
 /**
- * What the 0021 duplicates would have added, per batch, up to a date.
+ * What the 0021 duplicates would have added, per PFI, up to a date.
  *
  * Reported rather than quietly dropped: the CFO report and the audited
- * finance report disagree by exactly this much on exactly these batches, and
+ * finance report disagree by exactly this much on exactly these PFIs, and
  * a document that differs from another without saying so is the thing this
  * figure exists to prevent.
  */
@@ -246,13 +246,13 @@ const partPaidHeld = async ({ tz, to, pfiIds }) => {
 };
 
 /**
- * The first and last day each batch traded.
+ * The first and last day each PFI traded.
  *
- * This is what decides whether a batch belongs on a given day's sheet, and it
+ * This is what decides whether a PFI belongs on a given day's sheet, and it
  * is derived from the orders rather than from pfis.pfi_date or
  * pfis.closure_date. Those two columns look like the answer and are not:
- * pfi_date is set on 20 of 47 batches and 450 orders predate their own
- * batch's date, closure_date is set on 7. A rule built on either would drop
+ * pfi_date is set on 20 of 47 PFIs and 450 orders predate their own
+ * PFI's date, closure_date is set on 7. A rule built on either would drop
  * most of the book. The orders are always there.
  */
 const tradingSpan = async ({ tz, pfiIds }) => {
@@ -266,15 +266,15 @@ const tradingSpan = async ({ tz, pfiIds }) => {
 };
 
 /**
- * The batches themselves, with the depot they trade out of.
+ * The PFIs themselves, with the depot they trade out of.
  *
  * `location_name` is a denormalised copy on the PFI and is empty on some
  * rows, so the depot's own name is joined and preferred — the Location column
  * on this report is the one a regional CFO reads first and a blank there is
- * not acceptable. An LPG batch answers to a station instead of a depot, and
+ * not acceptable. An LPG PFI answers to a station instead of a depot, and
  * that name is joined for the same reason.
  */
-const batches = async ({ pfiIds }) => {
+const listPfis = async ({ pfiIds }) => {
   return client`
     SELECT p.id, p.pfi_number, p.status, p.pfi_type,
            COALESCE(NULLIF(d.name, ''), NULLIF(ls.name, ''), NULLIF(p.location_name, ''), '') AS location_name,
@@ -294,7 +294,7 @@ const batches = async ({ pfiIds }) => {
 };
 
 /**
- * Which batches a scoped user may see.
+ * Which PFIs a scoped user may see.
  *
  * Returns null for "no restriction" — including for a scoped user with no
  * assignments at all, which is the same call scopeFilter.js makes and for the
@@ -318,7 +318,7 @@ const visiblePfiIds = async (user) => {
 
 // ── The overrides ───────────────────────────────────────────────────────────
 
-/** Every saved correction in a window, for the days and batches being shown. */
+/** Every saved correction in a window, for the days and PFIs being shown. */
 const findEntries = async ({ from, to, pfiIds }) => {
   // Same contract as pfiFilter above: null is no restriction, an empty array
   // is none. Callers only reach here with a non-empty list, but the two must
@@ -380,7 +380,7 @@ module.exports = {
   duplicatesExcluded,
   partPaidHeld,
   tradingSpan,
-  batches,
+  listPfis,
   visiblePfiIds,
   findEntries,
   upsertEntry,

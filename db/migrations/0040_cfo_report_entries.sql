@@ -5,14 +5,14 @@
 --
 -- ── What this table is for ─────────────────────────────────────────────────
 --
--- The CFO report states, for each PFI on each day: what the batch started
+-- The CFO report states, for each PFI on each day: what the PFI started
 -- with, what has sold off it, what sold that day, what is left, what that
 -- came to in naira, what reached the bank, and the difference between the
 -- last two. Every one of those is computed from orders and order_payments —
 -- see services/cfoReport.service.js, which is the authority on how.
 --
--- Computed is not always right. A batch's tank figure gets restated after a
--- dip, a cargo lands against the wrong batch and is moved weeks later, money
+-- Computed is not always right. A PFI's tank figure gets restated after a
+-- dip, a cargo lands against the wrong PFI and is moved weeks later, money
 -- arrives by a route nobody has matched to a statement line yet. The desk
 -- knows these things before the database does, and a report that cannot be
 -- corrected is a report that gets re-keyed into a spreadsheet and diverges.
@@ -39,7 +39,7 @@
 -- derived figure follows; where the real tank disagrees with the arithmetic,
 -- restate `initial_qty` or say so in `remarks`.
 --
--- ── Keyed by day and batch ─────────────────────────────────────────────────
+-- ── Keyed by day and PFI ─────────────────────────────────────────────────
 --
 -- One row per (date, PFI) — the cell the report is laid out in. A correction
 -- to 15 September does not touch 16 September, because the two days were
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS cfo_report_entries (
   updated_at    timestamptz  NOT NULL DEFAULT now()
 );
 
--- One entry per batch per day. This is what lets the save path be a plain
+-- One entry per PFI per day. This is what lets the save path be a plain
 -- upsert rather than a read-then-write that two people can race.
 CREATE UNIQUE INDEX IF NOT EXISTS cfo_report_entries_date_pfi_idx
   ON cfo_report_entries (report_date, pfi_id);

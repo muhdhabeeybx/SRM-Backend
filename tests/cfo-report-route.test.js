@@ -82,7 +82,7 @@ describe("CFO report endpoint", () => {
       .send({ reportDate: "2026-01-03", pfiId, bankInflow: 250000, remarks: "Paid by cheque" });
     assert.equal(save.status, 200, JSON.stringify(save.body));
 
-    // includeAll, because the batch may not have been trading on that date —
+    // includeAll, because the PFI may not have been trading on that date —
     // a saved correction must pull its row onto the sheet regardless.
     const read = await request(app)
       .get(URL)
@@ -90,7 +90,7 @@ describe("CFO report endpoint", () => {
       .set("Authorization", `Bearer ${token}`);
     assert.equal(read.status, 200);
     const row = read.body.data.days[0].rows.find((r) => r.pfiId === pfiId);
-    assert.ok(row, "a corrected row is listed even on a day the batch did not trade");
+    assert.ok(row, "a corrected row is listed even on a day the PFI did not trade");
     assert.equal(row.bankInflow, 250000);
     assert.deepEqual(row.edited, ["bankInflow"]);
     assert.equal(row.remarks, "Paid by cheque");

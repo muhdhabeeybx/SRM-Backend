@@ -13,7 +13,7 @@ const { pfis } = require("./pfi");
 const { staff } = require("./staff");
 
 /**
- * A correction on the CFO report — one row per (day, batch).
+ * A correction on the CFO report — one row per (day, PFI).
  *
  * Everything the report shows is computed from orders and order_payments by
  * services/cfoReport.service.js. This table holds only what a person has

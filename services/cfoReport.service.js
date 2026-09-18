@@ -2,18 +2,18 @@ const { cfoReportRepo } = require("../repositories");
 const { REPORT_TZ } = require("./dailyCombinedReport.service");
 
 /**
- * The CFO report: what each batch sold, what it has left, and whether the
+ * The CFO report: what each PFI sold, what it has left, and whether the
  * money agrees — one sheet per day.
  *
  * ── The question it answers ────────────────────────────────────────────────
  *
  * The finance report answers "which bank line paid for which order". The PFI
  * page answers "how is this cargo doing overall". Neither answers the one the
- * CFO asks at the end of a day, across every depot at once: for each batch we
+ * CFO asks at the end of a day, across every depot at once: for each PFI we
  * are trading, what went out today, what is left in the tank, what it has
  * come to in naira, and is that money in the bank.
  *
- * So the unit is the batch-day. Each row is one PFI on one date, each block is
+ * So the unit is the PFI-day. Each row is one PFI on one date, each block is
  * one date, and the blocks run in order down the page.
  *
  * ── Where every column comes from ──────────────────────────────────────────
@@ -24,7 +24,7 @@ const { REPORT_TZ } = require("./dailyCombinedReport.service");
  *                    never agree with a dip. (The BL is what the cargo is
  *                    COSTED on; that is the PFI page's job, not this one's.)
  *
- *   Cumulative       Litres on every confirmed order placed against the batch
+ *   Cumulative       Litres on every confirmed order placed against the PFI
  *   sales volume     on or before this date. "Confirmed" means
  *                    payment_status = 'Paid' — the same rule the PFI page and
  *                    the finance report use, so the three reconcile by
@@ -74,7 +74,7 @@ const num = (v) => (v === null || v === undefined ? 0 : Number(v) || 0);
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 /**
- * "Liters" and "Litres" are the same unit spelled two ways — 7 batches use
+ * "Liters" and "Litres" are the same unit spelled two ways — 7 PFIs use
  * the first, 37 the second. Totalling them separately would print two litre
  * columns that each hold half the answer.
  */
@@ -117,31 +117,31 @@ const daysBetween = (from, to) => {
 const emptyBucket = () => ({ qty: 0, value: 0, orders: 0, inflow: 0, statementInflow: 0 });
 
 /**
- * Should this batch appear on this day's sheet?
+ * Should this PFI appear on this day's sheet?
  *
  * The honest reading of "the active PFIs for that day", built from the orders
  * rather than from pfis.pfi_date or pfis.closure_date — see tradingSpan in the
  * repository for why those two columns cannot carry it.
  *
- *   * A batch that sold ANYTHING on the day is always listed. Whatever else
+ *   * A PFI that sold ANYTHING on the day is always listed. Whatever else
  *     is true of it, it traded.
  *   * Before its first confirmed sale it is not listed. There is nothing to
  *     report and a row of zeroes against a cargo that had not arrived reads
- *     as a batch that failed to sell.
- *   * A batch still open — active, or not yet started — stays listed after
+ *     as a PFI that failed to sell.
+ *   * A PFI still open — active, or not yet started — stays listed after
  *     its last sale. Stock sitting in a tank with nothing moving is precisely
  *     what a CFO wants to see.
- *   * A finished batch drops off after its last trading day, or after its
+ *   * A finished PFI drops off after its last trading day, or after its
  *     closure date where one is recorded and is later.
  */
-const isListed = ({ day, batch, span, dayQty, includeAll }) => {
+const isListed = ({ day, pfi, span, dayQty, includeAll }) => {
   const first = span?.firstDay;
   if (!first) return false;
   if (day < first) return false;
   if (includeAll) return true;
   if (dayQty !== 0) return true;
-  if (batch.status === "active" || batch.status === "not_started") return true;
-  const closes = batch.closureDay && batch.closureDay > span.lastDay ? batch.closureDay : span.lastDay;
+  if (pfi.status === "active" || pfi.status === "not_started") return true;
+  const closes = pfi.closureDay && pfi.closureDay > span.lastDay ? pfi.closureDay : span.lastDay;
   return day <= closes;
 };
 
@@ -149,7 +149,7 @@ const isListed = ({ day, batch, span, dayQty, includeAll }) => {
  * Fold a row into a totals accumulator.
  *
  * Money totals are plain sums — naira is naira. Quantities are kept per unit,
- * because the book holds litres and kilogrammes side by side (3 LPG batches
+ * because the book holds litres and kilogrammes side by side (3 LPG PFIs
  * against 44 fuel ones) and adding 160,000 kg to 26,992,931 L produces a
  * number that is not a quantity of anything.
  */
@@ -187,9 +187,9 @@ const emptyTotals = () => ({
  * reportActuals.service shows its numbers beside what is typed rather than
  * over it.
  */
-const buildRow = ({ batch, day, running, dayBucket, entry, editorName }) => {
+const buildRow = ({ pfi, day, running, dayBucket, entry, editorName }) => {
   const computed = {
-    initialQty: round2(batch.startingQty),
+    initialQty: round2(pfi.startingQty),
     cumulativeVolume: round2(running.qty),
     dayVolume: round2(dayBucket.qty),
     salesValue: round2(running.value),
@@ -213,13 +213,13 @@ const buildRow = ({ batch, day, running, dayBucket, entry, editorName }) => {
     .filter((f) => entry && entry[f] != null);
 
   return {
-    pfiId: batch.id,
-    pfiNumber: batch.pfiNumber,
-    locationName: batch.locationName,
-    productName: batch.productName,
-    productUnit: batch.productUnit,
-    status: batch.status,
-    pfiType: batch.pfiType,
+    pfiId: pfi.id,
+    pfiNumber: pfi.pfiNumber,
+    locationName: pfi.locationName,
+    productName: pfi.productName,
+    productUnit: pfi.productUnit,
+    status: pfi.status,
+    pfiType: pfi.pfiType,
     date: day,
 
     initialQty,
@@ -248,10 +248,10 @@ const buildRow = ({ batch, day, running, dayBucket, entry, editorName }) => {
  * The whole report.
  *
  * Four grouped queries plus the overrides, not one query per day: a month of
- * twelve batches is 360 rows, and issuing a query each would be 360 round
+ * twelve PFIs is 360 rows, and issuing a query each would be 360 round
  * trips for figures that are a running total of the same two aggregates.
  * Opening balances come back as their own rows (`day` null) so a report
- * starting mid-life shows the batch where it actually stands.
+ * starting mid-life shows the PFI where it actually stands.
  */
 const build = async ({
   dateFrom,
@@ -266,7 +266,7 @@ const build = async ({
   const to = String(dateTo).slice(0, 10);
   const days = daysBetween(from, to);
 
-  // Scope first: everything downstream is filtered by batch id, so a scoped
+  // Scope first: everything downstream is filtered by PFI id, so a scoped
   // user's report is narrowed in SQL rather than trimmed afterwards.
   const scoped = await cfoReportRepo.visiblePfiIds(scopeUser);
   let pfiIds = scoped;
@@ -275,7 +275,7 @@ const build = async ({
     pfiIds = scoped && !scoped.includes(only) ? [] : [only];
   }
 
-  const allBatches = (await cfoReportRepo.batches({ pfiIds })).map((b) => ({
+  const allPfis = (await cfoReportRepo.listPfis({ pfiIds })).map((b) => ({
     id: Number(b.id),
     pfiNumber: b.pfi_number,
     status: b.status,
@@ -290,14 +290,14 @@ const build = async ({
     closureDay: dayKey(b.closure_date),
   }));
 
-  // The depot filter is applied here rather than in SQL because a batch
-  // belongs to a depot OR an LPG station, and "the location this batch trades
+  // The depot filter is applied here rather than in SQL because a PFI
+  // belongs to a depot OR an LPG station, and "the location this PFI trades
   // out of" is already resolved above. Filtering twice, in two languages,
   // is how the list and its totals come to disagree.
-  const batches = depotId
-    ? allBatches.filter((b) => b.locationId === Number(depotId))
-    : allBatches;
-  const ids = batches.map((b) => b.id);
+  const pfis = depotId
+    ? allPfis.filter((b) => b.locationId === Number(depotId))
+    : allPfis;
+  const ids = pfis.map((b) => b.id);
   if (!ids.length) {
     return {
       days: days.map((date) => ({ date, rows: [], totals: emptyTotals() })),
@@ -308,7 +308,7 @@ const build = async ({
 
   const [opening, inWindow, openInflow, inflowWindow, spans, entries, dupRows, partPaidRows] =
     await Promise.all([
-      // Everything before the window, one row per batch — the opening position.
+      // Everything before the window, one row per PFI — the opening position.
       cfoReportRepo.salesByDay({ tz, from: null, to: previousDay(from), pfiIds: ids }),
       cfoReportRepo.salesByDay({ tz, from, to, pfiIds: ids }),
       cfoReportRepo.inflowByDay({ tz, from: null, to: previousDay(from), pfiIds: ids }),
@@ -319,7 +319,7 @@ const build = async ({
       cfoReportRepo.partPaidHeld({ tz, to, pfiIds: ids }),
     ]);
 
-  // ── index everything by batch, then by day ──
+  // ── index everything by PFI, then by day ──
   const openingBy = new Map();
   for (const r of opening) {
     openingBy.set(Number(r.pfi_id), {
@@ -360,7 +360,7 @@ const build = async ({
 
   // ── walk the days forward, carrying the running totals ──
   const running = new Map(
-    batches.map((b) => [b.id, { ...emptyBucket(), ...(openingBy.get(b.id) || {}) }])
+    pfis.map((b) => [b.id, { ...emptyBucket(), ...(openingBy.get(b.id) || {}) }])
   );
 
   const grand = emptyTotals();
@@ -370,11 +370,11 @@ const build = async ({
     const totals = emptyTotals();
     const rows = [];
 
-    for (const batch of batches) {
-      const bucket = byDay.get(`${batch.id}|${day}`) || emptyBucket();
-      const run = running.get(batch.id);
+    for (const pfi of pfis) {
+      const bucket = byDay.get(`${pfi.id}|${day}`) || emptyBucket();
+      const run = running.get(pfi.id);
 
-      // Accumulate BEFORE deciding whether to list: a batch hidden on a day
+      // Accumulate BEFORE deciding whether to list: a PFI hidden on a day
       // it did not trade must still carry that day's money forward, or the
       // next row it appears on is short.
       run.qty = round2(run.qty + bucket.qty);
@@ -383,14 +383,14 @@ const build = async ({
       run.inflow = round2(run.inflow + bucket.inflow);
       run.statementInflow = round2(run.statementInflow + bucket.statementInflow);
 
-      const entry = entryBy.get(`${batch.id}|${day}`);
+      const entry = entryBy.get(`${pfi.id}|${day}`);
       const listed =
         !!entry ||
-        isListed({ day, batch, span: spanBy.get(batch.id), dayQty: bucket.qty, includeAll });
+        isListed({ day, pfi, span: spanBy.get(pfi.id), dayQty: bucket.qty, includeAll });
       if (!listed) continue;
 
       const row = buildRow({
-        batch, day, running: run, dayBucket: bucket, entry,
+        pfi, day, running: run, dayBucket: bucket, entry,
         editorName: entry?.updatedBy ? editors.get(Number(entry.updatedBy)) : null,
       });
       rows.push(row);
@@ -426,7 +426,7 @@ const build = async ({
     totals: grand,
     meta: {
       ...emptyMeta({ from, to, tz }),
-      batches: batches.map((b) => ({
+      pfis: pfis.map((b) => ({
         id: b.id, pfiNumber: b.pfiNumber, locationName: b.locationName, status: b.status,
       })),
       duplicatesExcluded: round2(dupRows.reduce((s, r) => s + num(r.amount), 0)),
@@ -448,7 +448,7 @@ const emptyMeta = ({ from, to, tz }) => ({
   dateFrom: from,
   dateTo: to,
   timezone: tz,
-  batches: [],
+  pfis: [],
   /** See DUPLICATE_LEGACY_IDS — money this report drops and the audited one keeps. */
   duplicatesExcluded: 0,
   duplicateRows: 0,
