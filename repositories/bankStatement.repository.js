@@ -442,12 +442,14 @@ const bankStatementRepo = {
              d.reference AS deposit_reference,
              o.id AS order_id, o.company_name AS order_company,
              c.name AS customer_name,
+             ds.id AS delivery_sale_id, ds.truck_number, ds.customer_name AS truck_customer,
              s.first_name AS matched_by_first_name, s.surname AS matched_by_surname
         FROM bank_statement_lines l
         JOIN bank_statements st ON st.id = l.statement_id
         LEFT JOIN staff up ON up.id = st.uploaded_by
         LEFT JOIN deposits d ON d.id = l.matched_deposit_id
         LEFT JOIN orders o ON o.id = l.matched_order_id
+        LEFT JOIN delivery_sales ds ON ds.id = l.matched_delivery_sale_id
         LEFT JOIN customers c ON c.id = d.customer_id
         LEFT JOIN staff s ON s.id = l.matched_by
        WHERE l.bank_account_id = ${bankAccountId}
@@ -553,10 +555,12 @@ const bankStatementRepo = {
              d.reference AS deposit_reference,
              o.id AS order_id, o.company_name AS order_company,
              c.name AS customer_name,
+             ds.id AS delivery_sale_id, ds.truck_number, ds.customer_name AS truck_customer,
              s.first_name AS matched_by_first_name, s.surname AS matched_by_surname
         FROM bank_statement_lines l
         LEFT JOIN deposits d ON d.id = l.matched_deposit_id
         LEFT JOIN orders o ON o.id = l.matched_order_id
+        LEFT JOIN delivery_sales ds ON ds.id = l.matched_delivery_sale_id
         LEFT JOIN customers c ON c.id = d.customer_id
         LEFT JOIN staff s ON s.id = l.matched_by
        WHERE l.statement_id = ${statementId}

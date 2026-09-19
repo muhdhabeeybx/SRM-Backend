@@ -1,6 +1,6 @@
-const { eq, and, or, ilike, desc, count, sql } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, count, sql, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { deliverySales, deliveryCustomers } = require("../db/schema");
+const { deliverySales, deliveryCustomers, bankStatementLines } = require("../db/schema");
 
 const findById = async (id) => {
   const [row] = await db
@@ -138,6 +138,96 @@ const findAll = async ({
 const create = async (data) => {
   const [row] = await db.insert(deliverySales).values(data).returning();
   return row;
+};
+
+const httpError = (status, message) => Object.assign(new Error(message), { status });
+
+/**
+ * Record truck-sale payments from the bank statement lines that paid them.
+ *
+ * The same shape as an order's confirmation (orderPayment.service
+ * recordFromStatementLines) and for the same reasons, because it is the same
+ * act: the desk names bank rows, not an amount.
+ *
+ * ── One row per line, not one row for the total ───────────────────────────
+ *
+ * A customer who paid in three tranches produces three payments, each keeping
+ * its own amount, payer, date and reference. Folding them into one summed row
+ * would make the ledger disagree with the statement it came from, and the
+ * whole point of matching is that the two can be laid side by side.
+ *
+ * ── The claim is the guard ────────────────────────────────────────────────
+ *
+ * Lines are claimed with `status = 'UNMATCHED'` in the WHERE, so two desks
+ * confirming the same credit cannot both win — the loser updates zero rows and
+ * the count check below throws. Throwing rather than returning a failure is
+ * deliberate: a plain return would still commit, leaving whichever lines DID
+ * get claimed stuck in MATCHED with no payment behind them.
+ */
+const createFromStatementLines = async ({ lineIds, bankAccountId, staffId = null, base }) => {
+  const ids = (lineIds || []).map(Number).filter(Number.isInteger);
+  if (!ids.length) throw httpError(400, "No statement lines were selected");
+  if (!bankAccountId) {
+    throw httpError(400, "A bank account is required to claim statement lines");
+  }
+
+  return db.transaction(async (tx) => {
+    const claimed = await tx
+      .update(bankStatementLines)
+      .set({
+        status: "MATCHED",
+        matchedBy: staffId,
+        matchedAt: new Date(),
+      })
+      .where(
+        and(
+          inArray(bankStatementLines.id, ids),
+          eq(bankStatementLines.bankAccountId, Number(bankAccountId)),
+          eq(bankStatementLines.status, "UNMATCHED"),
+        ),
+      )
+      .returning();
+
+    if (claimed.length !== ids.length) {
+      throw httpError(
+        409,
+        "One or more of those credits were already matched — refresh and try again.",
+      );
+    }
+
+    const sales = [];
+    for (const line of claimed) {
+      const [sale] = await tx
+        .insert(deliverySales)
+        .values({
+          ...base,
+          statementLineId: line.id,
+          bankAccountId: Number(bankAccountId),
+          // The statement, verbatim. What the desk used to type is now copied
+          // from the bank's own row, which is the entire point.
+          paymentAmount: String(line.amount),
+          payerName: line.depositor || base.payerName || "",
+          bankRef: line.bankRef || "",
+          // txn_date is a plain calendar day (migration 0039) and
+          // date_of_payment is a varchar day, so this is a straight copy with
+          // no instant in between to shift it.
+          dateOfPayment: String(line.txnDate).slice(0, 10),
+          paymentMethod: "manual",
+        })
+        .returning();
+
+      // The other direction, so the statement screen can say what claimed
+      // this credit instead of showing it matched to nothing.
+      await tx
+        .update(bankStatementLines)
+        .set({ matchedDeliverySaleId: sale.id })
+        .where(eq(bankStatementLines.id, line.id));
+
+      sales.push(sale);
+    }
+
+    return sales;
+  });
 };
 
 const update = async (id, data) => {
@@ -294,6 +384,7 @@ module.exports = {
   findPendingByCustomer,
   findAll,
   create,
+  createFromStatementLines,
   update,
   deleteById,
   cycleStanding,

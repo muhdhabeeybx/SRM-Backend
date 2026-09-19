@@ -66,7 +66,19 @@ const setDepositStatus = z.object({
   depositStatus: enumOf("Deposit status", ["pending", "paid", "partial"]),
 });
 
-const createDeliverySale = z.object({ ...base, truckNumber: requiredString("Truck number", 100) });
+/**
+ * `lineIds` turns this into a bank-matched payment.
+ *
+ * When present, the amount, payer, date and reference are taken from the
+ * statement lines rather than from the request — see the controller — so a
+ * body carrying both is not a conflict, it is a body whose typed figures are
+ * simply not consulted. Capped at 50 because that is a payment, not an import.
+ */
+const createDeliverySale = z.object({
+  ...base,
+  truckNumber: requiredString("Truck number", 100),
+  lineIds: z.array(id("Statement line")).max(50, "Too many credits in one payment").optional(),
+});
 const updateDeliverySale = z.object(base).partial();
 
 const listDeliverySales = pagination.extend({

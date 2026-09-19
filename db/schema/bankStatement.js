@@ -113,6 +113,14 @@ const bankStatementLines = pgTable(
     dedupKey: varchar("dedup_key", { length: 32 }).notNull(),
     status: statementLineStatus("status").default("UNMATCHED").notNull(),
     matchedOrderId: integer("matched_order_id"),
+    /**
+     * The truck sale payment that claimed this credit, where an order did not.
+     *
+     * Exactly one of these two is set on a matched line. Without this column a
+     * line claimed by a truck sale would read as MATCHED with nothing against
+     * it — indistinguishable, from the statement screen, from a bug.
+     */
+    matchedDeliverySaleId: integer("matched_delivery_sale_id"),
     matchedDepositId: integer("matched_deposit_id"),
     matchedBy: integer("matched_by"),
     matchedAt: timestamp("matched_at", { withTimezone: true }),

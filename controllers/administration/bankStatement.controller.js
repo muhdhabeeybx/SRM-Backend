@@ -27,6 +27,20 @@ const decorateLine = (l) => ({
   matched_by_name: l.matched_by_first_name
     ? `${l.matched_by_first_name} ${l.matched_by_surname || ""}`.trim()
     : null,
+  /**
+   * What claimed this credit, when it was not an order.
+   *
+   * A truck sale spends a statement line the same way an order does, and
+   * without this a line it had claimed would read as MATCHED against nothing
+   * — which on a reconciliation screen is indistinguishable from a fault.
+   */
+  claimed_by: l.delivery_sale_id
+    ? {
+        kind: "truck_sale",
+        id: l.delivery_sale_id,
+        label: [l.truck_number, l.truck_customer].filter(Boolean).join(" · "),
+      }
+    : null,
 });
 
 /** GET /api/bank-statements/mapping/:bankAccountId */

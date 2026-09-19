@@ -48,6 +48,18 @@ const deliverySales = pgTable(
     transferGroupId: varchar("transfer_group_id", { length: 64 }),
     /** The other truck and customer, as a label — "BWR810XB · Musa Damaturu". */
     transferCounterparty: varchar("transfer_counterparty", { length: 255 }),
+    /**
+     * The bank statement line this payment was claimed from.
+     *
+     * An order's payment has named its credit since the statement feature
+     * existed; a truck sale's did not, and the amount, payer and date were
+     * typed by hand off a phone screen. NULL on every row written before
+     * migration 0044, and on a transfer between trucks — that moves money
+     * already on the ledger rather than bringing new money in.
+     */
+    statementLineId: integer("statement_line_id"),
+    /** The bank's own reference, copied off the line. "" on older rows. */
+    bankRef: varchar("bank_ref", { length: 255 }).default("").notNull(),
     dateOfPayment: varchar("date_of_payment", { length: 20 }),
     depositStatus: depositStatusEnum("deposit_status").default("pending").notNull(),
     phoneNumber: varchar("phone_number", { length: 30 }).default(""),

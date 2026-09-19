@@ -52,7 +52,36 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   //   }
   // }
 
-  const sale = await deliverySaleRepo.create(req.body);
+  /**
+   * Two ways in, and only one of them is new.
+   *
+   * With lineIds the payment is claimed off the bank statement: the amount,
+   * payer, date and reference come from the bank's own row and the credit is
+   * marked spent so nothing else can claim it. Without them this is the path
+   * every row before migration 0044 took — a customer assignment with no
+   * payment yet, a transfer between trucks, an expense — and it is left
+   * exactly as it was.
+   */
+  const { lineIds, bankAccountId, ...base } = req.body;
+
+  if (Array.isArray(lineIds) && lineIds.length) {
+    const sales = await deliverySaleRepo.createFromStatementLines({
+      lineIds,
+      bankAccountId,
+      staffId: req.user?.id ?? null,
+      base,
+    });
+    const total = sales.reduce((sum, s) => sum + Number(s.paymentAmount || 0), 0);
+    return res.status(201).json({
+      success: true,
+      message: `${sales.length} payment${sales.length === 1 ? "" : "s"} matched — ₦${total.toLocaleString()}`,
+      data: { sale: sales[0], sales },
+    });
+  }
+
+  const sale = await deliverySaleRepo.create(
+    bankAccountId ? { ...base, bankAccountId } : base,
+  );
   res.status(201).json({
     success: true,
     message: "Delivery sale record created",
