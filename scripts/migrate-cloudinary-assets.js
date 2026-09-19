@@ -58,6 +58,7 @@
  *   node scripts/migrate-cloudinary-assets.js --limit=3 --apply   # trial run
  *   node scripts/migrate-cloudinary-assets.js --apply             # all of it
  *   node scripts/migrate-cloudinary-assets.js --apply --signed-source
+ *   node scripts/migrate-cloudinary-assets.js --apply --skip-unreadable
  *
  * Writes nothing without --apply. With it, every repointed row is recorded in
  * scripts/rollback-cloudinary-migration-<stamp>.json holding the previous URL,
@@ -74,6 +75,7 @@ const { v2: cloudinary } = require("cloudinary");
 
 const APPLY = process.argv.includes("--apply");
 const SIGNED_SOURCE = process.argv.includes("--signed-source");
+const SKIP_UNREADABLE = process.argv.includes("--skip-unreadable");
 const arg = (name) => {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : null;
@@ -205,7 +207,7 @@ async function main() {
       const res = await probe(sourceUrlFor(r));
       if (!ok(res.status)) unreadable.push({ url: r.url, ...res });
     }
-    if (unreadable.length) {
+    if (unreadable.length && !SKIP_UNREADABLE) {
       console.error("\nThe source will not serve these, so they cannot be copied:\n");
       for (const u of unreadable) console.error(`  ${u.status} ${u.cldError}  ${u.url}`);
       const pdfBlocked = unreadable.some((u) => /\.pdf$/i.test(u.url));
@@ -215,7 +217,35 @@ async function main() {
           : `source assets are not deliverable from ${SRC.cloud_name}`
       );
     }
-    console.log("  source readable ✓\n");
+
+    /**
+     * Rescue what CAN be read, and leave the rest where it is.
+     *
+     * The abort above is right when the source is administrable: something is
+     * misconfigured, fix it and run again. It is wrong when the source is an
+     * account nobody can log into any more — then a partial rescue is the
+     * whole point, and refusing it risks the readable 60 alongside the
+     * unreadable 37 if that account ever lapses.
+     *
+     * Each asset is checked on its own rather than trusting the sample, so
+     * nothing unreadable is silently repointed, and every skipped row keeps
+     * pointing at the source exactly as before.
+     */
+    if (unreadable.length && SKIP_UNREADABLE) {
+      console.log(`  ${unreadable.length} of the sample unreadable — checking each asset individually\n`);
+      const readable = [];
+      const skipped = [];
+      for (const r of todo) {
+        const res = await probe(sourceUrlFor(r));
+        (ok(res.status) ? readable : skipped).push(ok(res.status) ? r : { ...r, ...res });
+      }
+      console.log(`  readable and will move : ${readable.length}`);
+      console.log(`  unreadable, left alone : ${skipped.length}\n`);
+      todo = readable;
+      if (!todo.length) throw new Error("nothing on the source is readable — there is nothing to rescue");
+    } else {
+      console.log("  source readable ✓\n");
+    }
 
     if (!APPLY) {
       console.log("Report only — nothing written. Re-run with --apply.");
