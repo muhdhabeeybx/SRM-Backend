@@ -173,6 +173,44 @@ describe("depot price approval — set, then a second person releases", () => {
     assert.ok(rows.some((r) => r.status === "superseded" && Number(r.proposedPrice) === 950));
   });
 
+  /**
+   * The pricing page saves through PATCH /depots/:id, not through
+   * /:id/product-price — so a gate on only the latter would guard a door with
+   * no wall beside it. This is the path the screen actually uses.
+   */
+  test("editing a depot proposes prices too, rather than going round the gate", async () => {
+    const before = await db
+      .select()
+      .from(depotProductPrices)
+      .where(eq(depotProductPrices.depotId, depot.id));
+    const livePrice = Number(before[0].currentPrice);
+
+    const res = await request(app)
+      .patch(`${API}/${depot.id}`)
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .send({ productPrices: [{ product: product.id, currentPrice: 1234 }] });
+    assert.equal(res.status, 200);
+
+    const [after] = await db
+      .select()
+      .from(depotProductPrices)
+      .where(eq(depotProductPrices.depotId, depot.id));
+    assert.equal(
+      Number(after.currentPrice),
+      livePrice,
+      "editing the depot must not move the live price either",
+    );
+
+    const proposed = await db
+      .select()
+      .from(depotPriceChanges)
+      .where(eq(depotPriceChanges.status, "pending"));
+    assert.ok(
+      proposed.some((c) => Number(c.proposedPrice) === 1234),
+      "it became a proposal, like every other price change",
+    );
+  });
+
   test("the trail names both ends of every change", async () => {
     const res = await request(app)
       .get(`${API}/price-changes?depotId=${depot.id}`)
