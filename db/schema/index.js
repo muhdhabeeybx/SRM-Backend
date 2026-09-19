@@ -18,6 +18,7 @@ const lpgPriceHistorySchema = require("./lpgPriceHistory");
 const depotProductCapacitiesSchema = require("./depotProductCapacities");
 const depotProductPricesSchema = require("./depotProductPrices");
 const depotPriceHistorySchema = require("./depotPriceHistory");
+const depotPriceChangeSchema = require("./depotPriceChange");
 const driverTruckHistorySchema = require("./driverTruckHistory");
 const pfiSchema = require("./pfi");
 // After ./pfi and ./staff — pfiStaff destructures both at load time.
@@ -98,6 +99,7 @@ module.exports = {
   ...depotProductCapacitiesSchema,
   ...depotProductPricesSchema,
   ...depotPriceHistorySchema,
+  ...depotPriceChangeSchema,
   ...driverTruckHistorySchema,
   ...pfiSchema,
   ...pfiStaffSchema,

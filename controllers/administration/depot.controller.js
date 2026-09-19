@@ -187,11 +187,27 @@ const updateDepot = asyncHandler(async (req, res) => {
     await depotRepo.setProductCapacities(depot.id, req.body.productCapacities);
   }
 
-  // Update product prices if provided
+  /**
+   * Editing a depot was a way round the approval.
+   *
+   * This endpoint accepts productPrices and used to write them straight to
+   * current_price, so anybody who could edit a depot could reprice it without
+   * a second person — which would have left the gate on the pricing page
+   * guarding a door with no wall beside it. They are proposals here too.
+   *
+   * Depot CREATE below is deliberately left alone: a depot that does not exist
+   * yet is selling nothing, and its opening prices are not a change to
+   * anything.
+   */
   if (req.body.productPrices !== undefined) {
-    for (const pp of req.body.productPrices) {
-      await depotRepo.upsertProductPrice(depot.id, pp.product, pp.currentPrice);
-    }
+    await depotRepo.proposePriceChanges({
+      depotId: depot.id,
+      items: req.body.productPrices.map((pp) => ({
+        productId: pp.product,
+        price: Number(pp.currentPrice),
+      })),
+      staffId: req.user?.id ?? null,
+    });
   }
 
   const [capacities, prices, staff] = await Promise.all([
@@ -255,9 +271,21 @@ const updateProductPrice = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "Depot not found" });
   }
 
-  await depotRepo.upsertProductPrice(depot.id, productId, numericPrice);
+  /**
+   * Asked for, not applied.
+   *
+   * current_price is what an order is priced from — order.service.js reads it
+   * as the server price and refuses the client's — so this used to put a new
+   * price in front of every customer the moment somebody typed it. It now
+   * waits for a second person. See migration 0047.
+   */
+  const { proposed, unchanged } = await depotRepo.proposePriceChanges({
+    depotId: depot.id,
+    items: [{ productId, price: numericPrice }],
+    staffId: req.user?.id ?? null,
+  });
 
-  const [capacities, prices, staff] = await Promise.all([
+  const [capacities, prices, staffList] = await Promise.all([
     depotRepo.getProductCapacities(depot.id),
     depotRepo.getProductPrices(depot.id),
     depotRepo.getStaff(depot.id),
@@ -265,9 +293,72 @@ const updateProductPrice = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    message: "Product price updated successfully",
-    data: { depot: { ...depot, productCapacities: capacities, productPrices: prices, staff } },
+    message: proposed.length
+      ? "Price change sent for approval — it goes live once approved"
+      : "That is already the price in force",
+    data: {
+      change: proposed[0] || null,
+      unchanged: unchanged.length,
+      depot: { ...depot, productCapacities: capacities, productPrices: prices, staff: staffList },
+    },
   });
+});
+
+/** What is waiting, and what has happened. Both read the same table. */
+const listPriceChanges = asyncHandler(async (req, res) => {
+  const changes = await depotRepo.listPriceChanges({
+    depotId: req.query.depotId ? Number(req.query.depotId) : null,
+    status: req.query.status || null,
+    limit: req.query.limit ? Number(req.query.limit) : 200,
+  });
+  res.json({ success: true, data: { changes } });
+});
+
+/**
+ * Approve a waiting price, which is what puts it in front of customers.
+ *
+ * Self-approval is allowed and recorded rather than refused: the trail names
+ * both ends, so somebody approving their own is visible afterwards. That was
+ * the desk's call — blocking it would strand a price whenever one person is
+ * on duty.
+ */
+const approvePriceChange = asyncHandler(async (req, res) => {
+  const result = await depotRepo.approvePriceChange({
+    changeId: Number(req.params.changeId),
+    staffId: req.user?.id ?? null,
+    note: req.body?.note || "",
+  });
+
+  if (!result.ok) {
+    return res.status(result.reason === "not_found" ? 404 : 409).json({
+      success: false,
+      message:
+        result.reason === "not_found"
+          ? "That price change no longer exists"
+          : `That price change was already ${result.reason}`,
+    });
+  }
+
+  res.json({
+    success: true,
+    message: `Price is live — ${result.price.currentPrice} per unit`,
+    data: { change: result.change, price: result.price },
+  });
+});
+
+/** Refuse a waiting price. The live one is not touched, by definition. */
+const rejectPriceChange = asyncHandler(async (req, res) => {
+  const row = await depotRepo.rejectPriceChange({
+    changeId: Number(req.params.changeId),
+    staffId: req.user?.id ?? null,
+    note: req.body?.note || "",
+  });
+  if (!row) {
+    return res
+      .status(409)
+      .json({ success: false, message: "That price change is no longer pending" });
+  }
+  res.json({ success: true, message: "Price change rejected", data: { change: row } });
 });
 
 /**
@@ -310,4 +401,15 @@ const zeroAllProductPrices = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getDepots, getDepotById, createDepot, updateDepot, deleteDepot, updateProductPrice, zeroAllProductPrices };
+module.exports = {
+  getDepots,
+  getDepotById,
+  createDepot,
+  updateDepot,
+  deleteDepot,
+  updateProductPrice,
+  listPriceChanges,
+  approvePriceChange,
+  rejectPriceChange,
+  zeroAllProductPrices,
+};

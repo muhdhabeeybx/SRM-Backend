@@ -1,4 +1,4 @@
-const { eq, and, or, ilike, desc, asc, count, inArray } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, asc, count, inArray, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const {
   depots,
@@ -6,10 +6,14 @@ const {
   depotProductCapacities,
   depotProductPrices,
   depotPriceHistory,
+  depotPriceChanges,
   products,
   staff,
 } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
+
+/** postgres-js hands back an array; node-postgres wraps it in `.rows`. */
+const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
 
 const findById = async (id, tx = db) => {
   const [row] = await tx.select().from(depots).where(eq(depots.id, id)).limit(1);
@@ -274,6 +278,191 @@ const getProductPrice = async (depotId, productId, tx = db) => {
   return row || null;
 };
 
+/**
+ * Ask for a price. Nothing goes live here.
+ *
+ * current_price is what an order is priced from, so it is not touched: the
+ * depot goes on selling at the price it has while the new one waits. Only
+ * approvePriceChange moves it.
+ *
+ * A price identical to the one in force is not a change and is dropped — a
+ * bulk save of eight products where one moved should not put seven rows in
+ * front of somebody to approve.
+ *
+ * A second proposal for the same product supersedes the pending one rather
+ * than queueing behind it. Two pending prices for one product is a question
+ * nobody can answer, and the later one is what is meant. Done inside the
+ * transaction so the partial unique index can never see both.
+ */
+const proposePriceChanges = async ({ depotId, items, staffId }) => {
+  return db.transaction(async (tx) => {
+    const proposed = [];
+    const unchanged = [];
+
+    for (const { productId, price } of items) {
+      const [existing] = await tx
+        .select()
+        .from(depotProductPrices)
+        .where(
+          and(
+            eq(depotProductPrices.depotId, Number(depotId)),
+            eq(depotProductPrices.productId, Number(productId)),
+          ),
+        )
+        .limit(1);
+
+      const previous = existing ? String(existing.currentPrice) : null;
+      if (previous != null && Number(previous) === Number(price)) {
+        unchanged.push(Number(productId));
+        continue;
+      }
+
+      await tx
+        .update(depotPriceChanges)
+        .set({ status: "superseded", reviewedAt: new Date() })
+        .where(
+          and(
+            eq(depotPriceChanges.depotId, Number(depotId)),
+            eq(depotPriceChanges.productId, Number(productId)),
+            eq(depotPriceChanges.status, "pending"),
+          ),
+        );
+
+      const [row] = await tx
+        .insert(depotPriceChanges)
+        .values({
+          depotId: Number(depotId),
+          productId: Number(productId),
+          previousPrice: previous,
+          proposedPrice: String(price),
+          requestedBy: staffId ?? null,
+        })
+        .returning();
+      proposed.push(row);
+    }
+
+    return { proposed, unchanged };
+  });
+};
+
+/**
+ * Approve a waiting price, and only then move the live one.
+ *
+ * Everything in one transaction: a change marked approved whose price never
+ * landed is worse than one that was never approved, because the register says
+ * the depot is selling at a price it is not.
+ *
+ * depot_price_history is still written, so anything already reading that trail
+ * is unaffected, and it carries the change id rather than a second copy of the
+ * names — one of the two copies would go stale.
+ */
+const approvePriceChange = async ({ changeId, staffId, note = "" }) => {
+  return db.transaction(async (tx) => {
+    const [change] = await tx
+      .select()
+      .from(depotPriceChanges)
+      .where(eq(depotPriceChanges.id, Number(changeId)))
+      .limit(1);
+
+    if (!change) return { ok: false, reason: "not_found" };
+    if (change.status !== "pending") return { ok: false, reason: change.status };
+
+    const [existing] = await tx
+      .select()
+      .from(depotProductPrices)
+      .where(
+        and(
+          eq(depotProductPrices.depotId, change.depotId),
+          eq(depotProductPrices.productId, change.productId),
+        ),
+      )
+      .limit(1);
+
+    let priceRow;
+    if (existing) {
+      [priceRow] = await tx
+        .update(depotProductPrices)
+        .set({ currentPrice: change.proposedPrice, updatedAt: new Date() })
+        .where(eq(depotProductPrices.id, existing.id))
+        .returning();
+    } else {
+      [priceRow] = await tx
+        .insert(depotProductPrices)
+        .values({
+          depotId: change.depotId,
+          productId: change.productId,
+          currentPrice: change.proposedPrice,
+        })
+        .returning();
+    }
+
+    await tx.insert(depotPriceHistory).values({
+      depotProductPriceId: priceRow.id,
+      price: change.proposedPrice,
+      changeId: change.id,
+    });
+
+    const [updated] = await tx
+      .update(depotPriceChanges)
+      .set({
+        status: "approved",
+        reviewedBy: staffId ?? null,
+        reviewedAt: new Date(),
+        reviewNote: note,
+      })
+      .where(eq(depotPriceChanges.id, change.id))
+      .returning();
+
+    return { ok: true, change: updated, price: priceRow };
+  });
+};
+
+/** Refuse a waiting price. current_price is not touched, by definition. */
+const rejectPriceChange = async ({ changeId, staffId, note = "" }) => {
+  const [row] = await db
+    .update(depotPriceChanges)
+    .set({
+      status: "rejected",
+      reviewedBy: staffId ?? null,
+      reviewedAt: new Date(),
+      reviewNote: note,
+    })
+    .where(
+      and(eq(depotPriceChanges.id, Number(changeId)), eq(depotPriceChanges.status, "pending")),
+    )
+    .returning();
+  return row || null;
+};
+
+/**
+ * The trail: every change, with the names on both ends.
+ *
+ * Both people are resolved here rather than by the caller, because "changed by
+ * whom, approved by whom" is the whole question this table exists to answer
+ * and a screen that had to fetch staff separately would show ids while it
+ * waited.
+ */
+const listPriceChanges = async ({ depotId = null, status = null, limit = 200 } = {}) => {
+  return rowsOf(await db.execute(sql`
+    SELECT c.id, c.depot_id AS "depotId", c.product_id AS "productId",
+           c.previous_price AS "previousPrice", c.proposed_price AS "proposedPrice",
+           c.status, c.requested_at AS "requestedAt", c.reviewed_at AS "reviewedAt",
+           c.review_note AS "reviewNote",
+           d.name AS "depotName", p.name AS "productName", p.unit AS "productUnit",
+           NULLIF(TRIM(CONCAT_WS(' ', rq.first_name, rq.surname)), '') AS "requestedByName",
+           NULLIF(TRIM(CONCAT_WS(' ', rv.first_name, rv.surname)), '') AS "reviewedByName"
+      FROM depot_price_changes c
+      JOIN depots d   ON d.id = c.depot_id
+      JOIN products p ON p.id = c.product_id
+      LEFT JOIN staff rq ON rq.id = c.requested_by
+      LEFT JOIN staff rv ON rv.id = c.reviewed_by
+     WHERE (${depotId}::int IS NULL OR c.depot_id = ${depotId}::int)
+       AND (${status}::text IS NULL OR c.status = ${status}::text)
+     ORDER BY c.requested_at DESC, c.id DESC
+     LIMIT ${Math.min(Number(limit) || 200, 1000)}
+  `));
+};
+
 const upsertProductPrice = async (depotId, productId, price) => {
   const [existing] = await db
     .select()
@@ -404,6 +593,10 @@ module.exports = {
   getProductPrices,
   getProductPrice,
   upsertProductPrice,
+  proposePriceChanges,
+  approvePriceChange,
+  rejectPriceChange,
+  listPriceChanges,
   zeroAllProductPrices,
   getPriceHistory,
   updateSubaccountFields,

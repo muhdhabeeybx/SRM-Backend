@@ -11,10 +11,43 @@ const {
   updateDepot,
   deleteDepot,
   updateProductPrice,
+  listPriceChanges,
+  approvePriceChange,
+  rejectPriceChange,
   zeroAllProductPrices,
 } = require("../../controllers/administration/depot.controller");
 
 router.get("/", verifyStaff, validate({ query: depotSchemas.listDepots }), getDepots);
+/**
+ * The approval side of pricing.
+ *
+ * Setting a price is finance's (the gate on /:id/product-price below);
+ * releasing it is not, because a second check by the same desk is not a second
+ * check. super_admin and admin approve — the tier that already acts as the
+ * approving one elsewhere.
+ *
+ * NOTE: requireRole is currently a no-op app-wide (see verifyStaff.js), so
+ * these names document who the route is FOR rather than refusing anybody. The
+ * guarantee that holds today is the second ACT, not the second role: a price
+ * cannot go live without a separate approval, and the trail names who gave it.
+ *
+ * Declared ABOVE "/:id" — a GET for "/price-changes" otherwise matches the id
+ * route, fails idParam validation and 400s, which is exactly what happened.
+ */
+router.get("/price-changes", verifyStaff, listPriceChanges);
+router.post(
+  "/price-changes/:changeId/approve",
+  verifyStaff,
+  requireRole("super_admin", "admin", { message: "Only an admin can approve a price change" }),
+  approvePriceChange
+);
+router.post(
+  "/price-changes/:changeId/reject",
+  verifyStaff,
+  requireRole("super_admin", "admin", { message: "Only an admin can reject a price change" }),
+  rejectPriceChange
+);
+
 router.get("/:id", verifyStaff, validate({ params: depotSchemas.idParam }), getDepotById);
 router.post("/", verifyStaff, validate({ body: depotSchemas.createDepot }), createDepot);
 router.patch("/:id", verifyStaff, validate({ params: depotSchemas.idParam, body: depotSchemas.updateDepot }), updateDepot);
