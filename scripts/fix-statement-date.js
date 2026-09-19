@@ -1,37 +1,49 @@
 /**
- * Statement 447 was uploaded with the year 2028.
+ * Re-date a statement whose file was read the wrong way round.
  *
- * Its period_start, period_end and all four of its lines read 2028-07-08 — the
- * only non-2026 dates in bank_statement_lines (4 rows out of 4,419), so this is
- * one bad upload, not a parser fault. Two of the four lines are matched to
- * order 11651, and order_payments copies the statement's date at match time, so
- * those two payment rows carry the error too.
+ * Was fix-statement-447-date.js, hardcoded to one statement and never run.
+ * It is the same repair every time, so it takes the id now:
+ *
+ *   node scripts/fix-statement-date.js <statementId> <YYYY-MM-DD>            # dry run
+ *   node scripts/fix-statement-date.js <statementId> <YYYY-MM-DD> --commit   # apply
+ *
+ * Run scripts/audit-statement-dates.js first — it compares every stored date
+ * against the original row the file was read from and tells you which
+ * statements are wrong and what they should be.
+ *
+ * ── What has to move together ─────────────────────────────────────────────
  *
  * dedup_key is a hash OVER the date (see bankStatement.repository.dedupKey),
  * guarded by a unique index on (bank_account_id, dedup_key). Correcting the
- * date without recomputing the key would leave the fingerprint describing a day
- * the row no longer claims — and a later re-upload of the real statement would
- * insert duplicates rather than being recognised. Both move together here.
+ * date without recomputing the key would leave the fingerprint describing a
+ * day the row no longer claims — and a later re-upload of the real statement
+ * would insert duplicates rather than being recognised as already held.
  *
- * order_payments.txn_date is timestamptz and is deliberately left that way by
- * migration 0039; every row written before it holds Lagos midnight for the day
- * meant. The same convention is kept here so these two rows read like their
- * neighbours rather than becoming a second exception.
+ * order_payments copies the statement's date at match time, so a matched line
+ * has a payment row carrying the same error. order_payments.txn_date is
+ * timestamptz and is deliberately left that way by migration 0039; every row
+ * written before it holds Lagos midnight for the day meant, and that
+ * convention is kept here so these rows read like their neighbours rather
+ * than becoming a second exception.
  *
- *   node scripts/fix-statement-447-date.js 2026-09-01           # dry run
- *   node scripts/fix-statement-447-date.js 2026-09-01 --commit  # apply
+ * ── This moves money between periods ──────────────────────────────────────
+ *
+ * The finance report filters on order_payments.txn_date. Re-dating a matched
+ * line moves its payment from one period to another, and that is a decision
+ * for the desk on a report that has been signed off — not something to run
+ * because a date looks wrong. The dry run names every payment it would touch;
+ * read it before passing --commit.
  */
 require("dotenv").config();
 const { client } = require("../db");
 const { dedupKey } = require("../repositories/bankStatement.repository");
 
-const STATEMENT_ID = 447;
-
-const day = process.argv[2];
+const STATEMENT_ID = Number(process.argv[2]);
+const day = process.argv[3];
 const commit = process.argv.includes("--commit");
 
-if (!/^\d{4}-\d{2}-\d{2}$/.test(day || "")) {
-  console.error("Usage: node scripts/fix-statement-447-date.js <YYYY-MM-DD> [--commit]");
+if (!Number.isInteger(STATEMENT_ID) || !/^\d{4}-\d{2}-\d{2}$/.test(day || "")) {
+  console.error("Usage: node scripts/fix-statement-date.js <statementId> <YYYY-MM-DD> [--commit]");
   process.exit(1);
 }
 
@@ -77,7 +89,10 @@ if (!/^\d{4}-\d{2}-\d{2}$/.test(day || "")) {
         WHERE id = ${line.id}
       `;
       console.log(
-        `  line ${line.id}  ${line.txn_date.toISOString().slice(0, 10)} -> ${day}   ` +
+        // txn_date is a `date` column since migration 0039, so the driver
+        // hands back a plain "YYYY-MM-DD" string, not a Date. The original
+        // script predated that and called toISOString on it.
+        `  line ${line.id}  ${String(line.txn_date).slice(0, 10)} -> ${day}   ` +
           `${Number(line.amount).toLocaleString()}  ${line.status}  ` +
           `dedup ${line.dedup_key.slice(0, 8)} -> ${key.slice(0, 8)}`
       );
@@ -101,7 +116,7 @@ if (!/^\d{4}-\d{2}-\d{2}$/.test(day || "")) {
     `;
     for (const p of payments) {
       console.log(
-        `  payment ${p.id} (order ${p.order_id}, ${Number(p.amount).toLocaleString()}) -> ${p.txn_date.toISOString()}`
+        `  payment ${p.id} (order ${p.order_id}, ${Number(p.amount).toLocaleString()}) -> ${new Date(p.txn_date).toISOString()}`
       );
     }
 
