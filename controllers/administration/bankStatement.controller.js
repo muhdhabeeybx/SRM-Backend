@@ -75,7 +75,20 @@ async function uploadStatement(req, res) {
   const result = await repo.ingest({
     bankAccountId: Number(bankAccountId),
     filename,
-    uploadedBy: req.staff?.id ?? null,
+    /**
+     * req.user, not req.staff. verifyStaff has never set req.staff.
+     *
+     * The middleware populates `req.user` — see its own note about preserving
+     * "the shape of the previous decoded.UserInfo payload so the 16 route
+     * files keep working unchanged". This controller was the one that did not,
+     * and `req.staff?.id ?? null` cannot throw, so it recorded null forever
+     * and said nothing. Every one of September's 160 uploads has no uploader
+     * against it, and 85 of August's; July's 165 all do, which dates the
+     * break to that rewrite.
+     *
+     * The rows already written cannot be attributed after the fact.
+     */
+    uploadedBy: req.user?.id ?? null,
     rows,
   });
 
@@ -263,7 +276,11 @@ async function matchLines(req, res) {
     lineIds,
     orderId,
     depositId,
-    staffId: req.staff?.id ?? null,
+    // Same bug, same fix. This path happens to be unused — matched_by is 100%
+    // populated because confirming a payment claims the lines instead — but a
+    // dormant call that silently records nobody is worth correcting now
+    // rather than discovering later.
+    staffId: req.user?.id ?? null,
   });
   return ok(res, result, `${result.matched} line${result.matched === 1 ? "" : "s"} matched`);
 }
