@@ -7,6 +7,7 @@ const {
   real,
   decimal,
   timestamp,
+  jsonb,
   index,
   uniqueIndex,
   check,
@@ -90,6 +91,29 @@ const pfis = pgTable(
     aggregateExpenses: decimal("aggregate_expenses", { precision: 15, scale: 2 }).default("0"),
     closureHandler: varchar("closure_handler", { length: 255 }).default(""),
     closureRemarks: text("closure_remarks").default(""),
+    /**
+     * The review gate — see migration 0046.
+     *
+     * A PFI is raised not_started and cannot trade until somebody who did not
+     * raise it assigns its bank account and officers. Both halves are named:
+     * an approval nobody is recorded on is not an approval.
+     */
+    raisedBy: integer("raised_by"),
+    raisedAt: timestamp("raised_at", { withTimezone: true }),
+    activatedBy: integer("activated_by"),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    reviewNote: text("review_note").default("").notNull(),
+    /**
+     * A trucking PFI's unwritten batch, parked until activation.
+     *
+     * Writing the trucks at raise time would put the loads on the inventory
+     * and into the sales ledger — owing money — against a batch nobody had
+     * signed off, which is what the gate exists to prevent. Cleared once
+     * spent.
+     */
+    pendingBatch: jsonb("pending_batch"),
+    /** The delivery batch this PFI raised, by its code. Trucking only. */
+    allocationCode: varchar("allocation_code", { length: 100 }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

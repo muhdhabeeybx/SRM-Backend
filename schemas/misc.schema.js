@@ -670,8 +670,30 @@ const pfiBase = {
   // means coastal — the only kind that existed before the distinction did.
   // 'delivery' is an allocation loaded at one depot and sold at several —
   // see db/migrations/0027. It is a PFI in the same table, not a second thing.
-  pfiType: enumOf("PFI type", ["coastal", "gantry", "delivery"]).optional(),
-  pfi_type: enumOf("PFI type", ["coastal", "gantry", "delivery"]).optional(),
+  pfiType: enumOf("PFI type", ["coastal", "gantry", "delivery", "trucking"]).optional(),
+  pfi_type: enumOf("PFI type", ["coastal", "gantry", "delivery", "trucking"]).optional(),
+  /**
+   * A trucking PFI's batch, held until activation. Shape mirrors what the
+   * delivery screens already write — see pfis.pending_batch in migration 0046.
+   */
+  batch: z
+    .object({
+      code: requiredString("Batch code", 100),
+      depotName: optionalString("Depot", 255),
+      productName: optionalString("Product", 255),
+      dateAllocated: optionalString("Date allocated", 40),
+      trucks: z
+        .array(
+          z.object({
+            truckId: id("Truck").optional().nullable(),
+            plateNumber: requiredString("Plate number", 30),
+            loadedQty: numberLike("Loaded quantity"),
+          })
+        )
+        .min(1, "Pick at least one truck")
+        .max(200, "Too many trucks in one batch"),
+    })
+    .optional(),
 
   /**
    * The depots that may sell from this batch. Delivery batches only.

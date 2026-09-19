@@ -1,6 +1,6 @@
 const { eq, and, or, ilike, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { pfis, depots, products, staff } = require("../db/schema");
+const { pfis, depots, products, staff, pfiStaff, bankAccounts, deliveryInventory } = require("../db/schema");
 const { lpgStations } = require("../db/schema/lpgStation");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
@@ -178,6 +178,99 @@ const findActiveByDepotAndProduct = async (depotId, productId) => {
 const create = async (data) => {
   const [row] = await db.insert(pfis).values(data).returning();
   return row;
+};
+
+/**
+ * Release a PFI to trade: assign, grant sight, write the batch, record who.
+ *
+ * All of it in one transaction. Half of this is worse than none — a PFI marked
+ * active whose officers were not granted sight of it is a batch nobody can
+ * see, and a batch written to inventory under a PFI that failed to activate is
+ * stock owed against nothing.
+ */
+const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy, note = "" }) => {
+  return db.transaction(async (tx) => {
+    const [current] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).limit(1);
+    if (!current) throw new Error("PFI not found");
+
+    const OFFICER_FIELDS = [
+      "auditOfficerId", "productOfficerId", "itComplianceOfficerId",
+      "securityExitOfficerId", "commissionOfficerId", "salesManagerId",
+    ];
+    const assigned = {};
+    for (const field of OFFICER_FIELDS) {
+      if (officers[field] != null && officers[field] !== "") {
+        assigned[field] = Number(officers[field]);
+      }
+    }
+
+    const [pfi] = await tx
+      .update(pfis)
+      .set({
+        ...assigned,
+        status: "active",
+        activatedBy,
+        activatedAt: new Date(),
+        reviewNote: note,
+        // Spent. Keeping it would leave a draft that reads as still-pending
+        // beside the rows it has already become.
+        pendingBatch: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(pfis.id, pfiId))
+      .returning();
+
+    /**
+     * Assignment IS access. pfi_staff is what scopeCondition reads, so an
+     * officer named on the PFI but absent here would be answerable for a batch
+     * they cannot open.
+     */
+    const staffIds = [...new Set(
+      OFFICER_FIELDS.map((f) => assigned[f] ?? current[f]).filter(Boolean).map(Number),
+    )];
+    for (const staffId of staffIds) {
+      await tx.insert(pfiStaff).values({ pfiId, staffId }).onConflictDoNothing();
+    }
+
+    // Which accounts collect for this batch. Appended, never replaced: an
+    // account already collecting for other PFIs must keep them.
+    for (const accountId of bankAccountIds) {
+      const [account] = await tx
+        .select({ id: bankAccounts.id, pfiIds: bankAccounts.pfiIds })
+        .from(bankAccounts)
+        .where(eq(bankAccounts.id, accountId))
+        .limit(1);
+      if (!account) continue;
+      const existing = Array.isArray(account.pfiIds) ? account.pfiIds.map(Number) : [];
+      if (existing.includes(Number(pfiId))) continue;
+      await tx
+        .update(bankAccounts)
+        .set({ pfiIds: [...existing, Number(pfiId)], updatedAt: new Date() })
+        .where(eq(bankAccounts.id, accountId));
+    }
+
+    // A trucking batch's loads reach the inventory here and nowhere earlier.
+    let batch = null;
+    const pending = current.pendingBatch;
+    if (pending && Array.isArray(pending.trucks) && pending.trucks.length) {
+      const code = String(pending.code || "").trim().toUpperCase().replace(/\s+/g, "-");
+      for (const truck of pending.trucks) {
+        await tx.insert(deliveryInventory).values({
+          allocationCode: code,
+          truckId: truck.truckId != null ? Number(truck.truckId) : null,
+          truckNumber: truck.plateNumber || "",
+          depot: pending.depotName || "",
+          pfiProduct: pending.productName || "",
+          quantityAllocated: Number(truck.loadedQty) || 0,
+          dateAllocated: pending.dateAllocated || null,
+          loadingStatus: "loaded",
+        });
+      }
+      batch = { code, trucks: pending.trucks.length };
+    }
+
+    return { pfi, batch };
+  });
 };
 
 const update = async (id, data) => {
@@ -445,6 +538,7 @@ module.exports = {
   findAll,
   findActiveByDepotAndProduct,
   create,
+  activate,
   update,
   deleteById,
   reserveStock,

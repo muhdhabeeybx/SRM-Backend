@@ -14,6 +14,7 @@ const {
   updatePfi,
   deletePfi,
   startPfi,
+  activatePfi,
   finishPfi,
   getPfiOutstanding,
   getPfiSummary,
@@ -36,7 +37,11 @@ router.get("/:id", verifyStaff, validate({ params: misc.idParam }), getPfiById);
 router.patch("/:id", verifyStaff, validate({ params: misc.idParam, body: misc.updatePfi }), updatePfi);
 router.delete("/:id", verifyStaff, validate({ params: misc.idParam }), deletePfi);
 
+// Releasing a PFI to trade. "/start" stays as the old name for anything still
+// calling it — it is the same handler, which now requires a bank account and
+// officers rather than flipping a status.
 router.post("/:id/start", verifyStaff, validate({ params: misc.idParam }), startPfi);
+router.post("/:id/activate", verifyStaff, validate({ params: misc.idParam }), activatePfi);
 router.post("/:id/finish", verifyStaff, validate({ params: misc.idParam }), finishPfi);
 router.get("/:id/summary", verifyStaff, validate({ params: misc.idParam }), getPfiSummary);
 // A delivery batch's two extra facts: where it may be sold, and what carried

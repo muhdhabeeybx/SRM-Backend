@@ -15,6 +15,7 @@ const { pfiMovements } = require("../../db/schema");
 const { computeFinancials, explainFinancials } = require("../../lib/pfiFinance");
 const { resolveBooking, actorFor, vendorFor } = require("./expense.controller");
 const { isWithinScope } = require("../../lib/scopeFilter");
+const smsService = require("../../services/sms.service");
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status });
@@ -110,7 +111,7 @@ const getPfiById = asyncHandler(async (req, res) => {
  * remains the safe default: it is the plainest kind of batch and enables no
  * behaviour the others do not have.
  */
-const PFI_TYPES = new Set(["coastal", "gantry", "delivery"]);
+const PFI_TYPES = new Set(["coastal", "gantry", "delivery", "trucking"]);
 const normalisePfiType = (raw) => {
   const t = String(raw || "").trim().toLowerCase();
   return PFI_TYPES.has(t) ? t : "coastal";
@@ -199,10 +200,16 @@ const createPfi = asyncHandler(async (req, res) => {
     officerNames[nameKey] = await resolveOfficerName(val);
   }
 
-  // Defaults to active, because that is what every batch was before this
-  // status existed and what most of them still are on the day they are
-  // raised. A cargo bought ahead of trading says so explicitly.
-  const requestedStatus = req.body.status === "not_started" ? "not_started" : "active";
+  /**
+   * Every PFI is raised not_started. There is no longer a choice.
+   *
+   * It used to default to active, so a batch could be raised and trading in
+   * one save with no bank account against it and nobody answerable for it.
+   * Raising now captures the cargo; assigning the bank and the officers is a
+   * separate act by somebody who did not raise it, and that act is what lets
+   * it trade. See activatePfi below and migration 0046.
+   */
+  const requestedStatus = "not_started";
 
   const pfi = await pfiRepo.create({
     pfiNumber: String(pfi_number).trim(),
@@ -239,7 +246,41 @@ const createPfi = asyncHandler(async (req, res) => {
     vesselName: isGantry ? "" : vessel_name || "",
     surveyorName: isGantry ? "" : surveyor_name || "",
     surveyorPhone: isGantry ? "" : surveyor_phone || "",
+    // Who raised it, so the review desk knows whose work it is reading.
+    raisedBy: req.user?.id ?? null,
+    raisedAt: new Date(),
+    /**
+     * A trucking batch waits with its PFI.
+     *
+     * The trucks are named now and written as delivery_inventory rows at
+     * activation. Writing them here would put the loads on the inventory and
+     * into the sales ledger — owing money — against a batch nobody had signed
+     * off, which is exactly what the gate exists to prevent.
+     */
+    pendingBatch: pfi_type === "trucking" && req.body.batch ? req.body.batch : null,
+    allocationCode:
+      pfi_type === "trucking" && req.body.batch?.code ? String(req.body.batch.code) : null,
   });
+
+  /**
+   * Tell the review desk. Deliberately not awaited for its result.
+   *
+   * The PFI is already written. An SMS gateway being down, or
+   * PFI_REVIEW_PHONE simply not being configured, must not turn a saved batch
+   * into a failed request — the desk would raise it again and the register
+   * would carry it twice.
+   */
+  if (process.env.PFI_REVIEW_PHONE) {
+    smsService
+      .sendPfiReviewSMS(process.env.PFI_REVIEW_PHONE, {
+        pfiNumber: pfi.pfiNumber,
+        pfiType: pfi.pfiType,
+        locationName: pfi.locationName,
+        productName: pfi.productName,
+        raisedBy: req.user?.name || "",
+      })
+      .catch((err) => console.warn("PFI review SMS failed:", err.message));
+  }
 
   // Every PFI becomes an expense category the moment it exists. Without this
   // there is no way to book a cost against the batch at all.
@@ -443,20 +484,65 @@ const deletePfi = asyncHandler(async (req, res) => {
  * cargo has closure figures on it, and reopening it would leave them
  * describing a batch that is trading again.
  */
-const startPfi = asyncHandler(async (req, res) => {
+/**
+ * Stage two: assign the bank and the officers, and release the batch to trade.
+ *
+ * This used to be a one-line status flip. It is the approval now, and it is
+ * the only way out of not_started, because everything it asks for is
+ * something a trading batch cannot sensibly be without:
+ *
+ *   a bank account   money arrives somewhere, and a batch whose account
+ *                    nobody named is a batch whose inflow cannot be matched
+ *   a finance and    somebody answerable for the money and somebody
+ *   an audit officer answerable for the count, named before trading rather
+ *                    than found afterwards
+ *
+ * Assigning an officer also grants them sight of the batch — pfi_staff is
+ * what scopeCondition reads — so this act is both the approval and the
+ * access grant, and they cannot drift apart.
+ *
+ * A trucking batch's trucks are written here, not at raise time. Until this
+ * runs there is no inventory and no ledger entry, so nothing is owed against
+ * a batch nobody has approved.
+ */
+const activatePfi = asyncHandler(async (req, res) => {
   const pfi = await pfiRepo.findById(req.params.id);
   if (!pfi) throw httpErr(404, "PFI not found");
   if (pfi.status === "active") throw httpErr(409, "This PFI is already active");
   if (pfi.status === "finished") throw httpErr(409, "This PFI is closed and cannot be restarted");
 
-  const updated = await withFinancials(await pfiRepo.update(pfi.id, { status: "active" }));
+  const bankAccountIds = (req.body.bankAccountIds || [])
+    .map(Number)
+    .filter(Number.isInteger);
+  const officers = req.body.officers || {};
+  const auditOfficer = officers.auditOfficerId ?? pfi.auditOfficerId;
+  const financeOfficer = officers.salesManagerId ?? pfi.salesManagerId;
+
+  if (!bankAccountIds.length) {
+    throw httpErr(400, "Assign at least one bank account before activating this PFI");
+  }
+  if (!auditOfficer) throw httpErr(400, "Assign an audit officer before activating this PFI");
+  if (!financeOfficer) {
+    throw httpErr(400, "Assign a finance officer before activating this PFI");
+  }
+
+  const updated = await pfiRepo.activate({
+    pfiId: pfi.id,
+    bankAccountIds,
+    officers,
+    activatedBy: req.user?.id ?? null,
+    note: req.body.note || "",
+  });
 
   res.json({
     success: true,
     message: `${pfi.pfiNumber} is now active`,
-    data: { pfi: updated },
+    data: { pfi: await withFinancials(updated.pfi), batch: updated.batch },
   });
 });
+
+/** The old name, kept so nothing calling it breaks. */
+const startPfi = activatePfi;
 
 /**
  * What is still moving on a batch — asked before anybody closes it.
@@ -902,6 +988,7 @@ module.exports = {
   updatePfi,
   deletePfi,
   startPfi,
+  activatePfi,
   finishPfi,
   getPfiOutstanding,
   getPfiSummary,

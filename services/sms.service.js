@@ -263,6 +263,24 @@ const deliver = async (phone, sms, label) => {
   return { success: false, message: result.message || "All Termii channels failed" };
 };
 
+/**
+ * A PFI has been raised and is waiting for somebody to release it.
+ *
+ * Goes to PFI_REVIEW_PHONE, not to a role: the review desk is one person's
+ * job here, and deriving it from a role would page every super_admin for
+ * every batch. Unset means the feature is simply not notifying — that is a
+ * configuration state, not an error, and it must never stop a PFI being
+ * raised. See raisePfi in pfi.service.js, which ignores what this returns.
+ */
+const sendPfiReviewSMS = async (phone, { pfiNumber, pfiType, locationName, productName, raisedBy }) => {
+  const sms =
+    `New ${pfiType} PFI ${pfiNumber} has been raised${raisedBy ? ` by ${raisedBy}` : ""}` +
+    `${productName ? ` for ${productName}` : ""}${locationName ? ` at ${locationName}` : ""}. ` +
+    `It is not trading yet. Assign its bank account and officers on the dashboard to activate it.`;
+
+  return deliver(phone, sms, "PFI review notice");
+};
+
 const sendOrderSummarySMS = async (phone, orderData) => {
   const { customerName, product, quantity, unit, price, totalAmount, accountNumber, bankName, accountName } = orderData;
 
@@ -347,4 +365,4 @@ const sendLpgOrderExpiredSMS = async (phone, { requestNumber, customerName }) =>
   return deliver(phone, sms, "LPG expiry SMS");
 };
 
-module.exports = { sendSMSTermii, route, getTermiiBalance, sendSMSWithFallback, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS, MESSAGE_CLASS };
+module.exports = { sendSMSTermii, route, getTermiiBalance, sendSMSWithFallback, sendPfiReviewSMS, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS, MESSAGE_CLASS };
