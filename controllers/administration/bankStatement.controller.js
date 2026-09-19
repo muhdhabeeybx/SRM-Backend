@@ -109,6 +109,51 @@ async function uploadStatement(req, res) {
   );
 }
 
+/**
+ * POST /api/bank-statements/preview
+ *
+ * What the upload would do, before it does it. Same body as the upload and the
+ * same dedup rule, run and returned rather than applied — so the rows offered
+ * for confirmation are the rows that will actually be stored.
+ *
+ * Nothing is written and nothing is held. A file confirmed a minute later is
+ * partitioned again on the way in, and anything that arrived in between is
+ * caught there by the unique index exactly as it would have been anyway.
+ */
+async function previewStatement(req, res) {
+  const { bankAccountId, rows } = req.body || {};
+  if (!bankAccountId) return fail(res, 400, "bankAccountId is required");
+
+  const mapping = await repo.getMapping(Number(bankAccountId));
+  if (!mapping) {
+    return fail(res, 409, "Set up this account's statement format before uploading");
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return fail(res, 400, "No usable credit rows were found in that statement");
+  }
+
+  const result = await repo.previewIngest({
+    bankAccountId: Number(bankAccountId),
+    rows,
+  });
+
+  // dedup keys are an implementation detail of the rule, not something a
+  // screen has any use for — and they are what makes the payload large.
+  const strip = ({ dedup, rawRow, ...rest }) => rest;
+
+  return ok(res, {
+    rows: result.fresh.map(strip),
+    skipped: result.skipped.map(strip),
+    counts: {
+      incoming: rows.length,
+      importing: result.fresh.length,
+      duplicates: result.duplicates,
+      repeatedReferences: result.repeatedReferences,
+    },
+    total: result.fresh.reduce((sum, r) => sum + Number(r.amount || 0), 0),
+  });
+}
+
 /** GET /api/bank-statements?bankAccountId= */
 async function listStatements(req, res) {
   const { bankAccountId } = req.query;
@@ -227,6 +272,7 @@ module.exports = {
   getMapping,
   saveMapping,
   uploadStatement,
+  previewStatement,
   listStatements,
   statementLines,
   accountSummary,

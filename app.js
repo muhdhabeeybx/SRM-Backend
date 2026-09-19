@@ -44,6 +44,23 @@ app.use((req, res, next) => {
 // — once a body is parsed, express.json() below sees req._body and passes it
 // through untouched.
 app.use("/api/daily-reports/email", express.json({ limit: "25mb" }));
+/**
+ * A bank statement is a whole file's worth of rows in one body.
+ *
+ * Measured against the live table, a statement row serialises to about 540
+ * bytes once it carries the original row it was read from — so the 100kb
+ * default caps an upload at roughly 190 rows, and the largest file already on
+ * record holds 476. That ceiling is invisible from the client: express.json()
+ * rejects the body with a 413 before any route runs, so the desk sees an
+ * upload fail with nothing to explain it, exactly as the Reports Hub did
+ * above.
+ *
+ * Both the upload and the preflight that precedes it post the same body, so
+ * the limit covers the whole prefix rather than one path. 25mb matches the
+ * only other raised limit here and is far past the parser's own 50,000-row
+ * ceiling in any realistic export.
+ */
+app.use("/api/bank-statements", express.json({ limit: "25mb" }));
 app.use(express.json());
 // `res.cookie` is built in, but `req.cookies` is not and never was — parsing
 // the Cookie header has always been cookie-parser's job, in Express 4 as well.

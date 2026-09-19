@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { client } = require("../db");
+const { parseOrderReference } = require("../utils/helpers");
 
 /**
  * Stable fingerprint for a statement row.
@@ -59,6 +60,98 @@ const paymentReference = (ref) => {
   return s || null;
 };
 
+/**
+ * Splits an incoming file into what is new and what is already here.
+ *
+ * ── The reference decides, and the fingerprint only covers what has none ───
+ *
+ * A payment's reference IS the payment. Two rows carrying the same one are the
+ * same credit read twice, however much else disagrees — a date a day out, a
+ * description worded differently by another export, even an amount, because a
+ * file that gives two different amounts the same reference is wrong about
+ * something and importing both is the worst answer to that.
+ *
+ * The rule this tightens said a row was a duplicate only when the WHOLE of it
+ * matched: date, reference, amount and depositor together. It let 19 credits
+ * onto account 8 twice, N776,822,000 of them, because an .xlsx and a .csv of
+ * the same account dated them differently and a date is part of the key.
+ *
+ * Before that, the reference WAS the identity and the swallow it caused is the
+ * reason it was removed: a N38,461,500 credit on 1 September was refused
+ * because a N70,000,000 credit from the same payer was already on file. That
+ * was never the reference's fault. Account 37 maps its reference column onto
+ * column 4 — the same column it reads narration and depositor from — so what
+ * it calls a reference is "POOKIE ENERGY L/To FIDELITY BANK | SOROMAN
+ * NIGERIA", which every payment from that payer repeats. The mapping is what
+ * needs correcting; a dedup rule cannot tell two payments apart when the file
+ * hands it one name for both.
+ *
+ * ── Why the skipped rows come back, not just a count of them ───────────────
+ *
+ * This is the one place that knows WHICH rows were dropped and why, and the
+ * screen that asks somebody to confirm an import has to be able to show them.
+ * A count alone is the silence that made this rule dangerous the last time it
+ * was in force: an account quietly shedding a month of credits on every upload
+ * looked, a day later, exactly like an account with nothing to shed.
+ *
+ * `reason` separates the two cases that matter. "on record" is an ordinary
+ * overlap between two exports. "reference" means this file describes a credit
+ * differently from the file that brought it in — or, in bulk, that the
+ * account's reference column is mapped onto its narration. "in this file"
+ * means the file repeats itself, which is worth seeing on its own.
+ */
+async function partitionRows({ bankAccountId, rows }) {
+  const prepared = rows.map((r) => ({
+    ...r,
+    amount: Number(r.amount),
+    dedup: dedupKey(r),
+  }));
+
+  const existing = await client`
+    SELECT dedup_key, bank_ref FROM bank_statement_lines
+    WHERE bank_account_id = ${bankAccountId}
+  `;
+  const seenKeys = new Set(existing.map((e) => e.dedup_key));
+  const seenReferences = new Set(
+    existing.map((e) => paymentReference(e.bank_ref)).filter(Boolean),
+  );
+  // What was already in the database, as opposed to what this file repeats to
+  // itself — the same skip for different reasons, and they read differently.
+  const priorKeys = new Set(seenKeys);
+  const priorReferences = new Set(seenReferences);
+
+  const fresh = [];
+  const skipped = [];
+  let duplicates = 0;
+  let repeatedReferences = 0;
+
+  for (const r of prepared) {
+    if (seenKeys.has(r.dedup)) {
+      duplicates++;
+      skipped.push({
+        ...r,
+        reason: priorKeys.has(r.dedup) ? "on record" : "in this file",
+      });
+      continue;
+    }
+    const reference = paymentReference(r.bankRef);
+    if (reference && seenReferences.has(reference)) {
+      duplicates++;
+      repeatedReferences++;
+      skipped.push({
+        ...r,
+        reason: priorReferences.has(reference) ? "reference" : "reference in this file",
+      });
+      continue;
+    }
+    seenKeys.add(r.dedup);
+    if (reference) seenReferences.add(reference);
+    fresh.push(r);
+  }
+
+  return { fresh, skipped, duplicates, repeatedReferences };
+}
+
 const bankStatementRepo = {
   paymentReference,
   dedupKey,
@@ -100,6 +193,25 @@ const bankStatementRepo = {
 
   // ── Statements ────────────────────────────────────────────────────────────
 
+  partitionRows,
+
+  /**
+   * What an upload WOULD do, without doing it.
+   *
+   * The same partition the import runs, returned rather than applied, so the
+   * rows offered for confirmation are exactly the rows that will be stored —
+   * not a client-side guess at them. A preview that ran its own rule would be
+   * worse than no preview: it would be believed.
+   *
+   * Nothing is written and nothing is locked, so a file previewed and then
+   * confirmed a minute later is partitioned again on the way in. A row that
+   * arrived in between is caught there, by the unique index, exactly as it
+   * would have been without a preview.
+   */
+  async previewIngest({ bankAccountId, rows }) {
+    return partitionRows({ bankAccountId, rows });
+  },
+
   /**
    * Stores a parsed statement.
    *
@@ -110,69 +222,10 @@ const bankStatementRepo = {
    * rejected by the caller rather than stored empty.
    */
   async ingest({ bankAccountId, filename, uploadedBy, rows }) {
-    const prepared = rows.map((r) => ({
-      ...r,
-      amount: Number(r.amount),
-      dedup: dedupKey(r),
-    }));
-
-    const existing = await client`
-      SELECT dedup_key, bank_ref FROM bank_statement_lines
-      WHERE bank_account_id = ${bankAccountId}
-    `;
-    const seenKeys = new Set(existing.map((e) => e.dedup_key));
-    const seenReferences = new Set(
-      existing.map((e) => paymentReference(e.bank_ref)).filter(Boolean),
-    );
-
-    /**
-     * The reference decides, and the fingerprint only covers what has none.
-     *
-     * A payment's reference IS the payment. Two rows carrying the same one are
-     * the same credit read twice, however much else disagrees — a date a day
-     * out, a description worded differently by another export, even an amount,
-     * because a file that gives two different amounts the same reference is
-     * wrong about something and importing both is the worst answer to that.
-     *
-     * The rule this tightens said a row was a duplicate only when the WHOLE of
-     * it matched: date, reference, amount and depositor together. It let 19
-     * credits onto account 8 twice, N776,822,000 of them, because an .xlsx and
-     * a .csv of the same account dated them differently and a date is part of
-     * the key.
-     *
-     * Before that, the reference WAS the identity and the swallow it caused is
-     * the reason it was removed: a N38,461,500 credit on 1 September was
-     * refused because a N70,000,000 credit from the same payer was already on
-     * file. That was never the reference's fault. Account 37 maps its
-     * reference column onto column 4 — the same column it reads narration and
-     * depositor from — so what it calls a reference is "POOKIE ENERGY L/To
-     * FIDELITY BANK | SOROMAN NIGERIA", which every payment from that payer
-     * repeats. The mapping is what needs correcting; a dedup rule cannot tell
-     * two payments apart when the file hands it one name for both.
-     *
-     * What HAS changed is that the loss is no longer silent. A skipped row is
-     * now counted as a repeated reference and named in the upload's result, so
-     * a mis-mapped account announces itself on the first upload instead of
-     * quietly dropping a month of credits.
-     */
-    const fresh = [];
-    let duplicates = 0;
-    let repeatedReferences = 0;
-    for (const r of prepared) {
-      if (seenKeys.has(r.dedup)) {
-        duplicates++;
-        continue;
-      }
-      const reference = paymentReference(r.bankRef);
-      if (reference && seenReferences.has(reference)) {
-        duplicates++;
-        repeatedReferences++;
-        continue;
-      }
-      seenKeys.add(r.dedup);
-      if (reference) seenReferences.add(reference);
-      fresh.push(r);
-    }
+    const { fresh, duplicates, repeatedReferences } = await partitionRows({
+      bankAccountId,
+      rows,
+    });
 
     if (!fresh.length) return { added: 0, duplicates, repeatedReferences, statement: null };
 
@@ -355,12 +408,30 @@ const bankStatementRepo = {
     const size = Math.min(Math.max(Number(limit) || 50, 1), 5000);
     const offset = (Math.max(1, Number(page)) - 1) * size;
 
+    /**
+     * One box, everything about the payment.
+     *
+     * A reconciler holds exactly one fact — a figure off a statement, half a
+     * payer's name, a bank reference read down the phone, an order reference
+     * off an invoice — and should not have to know which field the system
+     * files it under. So the term is tried against all of them at once.
+     *
+     * The order reference goes through parseOrderReference rather than being
+     * rebuilt in SQL: the reference is assembled in JS from the company's
+     * initials and the id ("CO11868"), so there is nothing to match against in
+     * the database, but the inverse recovers the id — and it returns null for
+     * anything that is not reference-shaped, so free text cannot drag an
+     * unrelated order in. It also refuses anything too large to be an int4,
+     * which is what stopped a bank reference searched as an order id from
+     * failing the whole query.
+     */
     const term = String(q || "").trim();
     const like = term ? `%${term}%` : null;
     // Amount search ignores thousands separators, the way the pool search does.
     const numeric = term.replace(/,/g, "");
     const amount =
       numeric !== "" && !Number.isNaN(Number(numeric)) ? Number(numeric) : null;
+    const orderId = term ? parseOrderReference(term) : null;
 
     const rows = await client`
       SELECT l.id, l.txn_date::text AS txn_date, l.amount, l.depositor, l.narration,
@@ -391,6 +462,20 @@ const bankStatementRepo = {
            OR l.narration ILIKE ${like}::text
            OR st.filename ILIKE ${like}::text
            OR (${amount}::numeric IS NOT NULL AND l.amount = ${amount}::numeric)
+           OR (${orderId}::int IS NOT NULL AND l.matched_order_id = ${orderId}::int)
+           OR EXISTS (SELECT 1 FROM deposits dq
+                       WHERE dq.id = l.matched_deposit_id
+                         AND dq.reference ILIKE ${like}::text)
+           OR EXISTS (SELECT 1 FROM customers cq
+                       JOIN deposits dq2 ON dq2.id = l.matched_deposit_id
+                      WHERE cq.id = dq2.customer_id
+                        AND cq.name ILIKE ${like}::text)
+           OR EXISTS (SELECT 1 FROM staff mq
+                       WHERE mq.id = l.matched_by
+                         AND concat_ws(' ', mq.first_name, mq.surname) ILIKE ${like}::text)
+           OR EXISTS (SELECT 1 FROM staff uq
+                       WHERE uq.id = st.uploaded_by
+                         AND concat_ws(' ', uq.first_name, uq.surname) ILIKE ${like}::text)
          )
        ORDER BY l.txn_date DESC, l.id ASC
        LIMIT ${size} OFFSET ${offset}
@@ -417,6 +502,20 @@ const bankStatementRepo = {
            OR l.narration ILIKE ${like}::text
            OR st.filename ILIKE ${like}::text
            OR (${amount}::numeric IS NOT NULL AND l.amount = ${amount}::numeric)
+           OR (${orderId}::int IS NOT NULL AND l.matched_order_id = ${orderId}::int)
+           OR EXISTS (SELECT 1 FROM deposits dq
+                       WHERE dq.id = l.matched_deposit_id
+                         AND dq.reference ILIKE ${like}::text)
+           OR EXISTS (SELECT 1 FROM customers cq
+                       JOIN deposits dq2 ON dq2.id = l.matched_deposit_id
+                      WHERE cq.id = dq2.customer_id
+                        AND cq.name ILIKE ${like}::text)
+           OR EXISTS (SELECT 1 FROM staff mq
+                       WHERE mq.id = l.matched_by
+                         AND concat_ws(' ', mq.first_name, mq.surname) ILIKE ${like}::text)
+           OR EXISTS (SELECT 1 FROM staff uq
+                       WHERE uq.id = st.uploaded_by
+                         AND concat_ws(' ', uq.first_name, uq.surname) ILIKE ${like}::text)
          )
     `;
 

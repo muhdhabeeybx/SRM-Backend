@@ -7,6 +7,7 @@ const {
   getMapping,
   saveMapping,
   uploadStatement,
+  previewStatement,
   listStatements,
   statementLines,
   accountSummary,
@@ -34,6 +35,8 @@ router.put("/mapping/:bankAccountId", verifyStaff, validate({ body: misc.bankSta
 // Statements themselves.
 router.get("/", verifyStaff, listStatements);
 router.post("/", verifyStaff, validate({ body: misc.createBankStatement }), uploadStatement);
+// The same body as the upload, answered rather than applied.
+router.post("/preview", verifyStaff, validate({ body: misc.createBankStatement }), previewStatement);
 router.get("/:id/lines", verifyStaff, statementLines);
 router.delete("/:id", verifyStaff, deleteStatement);
 

@@ -343,6 +343,21 @@ const createBankStatement = z.object({
         depositor: optionalString("Depositor", 255),
         bankRef: optionalString("Bank reference", 255),
         narration: optionalString("Narration", 1000),
+        /**
+         * The row exactly as the bank wrote it.
+         *
+         * bank_statement_lines.raw_row exists "for traceability" and had been
+         * getting nothing: a Zod object strips unknown keys, and this schema
+         * never listed rawRow, so validate() deleted it on the way past. The
+         * damage is dated — every line imported in July carries its original
+         * row, 44% of August's do, and every one of September's 1,433 is an
+         * empty array. The column a disputed credit would be checked against
+         * was empty for exactly the period anybody would be disputing.
+         *
+         * Cells only, as strings, and capped: this is evidence, not input,
+         * and nothing downstream reads it as anything but text.
+         */
+        rawRow: z.array(z.string().max(2000)).max(100).optional(),
       })
     )
     .min(1, "At least one row is required"),
