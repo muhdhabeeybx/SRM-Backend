@@ -4,6 +4,31 @@ const { generateOrderReference } = require("../../utils/helpers");
 const ok = (res, data, message) => res.json({ success: true, message, data });
 const fail = (res, code, message) => res.status(code).json({ success: false, message });
 
+/**
+ * A calendar day from a query string, or null.
+ *
+ * Only YYYY-MM-DD gets through. Anything else becomes null rather than being
+ * coerced, because a filter that silently reads as "no filter" is better than
+ * one that reads as some other day — and these bind straight into ::date.
+ */
+const day = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : null);
+
+/**
+ * The two derived fields every line view needs.
+ *
+ * The order reference is assembled the way every other screen builds it, so a
+ * reference read off this page is the one to search for elsewhere; the matcher
+ * is a name rather than a staff id.
+ */
+const decorateLine = (l) => ({
+  ...l,
+  order_reference:
+    l.order_id != null ? generateOrderReference(l.order_company, l.order_id) : null,
+  matched_by_name: l.matched_by_first_name
+    ? `${l.matched_by_first_name} ${l.matched_by_surname || ""}`.trim()
+    : null,
+});
+
 /** GET /api/bank-statements/mapping/:bankAccountId */
 async function getMapping(req, res) {
   const mapping = await repo.getMapping(Number(req.params.bankAccountId));
@@ -107,17 +132,58 @@ async function statementLines(req, res) {
     status: status || null,
   });
 
-  return ok(res, {
-    ...result,
-    lines: result.lines.map((l) => ({
-      ...l,
-      order_reference:
-        l.order_id != null ? generateOrderReference(l.order_company, l.order_id) : null,
-      matched_by_name: l.matched_by_first_name
-        ? `${l.matched_by_first_name} ${l.matched_by_surname || ""}`.trim()
-        : null,
-    })),
+  return ok(res, { ...result, lines: result.lines.map(decorateLine) });
+}
+
+/**
+ * GET /api/bank-statements/summary
+ *
+ * Every bank account with what has been uploaded against it. Accounts with no
+ * uploads are included deliberately — that is where a first upload starts, and
+ * an account with no format set up is the one somebody is looking for.
+ */
+async function accountSummary(req, res) {
+  const accounts = await repo.accountSummaries();
+  return ok(res, { accounts });
+}
+
+/**
+ * GET /api/bank-statements/accounts/:bankAccountId/days?from=&to=
+ *
+ * One account's statement grouped by the day the bank printed, which is the
+ * unit it is actually read in.
+ */
+async function accountDays(req, res) {
+  const { from, to } = req.query;
+  const days = await repo.accountDays({
+    bankAccountId: Number(req.params.bankAccountId),
+    from: day(from),
+    to: day(to),
   });
+  return ok(res, { days });
+}
+
+/**
+ * GET /api/bank-statements/accounts/:bankAccountId/lines
+ *   ?from=&to=&day=&status=&q=&page=&limit=
+ *
+ * Every line on the account in a range, each carrying where it came from and
+ * where it went. This is also what the export reads.
+ */
+async function accountLines(req, res) {
+  const { from, to, day: onDay, status, q, page, limit } = req.query;
+  const result = await repo.accountLines({
+    bankAccountId: Number(req.params.bankAccountId),
+    from: day(from),
+    to: day(to),
+    day: day(onDay),
+    status: status || null,
+    q: q || null,
+    page: page ? Number(page) : 1,
+    limit: limit ? Number(limit) : 50,
+  });
+
+  return ok(res, { ...result, lines: result.lines.map(decorateLine) });
 }
 
 /** DELETE /api/bank-statements/:id */
@@ -163,6 +229,9 @@ module.exports = {
   uploadStatement,
   listStatements,
   statementLines,
+  accountSummary,
+  accountDays,
+  accountLines,
   deleteStatement,
   searchLines,
   matchLines,

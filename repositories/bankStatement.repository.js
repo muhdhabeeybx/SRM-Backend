@@ -194,9 +194,9 @@ const bankStatementRepo = {
     const [statement] = await client`
       INSERT INTO bank_statements
         (bank_account_id, filename, uploaded_by, row_count, duplicate_count,
-         period_start, period_end)
+         repeated_reference_count, period_start, period_end)
       VALUES (${bankAccountId}, ${filename || ""}, ${uploadedBy ?? null},
-              ${fresh.length}, ${duplicates},
+              ${fresh.length}, ${duplicates}, ${repeatedReferences},
               ${dates[0]}, ${dates[dates.length - 1]})
       RETURNING *
     `;
@@ -218,17 +218,218 @@ const bankStatementRepo = {
 
   async listStatements(bankAccountId) {
     // A NULL account id means "all accounts" — avoids an empty SQL fragment.
+    //
+    // uploaded_by has been written on every upload since the table existed and
+    // was never once read back, so "who imported this file" had no answer on
+    // the screen. It is joined here rather than resolved per row by the caller.
     return client`
       SELECT s.*,
              b.bank_name, b.account_name, b.account_number,
+             NULLIF(trim(concat_ws(' ', u.first_name, u.surname)), '') AS uploaded_by_name,
              (SELECT count(*) FROM bank_statement_lines l
-               WHERE l.statement_id = s.id AND l.status = 'MATCHED')::int AS matched_count
+               WHERE l.statement_id = s.id AND l.status = 'MATCHED')::int AS matched_count,
+             (SELECT COALESCE(sum(l.amount), 0) FROM bank_statement_lines l
+               WHERE l.statement_id = s.id)::numeric AS total_amount,
+             (SELECT COALESCE(sum(l.amount), 0) FROM bank_statement_lines l
+               WHERE l.statement_id = s.id AND l.status = 'MATCHED')::numeric AS matched_amount
       FROM bank_statements s
       JOIN bank_accounts b ON b.id = s.bank_account_id
+      LEFT JOIN staff u ON u.id = s.uploaded_by
       WHERE (${bankAccountId ?? null}::int IS NULL
              OR s.bank_account_id = ${bankAccountId ?? null}::int)
       ORDER BY s.created_at DESC
     `;
+  },
+
+  /**
+   * One row per bank account: what has been uploaded for it, and what became
+   * of the money.
+   *
+   * EVERY account is returned, including the ones that have never had a
+   * statement uploaded — a screen that lists only accounts with history gives
+   * you nowhere to make the first upload, and an account with no format set up
+   * is precisely the one somebody needs to find.
+   *
+   * Amounts are summed here rather than by counting rows on the client. The
+   * upload list could only ever report counts — "10 files, 412 rows" — and the
+   * question actually asked of a bank statement is how much came in, how much
+   * of it has been claimed by an order, and how much is still sitting there.
+   */
+  async accountSummaries() {
+    return client`
+      WITH uploads AS (
+        SELECT bank_account_id,
+               count(*)::int AS statement_count,
+               COALESCE(sum(duplicate_count), 0)::int AS duplicate_count,
+               COALESCE(sum(repeated_reference_count), 0)::int AS repeated_reference_count,
+               min(created_at) AS first_uploaded_at,
+               max(created_at) AS last_uploaded_at
+          FROM bank_statements
+         GROUP BY bank_account_id
+      ),
+      lines AS (
+        SELECT bank_account_id,
+               count(*)::int AS line_count,
+               COALESCE(sum(amount), 0)::numeric AS total_amount,
+               count(*) FILTER (WHERE status = 'MATCHED')::int AS matched_count,
+               COALESCE(sum(amount) FILTER (WHERE status = 'MATCHED'), 0)::numeric AS matched_amount,
+               count(*) FILTER (WHERE status <> 'MATCHED')::int AS unmatched_count,
+               COALESCE(sum(amount) FILTER (WHERE status <> 'MATCHED'), 0)::numeric AS unmatched_amount,
+               min(txn_date)::text AS first_txn_date,
+               max(txn_date)::text AS last_txn_date,
+               count(DISTINCT txn_date)::int AS day_count
+          FROM bank_statement_lines
+         GROUP BY bank_account_id
+      )
+      SELECT b.id AS bank_account_id,
+             b.bank_name, b.account_name, b.account_number, b.currency, b.status,
+             (m.bank_account_id IS NOT NULL) AS has_format,
+             COALESCE(u.statement_count, 0) AS statement_count,
+             COALESCE(u.duplicate_count, 0) AS duplicate_count,
+             COALESCE(u.repeated_reference_count, 0) AS repeated_reference_count,
+             u.first_uploaded_at, u.last_uploaded_at,
+             COALESCE(l.line_count, 0) AS line_count,
+             COALESCE(l.total_amount, 0) AS total_amount,
+             COALESCE(l.matched_count, 0) AS matched_count,
+             COALESCE(l.matched_amount, 0) AS matched_amount,
+             COALESCE(l.unmatched_count, 0) AS unmatched_count,
+             COALESCE(l.unmatched_amount, 0) AS unmatched_amount,
+             COALESCE(l.day_count, 0) AS day_count,
+             l.first_txn_date, l.last_txn_date
+        FROM bank_accounts b
+        LEFT JOIN uploads u ON u.bank_account_id = b.id
+        LEFT JOIN lines l ON l.bank_account_id = b.id
+        LEFT JOIN bank_statement_column_mappings m ON m.bank_account_id = b.id
+       ORDER BY u.last_uploaded_at DESC NULLS LAST, b.bank_name ASC, b.account_name ASC
+    `;
+  },
+
+  /**
+   * One account's statement, a day at a time.
+   *
+   * The unit a bank statement is actually read in is the day — "what came in
+   * on the 14th" — and no screen could answer that, because the only grouping
+   * the data had was the file it arrived in. A day that took three uploads is
+   * one day here, which is the point: how many files it took to assemble is an
+   * accident of how somebody exported it, not a property of the money.
+   */
+  async accountDays({ bankAccountId, from = null, to = null }) {
+    return client`
+      SELECT l.txn_date::text AS day,
+             count(*)::int AS line_count,
+             COALESCE(sum(l.amount), 0)::numeric AS total_amount,
+             count(*) FILTER (WHERE l.status = 'MATCHED')::int AS matched_count,
+             COALESCE(sum(l.amount) FILTER (WHERE l.status = 'MATCHED'), 0)::numeric AS matched_amount,
+             count(*) FILTER (WHERE l.status <> 'MATCHED')::int AS unmatched_count,
+             COALESCE(sum(l.amount) FILTER (WHERE l.status <> 'MATCHED'), 0)::numeric AS unmatched_amount,
+             count(DISTINCT l.statement_id)::int AS upload_count,
+             min(l.created_at) AS first_imported_at,
+             max(l.created_at) AS last_imported_at
+        FROM bank_statement_lines l
+       WHERE l.bank_account_id = ${bankAccountId}
+         AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
+         AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
+       GROUP BY l.txn_date
+       ORDER BY l.txn_date DESC
+    `;
+  },
+
+  /**
+   * Every line on one account, with its whole history attached.
+   *
+   * Where it came from (which file, imported when, by whom) and where it went
+   * (which order, claimed when, by whom) travel with the row, so a credit can
+   * be accounted for end to end without opening the upload it happened to
+   * arrive in. That trace is the thing the per-file view could not give:
+   * re-upload the same month in two halves and a line's history was split
+   * across two screens.
+   *
+   * `limit` goes up to 5,000 here rather than the 200 the per-file view caps
+   * at, because this is also what the export reads — and an export that
+   * silently stops at 200 rows is the failure mode described in the parser.
+   */
+  async accountLines({
+    bankAccountId, from = null, to = null, day = null,
+    status = null, q = null, page = 1, limit = 50,
+  }) {
+    const size = Math.min(Math.max(Number(limit) || 50, 1), 5000);
+    const offset = (Math.max(1, Number(page)) - 1) * size;
+
+    const term = String(q || "").trim();
+    const like = term ? `%${term}%` : null;
+    // Amount search ignores thousands separators, the way the pool search does.
+    const numeric = term.replace(/,/g, "");
+    const amount =
+      numeric !== "" && !Number.isNaN(Number(numeric)) ? Number(numeric) : null;
+
+    const rows = await client`
+      SELECT l.id, l.txn_date::text AS txn_date, l.amount, l.depositor, l.narration,
+             l.bank_ref, l.status, l.created_at AS imported_at,
+             l.matched_deposit_id, l.matched_order_id, l.matched_at,
+             st.id AS statement_id, st.filename, st.created_at AS uploaded_at,
+             NULLIF(trim(concat_ws(' ', up.first_name, up.surname)), '') AS uploaded_by_name,
+             d.reference AS deposit_reference,
+             o.id AS order_id, o.company_name AS order_company,
+             c.name AS customer_name,
+             s.first_name AS matched_by_first_name, s.surname AS matched_by_surname
+        FROM bank_statement_lines l
+        JOIN bank_statements st ON st.id = l.statement_id
+        LEFT JOIN staff up ON up.id = st.uploaded_by
+        LEFT JOIN deposits d ON d.id = l.matched_deposit_id
+        LEFT JOIN orders o ON o.id = l.matched_order_id
+        LEFT JOIN customers c ON c.id = d.customer_id
+        LEFT JOIN staff s ON s.id = l.matched_by
+       WHERE l.bank_account_id = ${bankAccountId}
+         AND (${day}::date IS NULL OR l.txn_date = ${day}::date)
+         AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
+         AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
+         AND (${status}::text IS NULL OR l.status::text = ${status}::text)
+         AND (
+           ${like}::text IS NULL
+           OR l.depositor ILIKE ${like}::text
+           OR l.bank_ref  ILIKE ${like}::text
+           OR l.narration ILIKE ${like}::text
+           OR st.filename ILIKE ${like}::text
+           OR (${amount}::numeric IS NOT NULL AND l.amount = ${amount}::numeric)
+         )
+       ORDER BY l.txn_date DESC, l.id ASC
+       LIMIT ${size} OFFSET ${offset}
+    `;
+
+    const [totals] = await client`
+      SELECT count(*)::int AS total,
+             count(*) FILTER (WHERE l.status = 'MATCHED')::int AS matched,
+             count(*) FILTER (WHERE l.status <> 'MATCHED')::int AS unmatched,
+             COALESCE(sum(l.amount), 0)::numeric AS total_amount,
+             COALESCE(sum(l.amount) FILTER (WHERE l.status = 'MATCHED'), 0)::numeric AS matched_amount,
+             COALESCE(sum(l.amount) FILTER (WHERE l.status <> 'MATCHED'), 0)::numeric AS unmatched_amount
+        FROM bank_statement_lines l
+        JOIN bank_statements st ON st.id = l.statement_id
+       WHERE l.bank_account_id = ${bankAccountId}
+         AND (${day}::date IS NULL OR l.txn_date = ${day}::date)
+         AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
+         AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
+         AND (${status}::text IS NULL OR l.status::text = ${status}::text)
+         AND (
+           ${like}::text IS NULL
+           OR l.depositor ILIKE ${like}::text
+           OR l.bank_ref  ILIKE ${like}::text
+           OR l.narration ILIKE ${like}::text
+           OR st.filename ILIKE ${like}::text
+           OR (${amount}::numeric IS NOT NULL AND l.amount = ${amount}::numeric)
+         )
+    `;
+
+    return {
+      lines: rows,
+      pagination: {
+        page: Number(page),
+        limit: size,
+        total: totals.total,
+        pages: Math.max(1, Math.ceil(totals.total / size)),
+      },
+      totals,
+    };
   },
 
   /**

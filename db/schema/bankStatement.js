@@ -64,6 +64,16 @@ const bankStatements = pgTable("bank_statements", {
   uploadedBy: integer("uploaded_by"),
   rowCount: integer("row_count").default(0).notNull(),
   duplicateCount: integer("duplicate_count").default(0).notNull(),
+  /**
+   * Of those duplicates, how many were dropped on the REFERENCE alone.
+   *
+   * A row whose every field matched is an ordinary overlap between two
+   * exports. A row dropped because only its reference was already on record
+   * means this file describes a credit differently from the file that brought
+   * it in — or, when it happens in the hundreds, that the account's reference
+   * column is mapped onto its narration. See migration 0043.
+   */
+  repeatedReferenceCount: integer("repeated_reference_count").default(0).notNull(),
   periodStart: timestamp("period_start", { withTimezone: true }),
   periodEnd: timestamp("period_end", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

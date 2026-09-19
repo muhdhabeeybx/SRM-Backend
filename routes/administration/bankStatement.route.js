@@ -9,6 +9,9 @@ const {
   uploadStatement,
   listStatements,
   statementLines,
+  accountSummary,
+  accountDays,
+  accountLines,
   deleteStatement,
   searchLines,
   matchLines,
@@ -17,6 +20,12 @@ const {
 // The matching pool, queried while confirming a payment.
 router.get("/lines", verifyStaff, searchLines);
 router.post("/match", verifyStaff, validate({ body: misc.matchBankLines }), matchLines);
+
+// Per-bank rollups and the per-day read. Declared above the "/:id" family so
+// a literal segment is never a candidate for the id parameter.
+router.get("/summary", verifyStaff, accountSummary);
+router.get("/accounts/:bankAccountId/days", verifyStaff, accountDays);
+router.get("/accounts/:bankAccountId/lines", verifyStaff, accountLines);
 
 // Per-account statement format.
 router.get("/mapping/:bankAccountId", verifyStaff, getMapping);
