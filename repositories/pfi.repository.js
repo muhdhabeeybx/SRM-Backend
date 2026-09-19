@@ -254,22 +254,59 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
     const pending = current.pendingBatch;
     if (pending && Array.isArray(pending.trucks) && pending.trucks.length) {
       const code = String(pending.code || "").trim().toUpperCase().replace(/\s+/g, "-");
+      let loadedTotal = 0;
+
       for (const truck of pending.trucks) {
+        const loaded = Number(truck.loadedQty) || 0;
+        loadedTotal += loaded;
         await tx.insert(deliveryInventory).values({
           allocationCode: code,
+          // Stamped so the batch names its PFI rather than the two being
+          // joinable only through a code somebody typed.
+          pfiId,
+          pfiNumber: current.pfiNumber || "",
           truckId: truck.truckId != null ? Number(truck.truckId) : null,
           truckNumber: truck.plateNumber || "",
           depot: pending.depotName || "",
           pfiProduct: pending.productName || "",
-          quantityAllocated: Number(truck.loadedQty) || 0,
+          quantityAllocated: loaded,
           dateAllocated: pending.dateAllocated || null,
           loadingStatus: "loaded",
         });
       }
-      batch = { code, trucks: pending.trucks.length };
+
+      /**
+       * The trucks have loaded, so that product has left. Deduct it.
+       *
+       * Nothing else would. sold_qty_litres is raised by reserveStock, which
+       * is called from the ORDER path alone — a trucking batch sells through
+       * the delivery ledger and never places an order, so without this its
+       * whole quantity would read as available stock forever, and every
+       * "PMS remaining" tile would count product already on the road.
+       *
+       * The TRUCKS' total is deducted, not the batch's stated quantity: if a
+       * batch of 100,000 loads 92,300 the remaining 7,700 is genuinely still
+       * in the tank, and saying otherwise would lose it.
+       *
+       * Raised directly rather than through reserveStock, which refuses
+       * unless the PFI is already active — and this is the transaction that
+       * makes it active.
+       */
+      if (loadedTotal > 0) {
+        await tx
+          .update(pfis)
+          .set({
+            soldQtyLitres: sql`LEAST(${pfis.soldQtyLitres} + ${loadedTotal}, ${pfis.startingQtyLitres})`,
+            updatedAt: new Date(),
+          })
+          .where(eq(pfis.id, pfiId));
+      }
+
+      batch = { code, trucks: pending.trucks.length, loadedTotal };
     }
 
-    return { pfi, batch };
+    const [finalPfi] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).limit(1);
+    return { pfi: finalPfi || pfi, batch };
   });
 };
 
@@ -408,7 +445,30 @@ const trucksFor = async (pfiId) => {
      WHERE pt.pfi_id = ${Number(pfiId)}
      ORDER BY pt.loaded_at ASC NULLS LAST, pt.id ASC
   `));
-  return rows;
+  if (rows.length) return rows;
+
+  /**
+   * A trucking batch keeps its trucks in delivery_inventory, not pfi_trucks.
+   *
+   * pfi_trucks is a manifest somebody types on a delivery PFI; a trucking
+   * batch's trucks ARE delivery rows, written by activation, and duplicating
+   * them into a second table would give the batch two truck lists that could
+   * disagree. So the same endpoint answers from wherever the trucks actually
+   * are, and the detail screen does not have to know which type it is looking
+   * at.
+   *
+   * Only reached when pfi_trucks is empty, so a delivery PFI with a manifest
+   * is unaffected.
+   */
+  return rowsOf(await db.execute(sql`
+    SELECT di.id, di.truck_id AS "truckId", di.truck_number AS "plateNumber",
+           NULL::numeric AS "capacity", di.quantity_allocated AS "loadedQty",
+           di.date_allocated AS "loadedAt", di.loading_status AS notes,
+           NULL::numeric AS "shortBy"
+      FROM delivery_inventory di
+     WHERE di.pfi_id = ${Number(pfiId)}
+     ORDER BY di.id ASC
+  `));
 };
 
 /**

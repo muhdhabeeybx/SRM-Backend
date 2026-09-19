@@ -180,6 +180,72 @@ describe("PFI review gate — raised, then reviewed, then trading", () => {
     await db.delete(deliveryInventory).where(eq(deliveryInventory.allocationCode, code));
   });
 
+  test("the trucks' load comes off the batch's stock, and only the trucks' load", async () => {
+    /**
+     * Nothing else would deduct it. sold_qty_litres is raised by reserveStock,
+     * which is called from the ORDER path alone — a trucking batch sells
+     * through the delivery ledger and never places an order — so without this
+     * its whole quantity would read as available stock forever.
+     *
+     * A batch of 100,000 whose trucks take 92,300 keeps 7,700: that product is
+     * genuinely still in the tank, and deducting the batch's stated quantity
+     * instead of the trucks' would lose it.
+     */
+    const code = `TRKSTK-${RUN}`;
+    await raise({
+      pfiNumber: `PFI/GATE/S/${RUN}`,
+      pfiType: "trucking",
+      startingQtyLitres: 100000,
+      batch: {
+        code,
+        depotName: "Calabar",
+        dateAllocated: "2026-09-19",
+        trucks: [
+          { plateNumber: `AAA-${RUN}`, loadedQty: 45000 },
+          { plateNumber: `BBB-${RUN}`, loadedQty: 47300 },
+        ],
+      },
+    });
+
+    const [row] = await db.select().from(pfis).where(eq(pfis.pfiNumber, `PFI/GATE/S/${RUN}`));
+    assert.equal(Number(row.soldQtyLitres), 0, "nothing is sold before it is approved");
+
+    await request(app)
+      .post(`${API}/${row.id}/activate`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        bankAccountIds: [account.id],
+        officers: { auditOfficerId: audit.id, salesManagerId: finance.id },
+      });
+
+    const [after] = await db.select().from(pfis).where(eq(pfis.id, row.id));
+    assert.equal(Number(after.soldQtyLitres), 92300, "the trucks' load, not the batch's quantity");
+    assert.equal(
+      Number(after.startingQtyLitres) - Number(after.soldQtyLitres),
+      7700,
+      "what the trucks did not take is still stock",
+    );
+
+    // The rows name their PFI, so the batch and the cargo are joined by more
+    // than a code somebody typed.
+    const written = await db
+      .select()
+      .from(deliveryInventory)
+      .where(eq(deliveryInventory.allocationCode, code));
+    assert.equal(written.length, 2);
+    assert.ok(written.every((t) => Number(t.pfiId) === Number(row.id)));
+
+    // And the PFI can report its own trucks, from wherever they actually live.
+    const trucks = await request(app)
+      .get(`${API}/${row.id}/trucks`)
+      .set("Authorization", `Bearer ${token}`);
+    assert.equal(trucks.status, 200);
+    assert.equal(trucks.body.data.trucks.length, 2);
+    assert.equal(trucks.body.data.loadedTotal, 92300);
+
+    await db.delete(deliveryInventory).where(eq(deliveryInventory.allocationCode, code));
+  });
+
   test("an already-active PFI cannot be activated twice", async () => {
     const [row] = await db.select().from(pfis).where(eq(pfis.pfiNumber, `PFI/GATE/A/${RUN}`));
     const res = await request(app)
