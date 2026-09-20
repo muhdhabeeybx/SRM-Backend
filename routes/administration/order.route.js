@@ -23,6 +23,7 @@ const {
   getPayableOrders,
   confirmOrderPayment,
   getOrderPayments,
+  getOrderTimeline,
   removeOrderPayment,
   transferOrderPayment,
   reverseOrderPaymentTransfer,
@@ -114,6 +115,16 @@ router.get(
   authenticateStaff,
   validate({ params: orderSchemas.idParam }),
   getOrderPayments
+);
+
+// The order's full history, read back out of audit_logs. A read, gated like
+// every other read on this router (verifyStaff) — seeing what happened is not
+// a finance act, and a desk that cannot see the trail keeps phoning one that can.
+router.get(
+  "/:id/timeline",
+  verifyStaff,
+  validate({ params: orderSchemas.idParam }),
+  getOrderTimeline
 );
 
 // Correcting a mis-matched payment: the row goes, its statement line returns

@@ -1311,6 +1311,29 @@ const updateOrder = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * The whole life of one order, oldest first.
+ *
+ * Reads back what the system has been writing all along. Every desk already
+ * records what it does — a release, a payment matched or unmatched, a plate
+ * corrected at the gate, each truck in and out — but until now nothing ever
+ * read audit_logs, so the record existed and no one could see it. This is the
+ * read side of that trail, and nothing new is written to produce it.
+ *
+ * Returned raw rather than pre-rendered into sentences: the phrasing belongs to
+ * the page, and a label baked in here would be one the UI could not change.
+ * `truckNumber` is non-null exactly on the truck events, which is how a caller
+ * groups the stream by truck without parsing `action`.
+ */
+const getOrderTimeline = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const order = await orderRepo.findById(orderId);
+  if (!order) throw httpErr(404, "Order not found");
+
+  const events = await auditLogRepo.findOrderTimeline(orderId);
+  res.json({ success: true, data: { events } });
+});
+
 module.exports = {
   getOrders,
   getOrderById,
@@ -1329,6 +1352,7 @@ module.exports = {
   deleteOrder,
   confirmOrderPayment,
   getOrderPayments,
+  getOrderTimeline,
   removeOrderPayment,
   transferOrderPayment,
   reverseOrderPaymentTransfer,
