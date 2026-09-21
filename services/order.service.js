@@ -1194,6 +1194,26 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
     // expectedTrucks is editable after the fact on purpose: 55 live orders were
     // raised before the column existed, and the haulage on an order genuinely
     // changes. Setting it is how the desk turns "3 ticketed" into "3 of 6".
+    /**
+     * An unpriced order is priced in one place only: POST /orders/:id/price.
+     *
+     * Typing a figure into the edit form would reach the same columns and skip
+     * everything that act exists to do — the pricing_status flag would stay
+     * 'pending' over a real price, no invoice would go to the customer, and the
+     * reason and the name that agreed it would never be recorded. The edit is
+     * refused outright rather than silently rerouted, so the desk learns where
+     * the price actually gets set. Every other field stays editable.
+     */
+    if (
+      order.pricingStatus === "pending" &&
+      (patch.price !== undefined || patch.totalAmount !== undefined)
+    ) {
+      throw httpError(
+        409,
+        "This order has no price yet — set it with Set price on the order page, which also sends the customer the invoice.",
+      );
+    }
+
     for (const field of ["price", "totalAmount", "companyName", "deliveryAddress", "expectedTrucks"]) {
       if (patch[field] === undefined) continue;
       if (String(order[field]) !== String(patch[field])) {

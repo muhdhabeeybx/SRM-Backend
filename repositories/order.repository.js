@@ -1,4 +1,4 @@
-const { eq, and, or, ilike, inArray, notInArray, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
+const { eq, ne, and, or, ilike, inArray, notInArray, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const {
   orders, customers, depots, products, pfis, orderTrucks,
@@ -1547,6 +1547,14 @@ const findPayableOrders = async (scopeUser) => {
     // A part-paid order has already been released, so restricting to Pending
     // would exclude every one of them.
     inArray(orders.status, ["Pending", "Paid", "Released", "Loading"]),
+    /**
+     * Not an unpriced order. This is the desk that matches bank lines to what
+     * is owed, and an unpriced order owes a figure nobody has agreed — it would
+     * sit here as "₦0 due" and every attempt to match a payment to it is
+     * refused (orderPayment.service assertPriced). It lives on the receivables
+     * list until it is priced, and arrives here the moment it is.
+     */
+    ne(orders.pricingStatus, "pending"),
   ];
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);

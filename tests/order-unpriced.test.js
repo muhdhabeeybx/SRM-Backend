@@ -353,6 +353,54 @@ describe("an order raised with no price", () => {
     );
   });
 
+  test("its price cannot be typed in through the edit form", async () => {
+    const created = await raise(finance.accessToken, {
+      quantity: 37000,
+      unpriced: { reason: "Edit guard" },
+    });
+    const orderId = created.body.data.order.id;
+
+    const res = await request(app)
+      .patch(`/api/orders/${orderId}`)
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .send({ price: "250.00" });
+    assert.equal(res.status, 409, "Set price is the only way — it is also what sends the invoice");
+
+    // Every other field is still editable.
+    const other = await request(app)
+      .patch(`/api/orders/${orderId}`)
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .send({ companyName: "Renamed Co" });
+    assert.equal(other.status, 200, JSON.stringify(other.body));
+  });
+
+  test("it is not on the payment desk until it is priced", async () => {
+    const created = await raise(finance.accessToken, {
+      quantity: 38000,
+      unpriced: { reason: "Payable guard" },
+    });
+    const orderId = created.body.data.order.id;
+
+    const before = await request(app)
+      .get("/api/orders/payable")
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .expect(200);
+    const listed = (res) => JSON.stringify(res.body).includes(`"id":${orderId},`);
+    assert.equal(listed(before), false, "no ₦0-due row the desk cannot act on");
+
+    await request(app)
+      .post(`/api/orders/${orderId}/price`)
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .send({ price: 300, reason: "Agreed" })
+      .expect(200);
+
+    const after = await request(app)
+      .get("/api/orders/payable")
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .expect(200);
+    assert.equal(listed(after), true, "and arrives the moment it has a figure to collect");
+  });
+
   test("an ordinary order is completely unaffected", async () => {
     // A distinct quantity: placeOrder de-duplicates recent identical orders, so
     // reusing 30000 here returns one of the unpriced orders above instead of
