@@ -168,6 +168,46 @@ describe("overpayment refunds", () => {
     await refundService.cancelRefund({ refundId: Number(paid.id), reason: "cleanup" });
   });
 
+  test("a transfer and a refund cannot spend the same surplus", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+
+    /*
+     * The one way two live routes out of surplus could go wrong: request a
+     * refund, move the money to another order, then mark the refund paid —
+     * paying out money the order no longer holds and leaving it short.
+     *
+     * Both read the same payment rows, and marking paid re-checks inside the
+     * locked transaction rather than trusting the figure the request was
+     * raised at.
+     */
+    const donor = await seedOrder(1000000, 1300000);   // ₦300,000 over
+    const receiver = await seedOrder(1000000, 400000); // needs ₦600,000
+    try {
+      const refund = await refundService.requestRefund({
+        orderId: donor,
+        destinationBank: "GTBank", destinationName: "Test", destinationNumber: "0123456789",
+      });
+      assert.equal(Number(refund.amount), 300000);
+
+      // The surplus leaves by the other route.
+      await orderPaymentService.transferSurplus({
+        fromOrderId: donor, toOrderId: receiver, amount: 300000, reason: "moved before the refund was paid",
+      });
+      assert.equal((await refundService.realSurplus(donor)).surplus, 0);
+
+      await assert.rejects(
+        () => refundService.markRefunded({ refundId: refund.id, paidFromAccountId: accountId }),
+        (e) => e.status === 409,
+        "paying this out would leave the order short by money that has already moved",
+      );
+    } finally {
+      await client`DELETE FROM order_payments WHERE order_id IN (${donor}, ${receiver})`;
+      await client`DELETE FROM order_payment_transfers WHERE from_order_id = ${donor}`;
+      await client`DELETE FROM order_refunds WHERE order_id = ${donor}`;
+      await client`DELETE FROM orders WHERE id IN (${donor}, ${receiver})`;
+    }
+  });
+
   test("an order holding nothing extra cannot raise a refund", async (t) => {
     if (!ready) return t.skip("schema or fixtures unavailable");
     const square = await seedOrder(500000, 500000);
@@ -193,20 +233,26 @@ describe("overpayment refunds", () => {
   });
 });
 
-describe("transfers between orders are switched off", () => {
+describe("transfers and refunds run side by side", () => {
   after(async () => { await closeDb(); });
 
-  test("the endpoint answers 410 and names the replacement", async () => {
+  test("moving surplus between orders still works", async () => {
+    /*
+     * Both destinations for surplus are live: onto another order, or back to
+     * the customer. This pins that adding refunds did not retire transfers —
+     * the endpoint was briefly switched off and is deliberately back.
+     */
     const token = await staffToken(request, app);
     const [o] = await client`SELECT id FROM orders ORDER BY id DESC LIMIT 1`;
     const res = await request(app)
       .post(`/api/orders/${o.id}/payments/transfer`)
       .set("Authorization", `Bearer ${token}`)
-      .send({ toOrderId: Number(o.id), amount: 1, reason: "should not work" });
+      .send({ toOrderId: Number(o.id), amount: 1, reason: "same order on purpose" });
 
-    // 410, not 404: the route is gone on purpose and says what replaced it.
-    assert.equal(res.status, 410, JSON.stringify(res.body));
-    assert.match(res.body.message, /refund/i);
+    // Reachable, and refused on its own merits — an order cannot transfer to
+    // itself — rather than with the 410 that meant the route was gone.
+    assert.notEqual(res.status, 410, "the transfer endpoint must not be retired");
+    assert.ok(res.status === 400 || res.status === 409, `expected a validation refusal, got ${res.status}`);
   });
 
   test("the refunds endpoints are reachable", async () => {

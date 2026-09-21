@@ -183,11 +183,9 @@ router.delete(
   removeOrderPayment
 );
 
-// Retired: moving surplus between orders. Kept mounted so callers get a 410
-// that names the replacement rather than a bare 404.
+// Move this order's surplus to another order. Runs alongside refunds — see
+// the controller for why both exist.
 router.post(
-  // Answers 410. Overpayment is refunded to the customer now — see the
-  // controller, and services/orderRefund.service.js.
   "/:id/payments/transfer",
   authenticateStaff,
   requireRole("finance", "super_admin", { message: "Finance access required to move money between orders" }),

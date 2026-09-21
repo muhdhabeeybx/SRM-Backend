@@ -862,26 +862,30 @@ const removeOrderPayment = asyncHandler(async (req, res) => {
 });
 
 /**
- * Moving surplus between orders — switched off.
+ * Move surplus from this order to another one.
  *
- * Overpayment now goes back to the customer through the refunds page
- * (services/orderRefund.service.js) rather than being moved onto another
- * order. A refusal here rather than only a hidden button: the endpoint
- * answered any signed-in caller, so removing the UI alone would leave it one
- * devtools tab away, and a transfer recorded after the cutover would be money
- * moved by a route nobody is reconciling any more.
+ * Live alongside refunds, deliberately. Surplus has two honest destinations —
+ * back to the customer, or onto another order they are buying — and which one
+ * applies is a decision the desk makes per case, not one the system should
+ * make for them.
  *
- * 410 rather than 404 — the same answer POST /deposits gives for the wallet
- * path it replaced. The route is gone on purpose, and says so.
- *
- * The 72 transfers already made are untouched: the finance report is audited
- * against them, and reversing and reviewing them both still work.
+ * The two cannot both claim the same money: a transfer moves it off this
+ * order, so the refundable figure falls with it, and a refund takes it out of
+ * what a transfer could move. Both are computed from the same payment rows.
  */
-const transferOrderPayment = asyncHandler(async (_req, res) => {
-  res.status(410).json({
-    success: false,
-    message:
-      "Surplus is no longer moved between orders. Refund the overpayment to the customer from Finance → Overpayment refunds.",
+const transferOrderPayment = asyncHandler(async (req, res) => {
+  const result = await orderPaymentService.transferSurplus({
+    fromOrderId: Number(req.params.id),
+    toOrderId: Number(req.body.toOrderId),
+    amount: Number(req.body.amount),
+    reason: req.body.reason,
+    staffId: req.user.id,
+  });
+
+  res.json({
+    success: true,
+    message: `₦${Number(req.body.amount).toLocaleString()} moved to the destination order. Both orders now show the movement.`,
+    data: result,
   });
 });
 
