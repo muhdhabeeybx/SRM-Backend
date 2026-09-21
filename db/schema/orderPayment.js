@@ -63,7 +63,7 @@ const orderPaymentTransfers = pgTable(
 );
 
 /**
- * Overpayment sent back to the customer — see db/migrations/0043.
+ * Overpayment sent back to the customer — see db/migrations/0050.
  *
  * Requested, then refunded. The request changes nothing about the order: its
  * surplus still shows, because the money is still with us. Only marking it

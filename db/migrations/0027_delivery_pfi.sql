@@ -44,10 +44,30 @@
 -- Dropped and recreated rather than skipped when present, so a database that
 -- already holds the two-value constraint is corrected by re-running this file.
 
-ALTER TABLE pfis DROP CONSTRAINT IF EXISTS pfis_pfi_type_check;
-ALTER TABLE pfis
-  ADD CONSTRAINT pfis_pfi_type_check
-  CHECK (pfi_type IN ('coastal', 'gantry', 'delivery'));
+--
+-- ── Re-running this must not narrow a list a later migration widened ──────
+--
+-- Every hand-written migration here is re-run in full by
+-- scripts/apply-unjournaled-migrations.js, so each has to be convergent and
+-- not merely idempotent. 0045 added a fourth type, 'trucking'. Once a batch
+-- of trucks exists, dropping and recreating the three-value constraint fails
+-- against those rows — and because the applier runs the files in order, the
+-- whole chain stops HERE, so a later migration (0050) never gets applied.
+-- That is a broken deploy caused by a file that has been applied for months.
+--
+-- So: correct a database still holding the two-value constraint, and leave a
+-- widened one alone.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pfis WHERE pfi_type NOT IN ('coastal', 'gantry', 'delivery')) THEN
+    RAISE NOTICE 'pfis_pfi_type_check left alone — a later migration has widened it';
+  ELSE
+    ALTER TABLE pfis DROP CONSTRAINT IF EXISTS pfis_pfi_type_check;
+    ALTER TABLE pfis
+      ADD CONSTRAINT pfis_pfi_type_check
+      CHECK (pfi_type IN ('coastal', 'gantry', 'delivery'));
+  END IF;
+END $$;
 
 -- ── 2. Where a delivery batch is loaded from ──────────────────────────────
 --
@@ -126,13 +146,24 @@ END $$;
 -- Nothing above touches an existing row: the two tables are new and the only
 -- change to `pfis` widens a CHECK. Both existing types must still be legal,
 -- and all 44 existing batches must still satisfy the constraint.
+--
+-- Checked against the constraint the table actually carries, not against this
+-- file's own list. On a database where 0045 has since widened the list, a
+-- trucking batch is legal and failing here would stop the chain on a file
+-- that changed nothing — see the note on the constraint above.
 
 DO $$
 DECLARE
   bad INTEGER;
 BEGIN
   SELECT COUNT(*) INTO bad
-    FROM pfis WHERE pfi_type NOT IN ('coastal', 'gantry', 'delivery');
+    FROM pfis p
+   WHERE p.pfi_type NOT IN ('coastal', 'gantry', 'delivery')
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint c
+        WHERE c.conname = 'pfis_pfi_type_check'
+          AND pg_get_constraintdef(c.oid) LIKE '%' || p.pfi_type || '%'
+     );
 
   IF bad > 0 THEN
     RAISE EXCEPTION 'Migration 0027 left % PFI row(s) outside the type constraint. Rolling back.', bad;
