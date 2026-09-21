@@ -114,6 +114,29 @@ const summarize = (orderTotal, rows) => {
  * in September must not drag an order out of the August report it belongs to.
  * It is cleared only when the last payment is removed.
  */
+/**
+ * Money cannot land on an order nobody has priced.
+ *
+ * Lives here, at the two places a payment row is actually written, rather than
+ * in a controller — because there is more than one way in. The confirm-payment
+ * route was guarded first, but surplus moved in from another order reaches the
+ * same insert, and so will anything that matches statement lines automatically.
+ * A guard on one door of a room with three is not a guard.
+ *
+ * The reason it matters: an unpriced order's total is a placeholder zero, so
+ * recomputeOrder would read any money at all as a full settlement plus surplus
+ * — marking it Paid, lifting it off the receivables list, and making the
+ * placeholder look like an agreed price of nothing.
+ */
+function assertPriced(order) {
+  if (order?.pricingStatus === "pending") {
+    throw httpError(
+      409,
+      `${order.orderNumber || "This order"} has no price yet. Set its price first — otherwise the money lands as surplus on a zero-value order and it reads as settled.`,
+    );
+  }
+}
+
 const recomputeOrder = async (orderId, tx) => {
   const [order] = await tx
     .select({
@@ -184,11 +207,17 @@ const recordFromStatementLines = async (
 
   const run = async (trx) => {
     const [order] = await trx
-      .select({ id: orders.id, orderNumber: orders.orderNumber, status: orders.status })
+      .select({
+        id: orders.id,
+        orderNumber: orders.orderNumber,
+        status: orders.status,
+        pricingStatus: orders.pricingStatus,
+      })
       .from(orders)
       .where(eq(orders.id, orderId))
       .limit(1);
     if (!order) throw httpError(404, "Order not found");
+    assertPriced(order);
 
     const bankAccount = await bankAccountRepo.findById(bankAccountId);
 
@@ -385,6 +414,7 @@ const transferSurplus = async (
         // Read under the same lock as the money, so the release decision below
         // cannot act on a status another transaction has since moved.
         status: orders.status,
+        pricingStatus: orders.pricingStatus,
       })
       .from(orders)
       .where(inArray(orders.id, ids))
@@ -395,6 +425,9 @@ const transferSurplus = async (
     const to = locked.find((o) => o.id === Number(toOrderId));
     if (!from) throw httpError(404, "The order the money is coming from was not found");
     if (!to) throw httpError(404, "The order the money is going to was not found");
+    // Only the RECEIVING side needs a price. Moving surplus off an unpriced
+    // order is impossible anyway — it has taken no money to have a surplus of.
+    assertPriced(to);
 
     const fromRows = await trx
       .select({ amount: orderPayments.amount, source: orderPayments.source })

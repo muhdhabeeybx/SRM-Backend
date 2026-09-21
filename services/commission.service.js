@@ -102,6 +102,17 @@ async function createForOrder(orderId) {
   // Already settled: leave it exactly as it was paid out.
   if (existing && existing.status === "paid") return existing;
 
+  /**
+   * Nothing is due on an order nobody has priced.
+   *
+   * Commission is earned on litres that were PAID for, and an unpriced order
+   * cannot take a payment. It could still reach here through the finance
+   * reconcile endpoint, and commissionQuantity would have read its zero total
+   * as "fully paid" (0 >= 0) and paid out on every truck. The next payment
+   * after it is priced creates the row, the normal way.
+   */
+  if (order.pricingStatus === "pending") return existing || null;
+
   const quantity = await commissionQuantity(order);
   // The table requires a positive quantity, and a first instalment too small to
   // buy a whole litre has nothing to compute on yet. The next payment creates it.
@@ -206,7 +217,8 @@ async function createForOrder(orderId) {
 async function commissionQuantity(order) {
   const total = Number(order.totalAmount);
   const paid = Number(order.amountPaid ?? 0);
-  const fullyPaid = Math.round(paid * 100) >= Math.round(total * 100);
+  // A zero total is not a settled one — see createForOrder's unpriced guard.
+  const fullyPaid = total > 0 && Math.round(paid * 100) >= Math.round(total * 100);
 
   if (!fullyPaid) {
     const price = Number(order.price);

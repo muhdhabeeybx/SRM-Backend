@@ -138,7 +138,20 @@ function releasableQuantity(order) {
    * forgets amount_paid degrades to today's behaviour instead of silently
    * bricking the ticketing desk.
    */
-  if (order.paymentStatus === "Paid" || paid >= total) return quantity;
+  /**
+   * "Paid in full" requires there to be something to have paid.
+   *
+   * This read `paid >= total` alone, which is true of every order whose total
+   * is zero — and an order raised with no agreed price has a placeholder total
+   * of exactly zero. So 0 >= 0 released its FULL quantity whatever its credit
+   * allowance said: lowering the allowance changed nothing, withdrawing it
+   * changed nothing, and the credit gate was bypassed on precisely the orders
+   * it exists for. An unpriced order can never be settled by arithmetic, only
+   * by being priced and then paid, so it falls through to the allowance below.
+   */
+  if (order.pricingStatus !== "pending") {
+    if (order.paymentStatus === "Paid" || (total > 0 && paid >= total)) return quantity;
+  }
 
   /**
    * A priceless order releases only what it was trusted for.

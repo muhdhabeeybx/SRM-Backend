@@ -301,6 +301,58 @@ describe("an order raised with no price", () => {
     assert.equal(again.status, 409, "repricing is a different act with its own trail");
   });
 
+  /**
+   * The bug this caught: releasableQuantity read `paid >= total` as "settled",
+   * and on an unpriced order that is 0 >= 0 — so it released the full quantity
+   * whatever the allowance said, and lowering the allowance changed nothing.
+   */
+  test("lowering the allowance on an unpriced order actually lowers what can load", async () => {
+    const created = await raise(finance.accessToken, {
+      quantity: 35000,
+      unpriced: { reason: "Allowance ceiling" },
+    });
+    const orderId = created.body.data.order.id;
+
+    await request(app)
+      .post(`/api/orders/${orderId}/credit-release`)
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .send({ quantity: 10000, reason: "Only one truck agreed for now" })
+      .expect(200);
+
+    const order = await orderRepo.findByIdFull(orderId);
+    assert.equal(releasableQuantity(order), 10000, "the allowance is the ceiling, not the order size");
+
+    const over = await request(app)
+      .post(`/api/orders/${orderId}/generate-tickets`)
+      .set("Authorization", `Bearer ${ticketing.accessToken}`)
+      .send({
+        trucks: [{ quantity: 20000, truckNumber: `CEIL-${RUN}`, driverName: "A", driverPhone: "1" }],
+      });
+    assert.equal(over.status, 400, "past the allowance is refused");
+    assert.match(over.body.message, /unpriced order was released for/, "and says which allowance ran out");
+  });
+
+  test("surplus cannot be moved onto an unpriced order either", async () => {
+    const created = await raise(finance.accessToken, {
+      quantity: 36000,
+      unpriced: { reason: "Transfer guard" },
+    });
+    const orderPaymentService = require("../services/orderPayment.service");
+    const [donor] = await db.select().from(require("../db/schema").orders).limit(1);
+
+    await assert.rejects(
+      () =>
+        orderPaymentService.transferSurplus({
+          fromOrderId: donor.id,
+          toOrderId: created.body.data.order.id,
+          amount: 1000,
+          reason: "should be refused",
+        }),
+      (err) => err.status === 409 && /has no price yet/.test(err.message),
+      "the second door into the same room is guarded too",
+    );
+  });
+
   test("an ordinary order is completely unaffected", async () => {
     // A distinct quantity: placeOrder de-duplicates recent identical orders, so
     // reusing 30000 here returns one of the unpriced orders above instead of

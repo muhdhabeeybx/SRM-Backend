@@ -1014,9 +1014,35 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
       // unpaid balance is finance's. Saying "exceeds order quantity" for the
       // second would send the desk hunting for a truck that isn't the issue.
       if (partPaid) {
+        /**
+         * Say which allowance ran out, because they are different people's to
+         * fix. "Paid for" was the only source of permission when this was
+         * written; with a credit allowance in the ceiling too, telling the desk
+         * a credit-released order "exceeds the quantity paid for" would send
+         * them chasing a payment nobody expected yet — and on an unpriced order
+         * the "₦ still outstanding" figure is a placeholder zero.
+         */
+        const credit = Number(order.creditQty ?? 0);
+        const requested = (alreadyTicketed + incoming).toLocaleString();
+        const ordered = Number(order.quantity).toLocaleString();
+        const ticketedNote = `${alreadyTicketed.toLocaleString()} already ticketed`;
+        const balance = Number(order.totalAmount) - Number(order.amountPaid ?? 0);
+
+        if (order.pricingStatus === "pending") {
+          throw httpErr(
+            400,
+            `Exceeds what this unpriced order was released for: ${requested} requested against ${capacity.toLocaleString()} authorised of ${ordered} ordered (${ticketedNote}). Finance can raise the allowance on the order page.`,
+          );
+        }
+        if (credit > 0) {
+          throw httpErr(
+            400,
+            `Exceeds what is paid for plus the credit allowed: ${requested} requested against ${capacity.toLocaleString()} releasable of ${ordered} ordered — ${credit.toLocaleString()} of it on credit (${ticketedNote}). ₦${balance.toLocaleString()} is still outstanding.`,
+          );
+        }
         throw httpErr(
           400,
-          `Exceeds the quantity paid for: ${(alreadyTicketed + incoming).toLocaleString()} requested against ${capacity.toLocaleString()} paid for of ${Number(order.quantity).toLocaleString()} ordered (${alreadyTicketed.toLocaleString()} already ticketed). ₦${(Number(order.totalAmount) - Number(order.amountPaid ?? 0)).toLocaleString()} is still outstanding.`,
+          `Exceeds the quantity paid for: ${requested} requested against ${capacity.toLocaleString()} paid for of ${ordered} ordered (${ticketedNote}). ₦${balance.toLocaleString()} is still outstanding.`,
         );
       }
       throw httpErr(400, `Exceeds order quantity: ${(alreadyTicketed + incoming).toLocaleString()} requested against ${capacity.toLocaleString()} ordered (${alreadyTicketed.toLocaleString()} already ticketed)`);
