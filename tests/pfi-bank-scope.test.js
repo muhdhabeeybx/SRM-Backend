@@ -6,13 +6,128 @@ const assert = require("node:assert/strict");
 const scope = require("../lib/pfiBankScope");
 const orderPaymentService = require("../services/orderPayment.service");
 const { client } = require("../config/db");
-const { closeDb } = require("./helpers");
+const { closeDb, staffToken, staffTokenWithRoles } = require("./helpers");
+const request = require("supertest");
+const app = require("../app");
 
 /**
  * A PFI collects into its own accounts, and a person confined to a PFI sees
  * that PFI's world and nothing else. Both enforced on the server — the screens
  * narrowing their dropdowns is a convenience; this is the rule.
  */
+describe("assigning a PFI's collection accounts, from the PFI's side", () => {
+  const RUN = Date.now();
+  let pfi, other, a1, a2, inactive, token, scopedToken, scopedStaffId;
+  let ready = false;
+
+  const accountsOf = async (id) =>
+    (await client`
+      SELECT id FROM bank_accounts
+       WHERE jsonb_typeof(pfi_ids) = 'array' AND pfi_ids @> ${JSON.stringify([id])}::jsonb
+       ORDER BY id`).map((r) => Number(r.id));
+
+  before(async () => {
+    try {
+      const mk = async (n) => {
+        const [p] = await client`
+          INSERT INTO pfis (pfi_number, pfi_type, status, starting_qty_litres, unit_price)
+          VALUES (${`ASSIGN/${n}/${RUN}`}, 'coastal', 'active', 1000, '300') RETURNING id`;
+        return Number(p.id);
+      };
+      pfi = await mk("P");
+      other = await mk("O");
+      const acct = async (status, pfiIds) => {
+        const [a] = await client`
+          INSERT INTO bank_accounts (bank_name, account_name, account_number, status, pfi_ids)
+          VALUES ('Assign Bank', ${"Assign " + RUN}, ${String(Math.floor(Math.random() * 1e10)).padStart(10, "0")},
+                  ${status}, ${JSON.stringify(pfiIds)}::jsonb)
+          RETURNING id`;
+        return Number(a.id);
+      };
+      // a1 already serves another PFI — that must survive every change here.
+      a1 = await acct("Active", [other]);
+      a2 = await acct("Active", []);
+      inactive = await acct("Inactive", []);
+
+      token = await staffToken(request, app);
+
+      // A real, genuinely confined person: no "see all locations", one PFI.
+      const scoped = await staffTokenWithRoles(["finance"], `scope-${RUN}@soroman.test`);
+      scopedStaffId = Number(scoped.staff.id);
+      scopedToken = scoped.accessToken;
+      await client`UPDATE staff SET can_view_all_locations = false WHERE id = ${scopedStaffId}`;
+      await client`INSERT INTO pfi_staff (pfi_id, staff_id) VALUES (${other}, ${scopedStaffId})`;
+      ready = true;
+    } catch (e) {
+      console.error("assignment fixtures unavailable:", e.message);
+    }
+  });
+
+  after(async () => {
+    if (!ready) return;
+    await client`DELETE FROM pfi_staff WHERE staff_id = ${scopedStaffId}`;
+    await client`DELETE FROM audit_logs WHERE entity_type = 'pfi' AND entity_id = ANY(${[pfi, other]})`;
+    await client`DELETE FROM bank_accounts WHERE id = ANY(${[a1, a2, inactive]})`;
+    await client`DELETE FROM pfis WHERE id = ANY(${[pfi, other]})`;
+  });
+
+  const put = (ids, t = token) =>
+    request(app).put(`/api/bank-accounts/for-pfi/${pfi}`)
+      .set("Authorization", `Bearer ${t}`).send({ bankAccountIds: ids });
+
+  test("the list sent is the whole answer", async (t) => {
+    if (!ready) return t.skip("fixtures unavailable");
+    const res = await put([a1, a2]);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(await accountsOf(pfi), [a1, a2].sort((x, y) => x - y));
+
+    const one = await put([a2]);
+    assert.equal(one.status, 200);
+    assert.deepEqual(await accountsOf(pfi), [a2], "a1 no longer collects for it");
+  });
+
+  test("taking a PFI off an account never disturbs that account's other PFIs", async (t) => {
+    if (!ready) return t.skip("fixtures unavailable");
+    assert.deepEqual(await accountsOf(other), [a1], "a1 still collects for the other PFI");
+  });
+
+  test("an empty list takes the PFI off every account", async (t) => {
+    if (!ready) return t.skip("fixtures unavailable");
+    const res = await put([]);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await accountsOf(pfi), []);
+  });
+
+  test("an inactive account cannot be assigned, and nothing is half-written", async (t) => {
+    if (!ready) return t.skip("fixtures unavailable");
+    await put([a2]);
+    const res = await put([a1, inactive]);
+    assert.equal(res.status, 400);
+    assert.deepEqual(await accountsOf(pfi), [a2], "refused as a whole — a1 was not added");
+  });
+
+  test("a person confined to a PFI cannot reassign where money lands", async (t) => {
+    if (!ready) return t.skip("fixtures unavailable");
+    const res = await put([a1], scopedToken);
+    assert.equal(res.status, 403);
+  });
+
+  test("and over HTTP they see their PFI's account and no other", async (t) => {
+    if (!ready) return t.skip("fixtures unavailable");
+    const res = await request(app).get("/api/bank-accounts")
+      .set("Authorization", `Bearer ${scopedToken}`);
+    assert.equal(res.status, 200);
+    const ids = res.body.data.bankAccounts.map((b) => Number(b.id));
+    assert.ok(ids.includes(a1), "their PFI's account");
+    assert.ok(!ids.includes(a2), "not an account on another PFI");
+    assert.ok(!ids.includes(inactive), "not an unassigned one");
+
+    const hidden = await request(app).get(`/api/bank-accounts/${a2}`)
+      .set("Authorization", `Bearer ${scopedToken}`);
+    assert.equal(hidden.status, 404, "outside their PFI, it does not exist");
+  });
+});
+
 describe("PFI bank scope", () => {
   const RUN = Date.now();
   let pfiA, pfiB, pfiBare, accountA, accountA2, accountB, orderA, orderBare, lineB;

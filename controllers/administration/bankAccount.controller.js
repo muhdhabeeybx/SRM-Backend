@@ -1,6 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const { sql } = require("drizzle-orm");
-const { db } = require("../../config/db");
+const { db, client } = require("../../config/db");
+const auditLogRepo = require("../../repositories/auditLog.repository");
 const { bankAccountRepo } = require("../../repositories");
 const pfiBankScope = require("../../lib/pfiBankScope");
 
@@ -162,7 +163,108 @@ const deleteBankAccount = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * PUT /api/bank-accounts/for-pfi/:pfiId   { bankAccountIds: number[] }
+ *
+ * Set exactly which accounts a PFI collects into — asked the way the question
+ * is actually asked.
+ *
+ * The account form answers the reverse ("which PFIs does this account
+ * serve?"), and it hid every PFI already on another account on the rule "one
+ * PFI, one account" — a rule the data does not follow: three live PFIs
+ * collect into five accounts each, and approving a PFI adds accounts without
+ * any limit. So the only screen for the job concealed the true picture.
+ *
+ * The list sent is the whole answer: accounts named gain the PFI, accounts
+ * not named lose it. One transaction, so a failure halfway cannot leave the
+ * PFI collecting into some of the old accounts and some of the new. Each
+ * account's locations are re-derived from its PFIs exactly as an ordinary
+ * edit does, so the two ways of assigning cannot drift apart.
+ *
+ * Deciding where a PFI's money lands is not something done from inside a
+ * PFI's scope, so a person confined to PFIs is refused.
+ */
+const setAccountsForPfi = asyncHandler(async (req, res) => {
+  const pfiId = Number(req.params.pfiId);
+  const wanted = [...new Set((req.body.bankAccountIds || []).map(Number).filter(Number.isInteger))];
+
+  if ((await pfiBankScope.allowedBankAccountIds(req.user)) !== null) {
+    return res.status(403).json({
+      success: false,
+      message: "Assigning a PFI's collection accounts is done by finance, not from within a PFI.",
+    });
+  }
+
+  const [pfi] = await client`SELECT id, pfi_number FROM pfis WHERE id = ${pfiId}`;
+  if (!pfi) return res.status(404).json({ success: false, message: "PFI not found" });
+
+  const accounts = await client`
+    SELECT id, status, bank_name, account_number,
+           CASE WHEN jsonb_typeof(pfi_ids) = 'array' THEN pfi_ids ELSE '[]'::jsonb END AS pfi_ids
+      FROM bank_accounts`;
+  const byId = new Map(accounts.map((a) => [Number(a.id), a]));
+
+  for (const id of wanted) {
+    const a = byId.get(id);
+    if (!a) return res.status(400).json({ success: false, message: `Bank account #${id} does not exist.` });
+    if (a.status !== "Active") {
+      return res.status(400).json({
+        success: false,
+        message: `${a.bank_name} ${a.account_number} is ${a.status.toLowerCase()} — a PFI cannot collect into it.`,
+      });
+    }
+  }
+
+  // Work out every change before writing any of them.
+  const changes = [];
+  for (const a of accounts) {
+    const id = Number(a.id);
+    const current = (a.pfi_ids || []).map(Number).filter((n) => Number.isFinite(n));
+    const has = current.includes(pfiId);
+    const want = wanted.includes(id);
+    if (has === want) continue;
+    const next = want ? [...current, pfiId] : current.filter((x) => x !== pfiId);
+    const derived = await depotsForPfis(next);
+    changes.push({ id, added: want, label: `${a.bank_name} ${a.account_number}`, ...derived });
+  }
+
+  await client.begin(async (tx) => {
+    for (const c of changes) {
+      await tx`
+        UPDATE bank_accounts
+           SET pfi_ids = ${JSON.stringify(c.pfiIds)}::jsonb,
+               depot_ids = ${JSON.stringify(c.depotIds)}::jsonb,
+               updated_at = now()
+         WHERE id = ${c.id}`;
+    }
+  });
+
+  const added = changes.filter((c) => c.added).map((c) => c.label);
+  const removed = changes.filter((c) => !c.added).map((c) => c.label);
+  if (changes.length) {
+    await auditLogRepo.record({
+      entityType: "pfi",
+      entityId: pfiId,
+      action: "pfi.bank_accounts_set",
+      actor: req.user?.id ? { type: "staff", staffId: req.user.id } : { type: "system" },
+      metadata: { added, removed, bankAccountIds: wanted },
+    });
+  }
+
+  const now = await pfiBankScope.accountsForPfi(pfiId);
+  res.json({
+    success: true,
+    message: changes.length
+      ? now.length
+        ? `${pfi.pfi_number} now collects into ${now.map((a) => `${a.bankName} ${a.accountNumber}`).join(", ")}.`
+        : `${pfi.pfi_number} no longer collects into any account.`
+      : "Nothing changed.",
+    data: { accounts: now, added, removed },
+  });
+});
+
 module.exports = {
+  setAccountsForPfi,
   getBankAccounts,
   getBankAccountById,
   createBankAccount,

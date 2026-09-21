@@ -823,7 +823,18 @@ const createPfi = z.object(pfiBase).refine(
 );
 const updatePfi = z.object(pfiBase);
 
+/**
+ * Which accounts a PFI collects into — the whole list, not a change to it.
+ * Empty is allowed: it is how a PFI is taken off every account.
+ */
+const pfiAccountsParam = z.object({ pfiId: id("PFI") });
+const setPfiAccounts = z.object({
+  bankAccountIds: z.array(z.coerce.number().int().positive()).max(50),
+});
+
 module.exports = {
+  pfiAccountsParam,
+  setPfiAccounts,
   setPfiTrucks,
   idParam,
   createProduct, updateProduct, listProducts,
