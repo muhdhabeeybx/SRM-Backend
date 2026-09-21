@@ -255,3 +255,42 @@ describe("explaining the figures", () => {
     assert.ok(keys.includes("landingCostPerLitre"));
   });
 });
+
+describe("a batch with no shipping papers is billed on what it holds", () => {
+  /**
+   * Gantry, delivery and trucking are all bought on land — at a loading
+   * gantry, or onto trucks at a depot — so none of them has a BL figure to be
+   * costed against. Trucking was left on the coastal path when it was added,
+   * which left every batch of trucks reporting no cost at all: a real price
+   * and a real quantity, and "—" where its value should be.
+   */
+  for (const pfiType of ["gantry", "delivery", "trucking"]) {
+    test(`${pfiType} costs against its own quantity`, () => {
+      const f = computeFinancials(
+        { pfiType, productUnit: "Litres", startingQtyLitres: 195_000, unitPrice: "1280", creditBalance: "0" },
+        { expenses: 7_325_000 },
+      );
+
+      assert.equal(f.isGantry, true);
+      // No papers, so nothing to differ from what arrived.
+      assert.equal(f.blQtyLitres, null);
+      assert.equal(f.surplusDeficitLitres, null);
+      assert.equal(f.costQtyLitres, 195_000);
+      // ₦1,280 × 195,000 = ₦249,600,000, plus the trip expenses booked to it.
+      assert.equal(f.pfiValue, 249_600_000);
+      assert.equal(f.grandTotalCost, 256_925_000);
+      // Rounded to kobo, like every money figure here.
+      assert.equal(f.landingCostPerLitre, 1317.56);
+    });
+  }
+
+  test("coastal still needs its BL, and says so by reading null", () => {
+    const f = computeFinancials(
+      { pfiType: "coastal", productUnit: "Litres", startingQtyLitres: 195_000, unitPrice: "1280", creditBalance: "0" },
+      { expenses: 0 },
+    );
+    assert.equal(f.isGantry, false);
+    assert.equal(f.pfiValue, null);
+    assert.equal(f.landingCostPerLitre, null);
+  });
+});

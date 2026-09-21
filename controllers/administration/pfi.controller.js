@@ -12,7 +12,7 @@ const {
 const { db } = require("../../config/db");
 const { eq } = require("drizzle-orm");
 const { pfiMovements } = require("../../db/schema");
-const { computeFinancials, explainFinancials } = require("../../lib/pfiFinance");
+const { computeFinancials, explainFinancials, BILLED_ON_OWN_QUANTITY } = require("../../lib/pfiFinance");
 const { resolveBooking, actorFor, vendorFor } = require("./expense.controller");
 const { isWithinScope } = require("../../lib/scopeFilter");
 const smsService = require("../../services/sms.service");
@@ -152,7 +152,7 @@ const createPfi = asyncHandler(async (req, res) => {
   // path did not, so a delivery batch could be CREATED with a BL that every
   // later read then ignored — the row saying one thing and its own valuation
   // another.
-  const isGantry = pfi_type === "gantry" || pfi_type === "delivery";
+  const isGantry = BILLED_ON_OWN_QUANTITY.has(pfi_type);
 
   if (!pfi_number) {
     return res.status(400).json({ success: false, message: "PFI number is required" });
@@ -342,7 +342,7 @@ const updatePfi = asyncHandler(async (req, res) => {
 
   // A delivery batch is loaded onto trucks at a depot, so it has no vessel and
   // no BL either — the same facts stop applying as for gantry.
-  if (pfiType === "gantry" || pfiType === "delivery") {
+  if (BILLED_ON_OWN_QUANTITY.has(pfiType)) {
     Object.assign(updateData, {
       blQtyLitres: null,
       blQtyMt: null,
