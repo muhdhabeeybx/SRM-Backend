@@ -316,7 +316,20 @@ const listPfis = async ({ pfiIds }) => {
       LEFT JOIN depots d       ON d.id  = p.location_id
       LEFT JOIN lpg_stations ls ON ls.id = p.lpg_station_id
       LEFT JOIN products pr    ON pr.id = p.product_id
-     ${!Array.isArray(pfiIds) ? client`` : pfiIds.length ? client`WHERE p.id = ANY(${pfiIds})` : client`WHERE false`}
+     /*
+       Trucking batches are not on this report.
+
+       Every figure here is built from ORDERS — volume sold, sales value, bank
+       inflow — and a trucking batch never places one: its loads are sold on
+       the delivery ledger. So it would appear every day with nothing sold,
+       nothing banked, and its whole quantity standing as stock balance, which
+       would overstate the stock this report shows by the size of the batch
+       and never move. Its own sales are on PFI Tracking, where the delivery
+       ledger is read. The same reason keeps them out of the finance report's
+       stock summary.
+     */
+     WHERE p.pfi_type IS DISTINCT FROM 'trucking'
+     ${!Array.isArray(pfiIds) ? client`` : pfiIds.length ? client`AND p.id = ANY(${pfiIds})` : client`AND false`}
      ORDER BY p.pfi_number
   `;
 };

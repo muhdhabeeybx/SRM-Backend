@@ -228,6 +228,57 @@ describe("CFO report — a row, computed and corrected", () => {
 
 // ── Everything below needs a database ──────────────────────────────────────
 
+describe("CFO report — which batches are on it", () => {
+  /**
+   * A trucking batch is not on this report, and this pins it.
+   *
+   * Every column here comes from orders, and a trucking batch sells on the
+   * delivery ledger instead — so it would show nothing sold and nothing
+   * banked while its whole quantity stood as stock balance, every day,
+   * overstating the stock on the report by the size of the batch.
+   */
+  const NUMBERS = ["TEST/CFO/COASTAL", "TEST/CFO/TRUCKING"];
+  let ids = [];
+  let available = false;
+
+  before(async () => {
+    const rows = await client`
+      INSERT INTO pfis (pfi_number, pfi_type, status, starting_qty_litres, unit_price)
+      VALUES (${NUMBERS[0]}, 'coastal', 'active', 1000000, '300'),
+             (${NUMBERS[1]}, 'trucking', 'active', 2355000, '1280')
+      RETURNING id, pfi_type
+    `;
+    ids = rows.map((r) => Number(r.id));
+    available = ids.length === 2;
+  });
+
+  after(async () => {
+    if (ids.length) await client`DELETE FROM pfis WHERE id = ANY(${ids})`;
+  });
+
+  test("a trucking batch is left off, and its neighbours are not", async (t) => {
+    if (!available) return t.skip("no database");
+    const listed = await cfoReportRepo.listPfis({ pfiIds: ids });
+    const numbers = listed.map((p) => p.pfi_number);
+    assert.ok(numbers.includes(NUMBERS[0]), "the coastal batch is still listed");
+    assert.ok(!numbers.includes(NUMBERS[1]), "the trucking batch is not");
+  });
+
+  test("asking for a trucking batch by name answers with nothing, not with it", async (t) => {
+    if (!available) return t.skip("no database");
+    const trucking = ids[1];
+    // Length, not deepEqual: this driver answers with an array subclass.
+    assert.equal((await cfoReportRepo.listPfis({ pfiIds: [trucking] })).length, 0);
+  });
+
+  test("an empty scope is still no PFIs at all", async (t) => {
+    if (!available) return t.skip("no database");
+    // The exclusion is ANDed onto this filter, so it must not turn "none"
+    // into "every batch that is not trucking".
+    assert.equal((await cfoReportRepo.listPfis({ pfiIds: [] })).length, 0);
+  });
+});
+
 describe("CFO report — the corrections table", () => {
   let pfiId = null;
   let available = false;
