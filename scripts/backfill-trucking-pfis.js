@@ -49,15 +49,30 @@
  * failure halfway leaves nothing behind. Re-running is a no-op: a code that
  * now has a PFI is no longer a code without one.
  *
+ * ── Undo ──────────────────────────────────────────────────────────────────
+ *
+ * --undo takes back exactly what --apply wrote: the PFIs it created, found by
+ * the note it stamped on them, and the pfi_id it put on their truck rows. A
+ * batch that has since been priced, had officers assigned or had an order
+ * booked against it is NOT taken back — by then it is a PFI somebody is
+ * using, not a row this script owns. Those are named and left.
+ *
  * Usage:
  *   node scripts/backfill-trucking-pfis.js                        # dry run
  *   node scripts/backfill-trucking-pfis.js --apply                # writes
+ *   node scripts/backfill-trucking-pfis.js --undo                 # dry run
+ *   node scripts/backfill-trucking-pfis.js --undo --apply         # reverses
  *   DATABASE_URL="postgresql://…/soroman_test" node scripts/…     # elsewhere
  */
 require("dotenv").config();
 const postgres = require("postgres");
 
 const APPLY = process.argv.includes("--apply");
+const UNDO = process.argv.includes("--undo");
+
+/** Stamped on every PFI this script raises, and what --undo finds them by. */
+const BACKFILL_NOTE =
+  "Backfilled from the delivery batch of the same code. Raised before the PFI register covered trucking, so it has no raiser or approver on record.";
 
 /** Tokens sorted, so three spellings of one depot compare equal. */
 const tokenKey = (v) =>
@@ -99,6 +114,11 @@ async function main() {
   const sql = postgres(url, { ssl: url.includes("localhost") ? false : "require" });
 
   try {
+    if (UNDO) {
+      await undo(sql);
+      return;
+    }
+
     // Every code, with what its trucks say, and whether a PFI already owns it.
     const batches = await sql`
       SELECT
@@ -238,7 +258,7 @@ async function main() {
             ${p.depotId}, ${p.depotResolved || p.depotName}, ${p.productId}, ${p.productResolved || p.productName}, ${p.productUnit},
             ${p.volume}, ${p.volume}, ${p.unitPrice == null ? "0" : String(p.unitPrice)}, ${p.trucks},
             ${p.firstLoaded || null},
-            ${"Backfilled from the delivery batch of the same code. Raised before the PFI register covered trucking, so it has no raiser or approver on record."}
+            ${BACKFILL_NOTE}
           )
           RETURNING id, pfi_number
         `;
@@ -263,6 +283,103 @@ async function main() {
   } finally {
     await sql.end({ timeout: 5 });
   }
+}
+
+/**
+ * Take back what --apply wrote, and nothing else.
+ *
+ * Each PFI is checked before it goes: an order pointing at it, a price, an
+ * officer, a bank account or an edited note all mean somebody has taken it up,
+ * and taking it away would destroy their work rather than undo ours.
+ */
+async function undo(sql) {
+  const mine = await sql`
+    SELECT p.id, p.pfi_number, p.unit_price::numeric AS unit_price,
+           /*
+             Any officer at all, by id OR by name: the form writes both, and
+             an older assignment may carry only the name. A backfilled PFI is
+             raised with none of either.
+           */
+           (COALESCE(p.audit_officer_id, p.sales_manager_id, p.product_officer_id,
+                     p.it_compliance_officer_id,
+                     p.security_exit_officer_id, p.commission_officer_id) IS NOT NULL
+            OR COALESCE(NULLIF(p.audit_officer_name, ''), NULLIF(p.sales_manager_name, ''),
+                        NULLIF(p.product_officer_name, ''), NULLIF(p.it_compliance_officer_name, ''),
+                        NULLIF(p.security_exit_officer_name, ''), NULLIF(p.commission_officer_name, '')
+                       ) IS NOT NULL) AS has_officers,
+           (SELECT count(*)::int FROM orders o WHERE o.pfi_id = p.id) AS orders,
+           (SELECT count(*)::int FROM pfi_expenses e WHERE e.pfi_id = p.id) AS expenses,
+           (SELECT count(*)::int FROM bank_accounts b
+             WHERE b.pfi_ids @> to_jsonb(ARRAY[p.id])) AS accounts,
+           (SELECT count(*)::int FROM delivery_inventory di WHERE di.pfi_id = p.id) AS rows,
+           /*
+             The price this script would have set: the one on its own trucks,
+             where they all agree. A unit price equal to it is this script's
+             own work, not somebody's — so it is not evidence the batch has
+             been taken up, and an undo run straight after an apply must not
+             be blocked by the price it just wrote.
+           */
+           (SELECT CASE WHEN count(DISTINCT di.product_price) = 1
+                        THEN max(di.product_price) END
+              FROM delivery_inventory di
+             WHERE di.pfi_id = p.id AND di.product_price IS NOT NULL
+               AND di.product_price > 0) AS truck_price
+      FROM pfis p
+     WHERE p.pfi_type = 'trucking' AND p.review_note = ${BACKFILL_NOTE}
+     ORDER BY p.pfi_number
+  `;
+
+  if (mine.length === 0) {
+    console.log("Nothing to undo — no PFI on this database carries the backfill note.");
+    return;
+  }
+
+  const removable = [];
+  const kept = [];
+  for (const p of mine) {
+    const reasons = [
+      p.orders > 0 ? `${p.orders} order(s) against it` : null,
+      p.expenses > 0 ? `${p.expenses} expense line(s)` : null,
+      p.accounts > 0 ? "a bank account assigned" : null,
+      Number(p.unit_price) > 0 && Number(p.unit_price) !== Number(p.truck_price)
+        ? "a price entered since" : null,
+      p.has_officers ? "officers assigned" : null,
+    ].filter(Boolean);
+    if (reasons.length) kept.push({ ...p, reasons });
+    else removable.push(p);
+  }
+
+  console.log(`${removable.length} of ${mine.length} backfilled PFIs can be taken back:\n`);
+  for (const p of removable) {
+    console.log(`  ${p.pfi_number} (#${p.id}) — ${p.rows} truck rows would be unlinked`);
+  }
+  if (kept.length) {
+    console.log("\nIn use, so left exactly as they are:");
+    for (const p of kept) console.log(`  ${p.pfi_number} (#${p.id}) — ${p.reasons.join(", ")}`);
+  }
+  console.log("");
+
+  if (!APPLY) {
+    console.log("Dry run. Re-run with --undo --apply to reverse.");
+    return;
+  }
+  if (removable.length === 0) {
+    console.log("Nothing to do.");
+    return;
+  }
+
+  const ids = removable.map((p) => p.id);
+  const done = await sql.begin(async (tx) => {
+    const unlinked = await tx`
+      UPDATE delivery_inventory SET pfi_id = NULL, pfi_number = '', updated_at = now()
+       WHERE pfi_id = ANY(${ids})
+      RETURNING id
+    `;
+    const deleted = await tx`DELETE FROM pfis WHERE id = ANY(${ids}) RETURNING pfi_number`;
+    return { unlinked: unlinked.length, deleted: deleted.map((d) => d.pfi_number) };
+  });
+
+  console.log(`Reversed: ${done.deleted.join(", ")} — ${done.unlinked} truck rows unlinked.`);
 }
 
 main().catch((err) => {
