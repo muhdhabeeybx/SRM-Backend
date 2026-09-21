@@ -11,7 +11,7 @@ const { z } = require("zod");
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 
 const listRefunds = z.object({
-  status: z.enum(["requested", "refunded", "cancelled"]).optional(),
+  status: z.enum(["requested", "refunded", "cancelled", "skipped"]).optional(),
   limit: z.coerce.number().int().positive().max(1000).optional(),
 });
 
@@ -43,7 +43,19 @@ const payRefund = z.object({
   paidAt: z.string().datetime().or(z.string().date()).optional(),
 });
 
+/**
+ * Setting an overpayment aside needs a reason and nothing else — the amount is
+ * whatever the order holds at that moment, read by the service rather than
+ * sent, so nobody can waive a different figure from the one on screen.
+ */
+const skipOrder = z.object({
+  orderId: z.coerce.number().int().positive(),
+  reason: z.string().min(1, "Say why this one is not being refunded").max(2000),
+});
+
 /** Both undoing acts need a reason: a money record changed silently is worse. */
 const reasonBody = z.object({ reason: z.string().min(1, "A reason is required").max(2000) });
 
-module.exports = { idParam, listRefunds, listRefundable, createRefund, payRefund, reasonBody };
+module.exports = {
+  idParam, listRefunds, listRefundable, createRefund, payRefund, reasonBody, skipOrder,
+};

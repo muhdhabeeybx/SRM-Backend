@@ -5,6 +5,7 @@ const { PAYMENT_SOURCE, CONFIRMATION_BASIS } = require("../db/schema/orderPaymen
 const { recomputeOrder, httpError } = require("./orderPayment.service");
 const auditLogRepo = require("../repositories/auditLog.repository");
 const { DUPLICATE_LEGACY_IDS, DUPLICATE_LEGACY_IDS_SQL } = require("../repositories/cfoReport.repository");
+const { orderReferenceClient } = require("../lib/orderReferenceSql");
 
 /**
  * Overpayment goes back to the customer.
@@ -90,26 +91,47 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
     WITH p AS (
       SELECT order_id,
              SUM(amount) FILTER (WHERE id NOT IN (${DUPLICATE_LEGACY_IDS})) AS received,
-             SUM(amount) FILTER (WHERE id IN (${DUPLICATE_LEGACY_IDS}))     AS phantom
+             SUM(amount) FILTER (WHERE id IN (${DUPLICATE_LEGACY_IDS}))     AS phantom,
+             -- Money that reached this order by being moved off another one,
+             -- back when surplus was transferred rather than refunded. It is
+             -- often the whole reason the order is on this list, and it reads
+             -- very differently from a customer having paid twice.
+             SUM(amount) FILTER (WHERE source = 'transfer_in')  AS transferred_in,
+             SUM(ABS(amount)) FILTER (WHERE source = 'transfer_out') AS transferred_out
         FROM order_payments GROUP BY order_id
     )
-    SELECT o.id, o.order_number, o.company_name, o.total_amount::numeric AS total,
+    SELECT o.id, ${orderReferenceClient(client, "o", "c")} AS reference,
+           o.company_name, o.total_amount::numeric AS total,
            o.created_at, o.customer_id, c.name AS customer_name, c.phone AS customer_phone,
            c.company_name AS customer_company,
            COALESCE(p.received, 0) AS received, COALESCE(p.phantom, 0) AS phantom,
-           r.id AS open_refund_id, r.amount AS open_refund_amount, r.requested_at AS open_refund_at
+           COALESCE(p.transferred_in, 0) AS transferred_in,
+           COALESCE(p.transferred_out, 0) AS transferred_out,
+           r.id AS open_refund_id, r.amount AS open_refund_amount, r.requested_at AS open_refund_at,
+           sk.id AS skip_id, sk.amount AS skip_amount
       FROM orders o
       JOIN p ON p.order_id = o.id
       LEFT JOIN customers c ON c.id = o.customer_id
       LEFT JOIN order_refunds r ON r.order_id = o.id AND r.status = 'requested'
+      LEFT JOIN order_refunds sk ON sk.order_id = o.id AND sk.status = 'skipped'
      WHERE COALESCE(p.received, 0) > o.total_amount::numeric + 0.005
-       ${search ? client`AND (o.order_number ILIKE ${term} OR c.name ILIKE ${term}
+       /*
+         An order set aside stays off the list only while the decision still
+         describes it. If more money has landed since, the surplus no longer
+         matches what somebody looked at and waived, so it comes back.
+       */
+       AND (sk.id IS NULL
+            OR COALESCE(p.received, 0) - o.total_amount::numeric > sk.amount::numeric + 0.005)
+       ${search ? client`AND (${orderReferenceClient(client, "o", "c")} ILIKE ${term}
+                             OR o.order_number ILIKE ${term} OR c.name ILIKE ${term}
                              OR o.company_name ILIKE ${term} OR c.company_name ILIKE ${term})` : client``}
      ORDER BY (COALESCE(p.received, 0) - o.total_amount::numeric) DESC
      LIMIT ${Math.min(1000, Number(limit) || 500)}`;
   return rows.map((r) => ({
     orderId: Number(r.id),
-    orderNumber: r.order_number,
+    // The reference every other screen shows — "HA10831", not the internal
+    // ORD-BB464940706C, which names an order nobody can look up.
+    orderNumber: r.reference,
     companyName: r.company_name || r.customer_company || "",
     customerId: Number(r.customer_id),
     customerName: r.customer_name,
@@ -119,8 +141,14 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
     surplus: round2(money(r.received) - money(r.total)),
     phantomExcluded: round2(r.phantom),
     createdAt: r.created_at,
+    transferredIn: round2(r.transferred_in),
+    transferredOut: round2(r.transferred_out),
     openRefund: r.open_refund_id
       ? { id: Number(r.open_refund_id), amount: round2(r.open_refund_amount), requestedAt: r.open_refund_at }
+      : null,
+    /** Set aside earlier for less than it now holds — so it is back. */
+    previouslySkipped: r.skip_id
+      ? { id: Number(r.skip_id), amount: round2(r.skip_amount) }
       : null,
   }));
 };
@@ -128,7 +156,8 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
 /** Every refund, newest first, with who asked and who paid. */
 const listRefunds = async ({ status = null, limit = 500 } = {}) => {
   const rows = await client`
-    SELECT r.*, o.order_number, o.company_name, c.name AS customer_name, c.phone AS customer_phone,
+    SELECT r.*, ${orderReferenceClient(client, "o", "c")} AS reference,
+           o.company_name, c.name AS customer_name, c.phone AS customer_phone,
            ba.bank_name AS paid_from_bank, ba.account_name AS paid_from_name, ba.account_number AS paid_from_number,
            TRIM(COALESCE(rq.first_name,'') || ' ' || COALESCE(rq.surname,'')) AS requested_by_name,
            TRIM(COALESCE(pd.first_name,'') || ' ' || COALESCE(pd.surname,'')) AS paid_by_name,
@@ -146,7 +175,7 @@ const listRefunds = async ({ status = null, limit = 500 } = {}) => {
   return rows.map((r) => ({
     id: Number(r.id),
     orderId: Number(r.order_id),
-    orderNumber: r.order_number,
+    orderNumber: r.reference,
     companyName: r.company_name,
     customerId: Number(r.customer_id),
     customerName: r.customer_name,
@@ -323,6 +352,91 @@ const markRefunded = async ({ refundId, paidFromAccountId, paymentReference = ""
   });
 };
 
+/**
+ * Set an overpayment aside: it will not be refunded, and here is why.
+ *
+ * For the two kinds of row that otherwise sit on this list for ever — sums too
+ * small to be worth a bank transfer, and surplus already settled some other
+ * way, usually by moving it to another order back when that was the process.
+ *
+ * ── What it does and does not do ──────────────────────────────────────────
+ *
+ * Nothing about the order changes. The money is still there, the order still
+ * shows it, every report still counts it. This records a decision not to act,
+ * not a correction of the books — waiving a debt is not the same as the debt
+ * not existing, and the finance report must keep saying so.
+ *
+ * The surplus at this moment is stored as the amount. If more money arrives
+ * later, the order comes back onto the list, because the decision was taken
+ * about a smaller sum than it now holds.
+ */
+const skipOrder = async ({ orderId, reason = "", staffId = null }) => {
+  const why = String(reason || "").trim();
+  if (!why) throw httpError(400, "Say why this overpayment is not being refunded — the note is the whole point of setting it aside.");
+
+  const [order] = await db
+    .select({ id: orders.id, customerId: orders.customerId, orderNumber: orders.orderNumber })
+    .from(orders).where(eq(orders.id, Number(orderId))).limit(1);
+  if (!order) throw httpError(404, "Order not found");
+
+  const { surplus } = await realSurplus(order.id);
+  if (!(surplus > 0)) throw httpError(409, "This order holds no overpayment, so there is nothing to set aside.");
+
+  try {
+    return await db.transaction(async (tx) => {
+      const [skip] = await tx.insert(orderRefunds).values({
+        orderId: order.id,
+        customerId: order.customerId,
+        amount: surplus.toFixed(2),
+        status: "skipped",
+        reason: why.slice(0, 2000),
+        requestedBy: staffId,
+      }).returning();
+      await auditLogRepo.record({
+        entityType: "order", entityId: order.id, action: "order.refund_skipped",
+        actor: actorFor(staffId), metadata: { refundId: skip.id, amount: skip.amount, reason: why },
+      }, tx);
+      return skip;
+    });
+  } catch (e) {
+    if (String(e?.cause?.code || e?.code) === "23505") {
+      throw httpError(409, "This overpayment is already set aside.");
+    }
+    throw e;
+  }
+};
+
+/**
+ * Put a set-aside overpayment back on the list.
+ *
+ * The skip is cancelled rather than deleted: somebody decided not to refund
+ * this money and somebody decided to look at it again, and both belong on the
+ * record. A new skip can then be raised — the unique index only counts live
+ * ones.
+ */
+const restoreSkipped = async ({ refundId, reason = "", staffId = null }) => {
+  return db.transaction(async (tx) => {
+    const [skip] = await tx.select().from(orderRefunds)
+      .where(eq(orderRefunds.id, Number(refundId))).for("update").limit(1);
+    if (!skip) throw httpError(404, "Not found");
+    if (skip.status !== "skipped") throw httpError(409, "This is not a set-aside overpayment.");
+
+    const [updated] = await tx.update(orderRefunds).set({
+      status: "cancelled",
+      cancelledAt: new Date(),
+      cancelledBy: staffId,
+      cancelReason: String(reason || "Put back on the refund list").slice(0, 2000),
+      updatedAt: new Date(),
+    }).where(eq(orderRefunds.id, skip.id)).returning();
+
+    await auditLogRepo.record({
+      entityType: "order", entityId: skip.orderId, action: "order.refund_skip_lifted",
+      actor: actorFor(staffId), metadata: { refundId: skip.id, amount: skip.amount, reason },
+    }, tx);
+    return updated;
+  });
+};
+
 /** Withdraw a request that has not been paid. Nothing about the order moves. */
 const cancelRefund = async ({ refundId, reason = "", staffId = null }) => {
   const why = String(reason || "").trim();
@@ -384,6 +498,8 @@ module.exports = {
   listRefundable,
   listRefunds,
   requestRefund,
+  skipOrder,
+  restoreSkipped,
   markRefunded,
   cancelRefund,
   undoRefund,

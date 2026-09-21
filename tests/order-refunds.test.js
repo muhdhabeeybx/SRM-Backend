@@ -233,6 +233,133 @@ describe("overpayment refunds", () => {
   });
 });
 
+describe("setting an overpayment aside", () => {
+  /**
+   * The list has to be clearable or it stops being read.
+   *
+   * 179 orders hold surplus, 25 of them under ₦1,000 — less than the transfer
+   * costs — and some of the larger ones were settled long ago by moving the
+   * money to another order. Skipping records that decision without touching
+   * the money, which is the part that matters: waiving a debt is not the same
+   * as the debt not existing, and every report must go on saying so.
+   */
+  let orderId = null;
+  let customerId = null;
+  let ready = false;
+
+  before(async () => {
+    const [{ exists }] = await client`
+      SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='order_refunds') AS exists`;
+    if (!exists) return;
+    const c = await client`SELECT id FROM customers ORDER BY id LIMIT 1`;
+    const d = await client`SELECT id FROM depots LIMIT 1`;
+    const p = await client`SELECT id FROM products LIMIT 1`;
+    if (!c.length || !d.length || !p.length) return;
+    customerId = Number(c[0].id);
+    const [o] = await client`
+      INSERT INTO orders (order_number, customer_id, state, depot_id, product_id, quantity,
+                          price, total_amount, delivery_type, company_name)
+      SELECT ${"SK" + Math.floor(Math.random() * 1e9)}, ${customerId}, 'Lagos', d.id, p.id, 1000,
+             1000, 1000000, 'pickup', 'Skip Test Co'
+        FROM (SELECT id FROM depots LIMIT 1) d, (SELECT id FROM products LIMIT 1) p
+      RETURNING id`;
+    orderId = Number(o.id);
+    // ₦400 overpaid: real money, and not worth a bank transfer.
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, txn_date, depositor, narration, bank_ref)
+      VALUES (${orderId}, 1000400, 'statement', now(), 'Test', 'seed', ${"SKIP" + orderId})`;
+    await client`UPDATE orders SET amount_paid = 1000400, payment_status = 'Paid' WHERE id = ${orderId}`;
+    ready = true;
+  });
+
+  after(async () => {
+    if (!ready) return;
+    await client`DELETE FROM order_payments WHERE order_id = ${orderId}`;
+    await client`DELETE FROM order_refunds WHERE order_id = ${orderId}`;
+    await client`DELETE FROM orders WHERE id = ${orderId}`;
+  });
+
+  const listed = async () => {
+    const rows = await refundService.listRefundable({ limit: 1000 });
+    return rows.find((r) => r.orderId === orderId) || null;
+  };
+
+  test("the order is on the list, under the reference people can look up", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    const row = await listed();
+    assert.ok(row, "an order holding ₦400 beyond its value is refundable");
+    assert.equal(row.surplus, 400);
+    // "SK12345", built from the company initials and the id — never the raw
+    // ORD-… column, which names an order no screen can find.
+    assert.match(row.orderNumber, /^ST\d+$/, `got ${row.orderNumber}`);
+    assert.ok(!row.orderNumber.startsWith("ORD-"));
+  });
+
+  test("a reason is required — the note is the whole point", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    await assert.rejects(
+      () => refundService.skipOrder({ orderId, reason: "   " }),
+      (e) => e.status === 400,
+    );
+  });
+
+  test("setting it aside takes it off the list and touches nothing", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    const skip = await refundService.skipOrder({
+      orderId, reason: "₦400 — costs more to send than it is worth",
+    });
+    assert.equal(skip.status, "skipped");
+    assert.equal(Number(skip.amount), 400);
+
+    assert.equal(await listed(), null, "it is off the refund list");
+
+    // The money is untouched: still received, still surplus, still on the order.
+    const after = await refundService.realSurplus(orderId);
+    assert.equal(after.surplus, 400, "setting aside is a decision, not a correction");
+    const [o] = await client`SELECT amount_paid::text AS paid FROM orders WHERE id = ${orderId}`;
+    assert.equal(Number(o.paid), 1000400);
+  });
+
+  test("it cannot be set aside twice", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    await assert.rejects(
+      () => refundService.skipOrder({ orderId, reason: "again" }),
+      (e) => e.status === 409,
+    );
+  });
+
+  test("more money since means the decision no longer covers it, so it returns", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, txn_date, depositor, narration, bank_ref)
+      VALUES (${orderId}, 500000, 'statement', now(), 'Test', 'more', ${"SKIP2" + orderId})`;
+
+    const row = await listed();
+    assert.ok(row, "₦500,400 is not the ₦400 somebody waived");
+    assert.equal(row.surplus, 500400);
+    assert.deepEqual(row.previouslySkipped && row.previouslySkipped.amount, 400);
+
+    await client`DELETE FROM order_payments WHERE bank_ref = ${"SKIP2" + orderId}`;
+  });
+
+  test("lifting the skip keeps the decision on the record", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    const [skip] = await client`
+      SELECT id FROM order_refunds WHERE order_id = ${orderId} AND status = 'skipped'`;
+    const restored = await refundService.restoreSkipped({ refundId: Number(skip.id) });
+    assert.equal(restored.status, "cancelled");
+    assert.ok(restored.cancelledAt, "who and when are kept");
+
+    const row = await listed();
+    assert.ok(row, "back on the list");
+    assert.equal(row.previouslySkipped, null);
+
+    // And it can be set aside again — the index only counts live ones.
+    const again = await refundService.skipOrder({ orderId, reason: "still not worth it" });
+    assert.equal(again.status, "skipped");
+  });
+});
+
 describe("transfers and refunds run side by side", () => {
   after(async () => { await closeDb(); });
 

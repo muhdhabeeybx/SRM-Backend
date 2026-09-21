@@ -6,6 +6,7 @@ const validate = require("../../middleware/validate");
 const s = require("../../schemas/orderRefund.schema");
 const {
   getRefundable, getRefunds, createRefund, payRefund, cancelRefund, undoRefund,
+  skipRefund, restoreSkipped,
 } = require("../../controllers/administration/orderRefund.controller");
 
 /**
@@ -51,6 +52,29 @@ router.patch(
   requireRole("finance", "super_admin", { message: "Finance access required to undo a refund" }),
   validate({ params: s.idParam, body: s.reasonBody }),
   undoRefund,
+);
+
+/*
+  Setting one aside, and putting it back.
+
+  Same gate as raising a refund: deciding NOT to return money is as much a
+  finance decision as deciding to return it, and it is reversible from the
+  route below.
+*/
+router.post(
+  "/skip",
+  verifyStaff,
+  requireRole("finance", "admin", "super_admin", { message: "Finance access required" }),
+  validate({ body: s.skipOrder }),
+  skipRefund,
+);
+
+router.patch(
+  "/:id/restore",
+  verifyStaff,
+  requireRole("finance", "admin", "super_admin", { message: "Finance access required" }),
+  validate({ params: s.idParam }),
+  restoreSkipped,
 );
 
 module.exports = router;

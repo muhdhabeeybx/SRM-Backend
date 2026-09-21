@@ -70,4 +70,30 @@ const undoRefund = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getRefundable, getRefunds, createRefund, payRefund, cancelRefund, undoRefund };
+/** Not refunding this one, and why. Nothing about the order changes. */
+const skipRefund = asyncHandler(async (req, res) => {
+  const refund = await refundService.skipOrder({
+    orderId: Number(req.body.orderId),
+    reason: req.body.reason,
+    staffId: req.user?.id ?? null,
+  });
+  res.status(201).json({
+    success: true,
+    message: "Set aside. The money is still on the order — this records that it is not being refunded.",
+    data: { refund },
+  });
+});
+
+const restoreSkipped = asyncHandler(async (req, res) => {
+  const refund = await refundService.restoreSkipped({
+    refundId: Number(req.params.id),
+    reason: req.body?.reason,
+    staffId: req.user?.id ?? null,
+  });
+  res.json({ success: true, message: "Back on the refund list.", data: { refund } });
+});
+
+module.exports = {
+  getRefundable, getRefunds, createRefund, payRefund, cancelRefund, undoRefund,
+  skipRefund, restoreSkipped,
+};
