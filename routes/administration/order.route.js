@@ -27,6 +27,7 @@ const {
   authoriseCreditRelease,
   revokeCreditRelease,
   getReceivables,
+  setOrderPrice,
   removeOrderPayment,
   transferOrderPayment,
   reverseOrderPaymentTransfer,
@@ -117,6 +118,18 @@ router.delete(
   requireRole("finance", "super_admin", { message: "Finance access required" }),
   validate({ params: orderSchemas.idParam, body: orderSchemas.revokeCreditRelease }),
   revokeCreditRelease
+);
+
+/**
+ * Put a price on an order raised without one — the invoice that follows a
+ * handwritten ticket. Finance-gated, and refused once an order has a price.
+ */
+router.post(
+  "/:id/price",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required to price an order" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.setOrderPrice }),
+  setOrderPrice
 );
 
 // Orders holding money beyond their own value — where the desk finds surplus

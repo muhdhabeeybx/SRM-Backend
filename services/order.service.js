@@ -319,6 +319,23 @@ async function placeOrder({
   // passes the inbound message's wamid) supply a key; a second call with the
   // same key returns the original order instead of creating a duplicate.
   idempotencyKey = null,
+  /**
+   * Raise this order with no agreed price.
+   *
+   * `{ reason }` — required. A manually written ticket usually carries no
+   * figure: the customer is given the ticket, the truck loads, and the invoice
+   * follows. The sale is real from the moment the truck leaves.
+   *
+   * Passing this is ALSO the credit authorisation, deliberately as one act
+   * rather than two. An unpriced order is by definition loading before it is
+   * paid for, so demanding a separate release-on-credit step afterwards would
+   * be a formality that adds a way to forget — and the two carry identical
+   * guarantees anyway: a named person, a stated reason, an audit row.
+   *
+   * Staff only. There is no route by which a customer reaches this, and
+   * `actor` is what ends up on the authorisation.
+   */
+  unpriced = null,
 }) {
   if (idempotencyKey) {
     const existing = await orderRepo.findByIdempotencyKey(idempotencyKey);
@@ -459,13 +476,35 @@ async function placeOrder({
     throw httpError(404, "Product not found");
   }
 
-  // Server-side pricing — the client never supplies price/total.
-  const priceEntry = await depotRepo.getProductPrice(depotId, productId);
-  if (!priceEntry || Number(priceEntry.currentPrice) <= 0) {
-    throw httpError(400, "No price configured for this product at this depot");
+  /**
+   * Server-side pricing — the client never supplies price/total.
+   *
+   * An unpriced order skips the lookup entirely rather than falling back to the
+   * depot's current price. Stamping today's price on an order whose figure is
+   * still being negotiated would be worse than stamping none: it would look
+   * agreed, and the invoice that followed would contradict it.
+   *
+   * The zeros written below are placeholders, not money. `pricing_status`
+   * is what every reader must consult — see db/migrations/0049 for why a zero
+   * price cannot be allowed to stand in for an unknown one.
+   */
+  let serverPrice = 0;
+  let totalAmount = 0;
+  if (!unpriced) {
+    const priceEntry = await depotRepo.getProductPrice(depotId, productId);
+    if (!priceEntry || Number(priceEntry.currentPrice) <= 0) {
+      throw httpError(400, "No price configured for this product at this depot");
+    }
+    serverPrice = Number(priceEntry.currentPrice);
+    totalAmount = serverPrice * Number(quantity);
+  } else {
+    if (actor?.type !== "staff" || !actor.staffId) {
+      throw httpError(403, "Only a member of staff can raise an order with no price");
+    }
+    if (!String(unpriced.reason || "").trim()) {
+      throw httpError(400, "A reason is required to raise an order with no price");
+    }
   }
-  const serverPrice = Number(priceEntry.currentPrice);
-  const totalAmount = serverPrice * Number(quantity);
 
   // Stock no longer gates a sale — a price does (see catalog.service). We
   // still reserve against whatever active PFI stock exists, so PFI accounting
@@ -542,6 +581,22 @@ async function placeOrder({
         quantity: Number(quantity),
         price: String(serverPrice),
         totalAmount: String(totalAmount),
+        /**
+         * Both halves of "loading before payment, amount unknown", written in
+         * the same insert as the order they describe — so there is no window in
+         * which an unpriced order exists without the authorisation permitting
+         * it to load, and no second request that can fail and leave one half
+         * standing on its own.
+         */
+        ...(unpriced
+          ? {
+              pricingStatus: "pending",
+              creditQty: String(Number(quantity)),
+              creditReason: String(unpriced.reason).trim(),
+              creditAuthorisedBy: actor.staffId,
+              creditAuthorisedAt: new Date(),
+            }
+          : {}),
         deliveryType,
         deliveryAddress:
           deliveryType === "delivery" && typeof deliveryAddress === "string"
@@ -556,6 +611,27 @@ async function placeOrder({
             : null,
         status: "Pending",
         paymentStatus: "Unpaid",
+        /**
+         * An unpriced order is born Released, not Pending.
+         *
+         * TICKETABLE is {Released, Loading}, so a Pending order cannot be
+         * ticketed at all — and this one exists precisely because a ticket was
+         * already written for it by hand. Leaving it Pending would create it in
+         * the one state that cannot do the thing it was created to do.
+         *
+         * This sits AFTER the literal above deliberately: object keys resolve
+         * last-wins, and putting it earlier let `status: "Pending"` silently
+         * overwrite it — which is exactly how it was first written, and what
+         * the ticketing test caught.
+         *
+         * A birth state, not a transition: there is no previous state to move
+         * from, so it does not go through orderStatus.transition. The
+         * order.created row records it, and the authorisation gets a row of its
+         * own so the timeline reads the same as the two-step path.
+         */
+        ...(unpriced
+          ? { status: "Released", releasedAt: new Date(), releasedBy: actor.staffId }
+          : {}),
         virtualAccountNumber,
         virtualAccountBank,
         virtualAccountName,
@@ -580,10 +656,40 @@ async function placeOrder({
           deliveryType,
           quantity: Number(quantity),
           totalAmount: String(totalAmount),
+          ...(unpriced ? { awaitingPrice: true } : {}),
         },
       },
       tx
     );
+
+    /**
+     * The authorisation gets its own row.
+     *
+     * It is written by the same insert as the order, but "this order may load
+     * before it is paid for" is a separate fact from "this order exists", and
+     * anyone auditing exposure looks for order.credit_authorised. Folding it
+     * into order.created would make credit raised this way invisible to the
+     * query that finds credit raised the other way.
+     */
+    if (unpriced) {
+      await auditLogRepo.record(
+        {
+          entityType: "order",
+          entityId: created.id,
+          action: "order.credit_authorised",
+          actor,
+          metadata: {
+            quantity: Number(quantity),
+            previous: 0,
+            reason: String(unpriced.reason).trim(),
+            orderQuantity: Number(quantity),
+            awaitingPrice: true,
+            viaUnpricedOrder: true,
+          },
+        },
+        tx
+      );
+    }
 
     // Pickup: materialise the customer's declared trucks as pending loads now,
     // one row per truck (plate + its quantity), inside the same transaction.

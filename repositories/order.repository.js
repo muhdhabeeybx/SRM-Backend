@@ -202,6 +202,23 @@ const FULL_ORDER_COLUMNS = {
    * releasing zero, and the desk is told to refuse a truck somebody was
    * explicitly told to load. That is not hypothetical; the tests caught it.
    */
+  /**
+   * Whether a price has been agreed, and who agreed it.
+   *
+   * Every one of these has to be listed. This projection is an explicit
+   * allowlist, and a column omitted from it does not read as null — it is
+   * simply absent, which client code then treats as "no". That has now bitten
+   * this feature three times: credit_qty (an authorised order read as
+   * releasing zero), the findAll row (the Owing chip could never fire), and
+   * priced_by (a priced order that could not say who priced it).
+   */
+  pricingStatus: orders.pricingStatus,
+  pricedAt: orders.pricedAt,
+  pricedBy: orders.pricedBy,
+  pricedByName: sql`(
+    SELECT NULLIF(TRIM(CONCAT(s.first_name, ' ', s.surname)), '')
+      FROM staff s WHERE s.id = ${orders.pricedBy}
+  )`,
   creditQty: orders.creditQty,
   creditReason: orders.creditReason,
   creditAuthorisedBy: orders.creditAuthorisedBy,
@@ -434,6 +451,7 @@ const findAll = async ({
          * worse than either one being silent.
          */
         creditQty: orders.creditQty,
+        pricingStatus: orders.pricingStatus,
         status: orders.status,
         expiredAt: orders.expiredAt,
         /**
@@ -1649,6 +1667,7 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
            o.total_amount                            AS "totalAmount",
            o.amount_paid                             AS "amountPaid",
            (o.total_amount - o.amount_paid)          AS outstanding,
+           o.pricing_status                          AS "pricingStatus",
            o.credit_qty                              AS "creditQty",
            o.credit_reason                           AS "creditReason",
            o.credit_authorised_at                    AS "creditAuthorisedAt",
@@ -1672,7 +1691,15 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
       LEFT JOIN products  p ON p.id = o.product_id
       LEFT JOIN staff     s ON s.id = o.credit_authorised_by
      WHERE o.status NOT IN ('Cancelled', 'Expired')
-       AND (o.total_amount - o.amount_paid) > 0
+       /**
+        * An order awaiting a price owes an amount nobody has computed yet, so
+        * it cannot satisfy an outstanding-balance test: its total is zero, its
+        * balance is zero, and the arithmetic reads it as settled. It is exactly
+        * the order most at risk of being forgotten — product gone, no invoice
+        * raised — so it qualifies on the pricing flag instead, and the naira
+        * columns are meaningless on those rows until somebody prices them.
+        */
+       AND ((o.total_amount - o.amount_paid) > 0 OR o.pricing_status = 'pending')
        AND (o.credit_qty > 0 OR o.status IN ('Loading', 'Completed'))
        ${term ? sql`AND (${ref} ILIKE ${pattern} OR c.name ILIKE ${pattern} OR o.company_name ILIKE ${pattern} OR c.company_name ILIKE ${pattern})` : sql``}
      ORDER BY "exposedSince" ASC NULLS LAST
@@ -1680,6 +1707,8 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
 
   const all = (rows.rows ?? rows).map((r) => ({
     ...r,
+    /** True where the naira figures on this row mean nothing yet. */
+    awaitingPrice: r.pricingStatus === "pending",
     outstanding: Number(r.outstanding),
     creditQty: Number(r.creditQty ?? 0),
     daysOutstanding: Number(r.daysOutstanding ?? 0),
@@ -1691,12 +1720,24 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
     orders: list,
     summary: {
       count: list.length,
-      outstanding: list.reduce((sum, r) => sum + r.outstanding, 0),
+      /**
+       * Naira totals count PRICED rows only. An unpriced order contributes a
+       * zero that is not a zero, and letting it in would state a total the
+       * business does not actually believe — the honest figure is "this much,
+       * plus N orders nobody has priced", which is what awaitingPrice carries.
+       */
+      outstanding: list.filter((r) => !r.awaitingPrice).reduce((sum, r) => sum + r.outstanding, 0),
+      awaitingPrice: list.filter((r) => r.awaitingPrice).length,
+      awaitingPriceQuantity: list
+        .filter((r) => r.awaitingPrice)
+        .reduce((sum, r) => sum + Number(r.quantity || 0), 0),
       // Split out because they are different conversations: one is a debt
       // somebody authorised, the other is a debt that simply accumulated.
-      onCredit: list.filter((r) => r.creditQty > 0).reduce((sum, r) => sum + r.outstanding, 0),
+      onCredit: list
+        .filter((r) => r.creditQty > 0 && !r.awaitingPrice)
+        .reduce((sum, r) => sum + r.outstanding, 0),
       overThirtyDays: list
-        .filter((r) => r.daysOutstanding >= 30)
+        .filter((r) => r.daysOutstanding >= 30 && !r.awaitingPrice)
         .reduce((sum, r) => sum + r.outstanding, 0),
     },
   };

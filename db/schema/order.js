@@ -15,6 +15,7 @@ const {
   orderDeliveryTypeEnum,
   orderPaymentStatusEnum,
   orderStatusEnum,
+  orderPricingStatusEnum,
 } = require("./enums");
 const { customers } = require("./customer");
 const { depots } = require("./depot");
@@ -98,6 +99,17 @@ const orders = pgTable(
     virtualAccountBank: varchar("virtual_account_bank", { length: 100 }).default(""),
     virtualAccountName: varchar("virtual_account_name", { length: 255 }).default(""),
     paymentStatus: orderPaymentStatusEnum("payment_status").default("Unpaid").notNull(),
+    /**
+     * Whether a price has been agreed. See the enum's own note.
+     *
+     * On a `pending` order, `price` and `totalAmount` hold zeros that mean
+     * "not yet known" and must never be read as money — a CHECK (migration
+     * 0049) enforces the other direction, refusing to call an order `priced`
+     * unless it carries a real price.
+     */
+    pricingStatus: orderPricingStatusEnum("pricing_status").default("priced").notNull(),
+    pricedAt: timestamp("priced_at", { withTimezone: true }),
+    pricedBy: integer("priced_by").references(() => staff.id, { onDelete: "set null" }),
     status: orderStatusEnum("status").default("Pending").notNull(),
 
     // Accountability per stage. These columns — not audit_logs — are the source

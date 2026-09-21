@@ -47,6 +47,23 @@ const createOrder = z.object({
   // before the haulage is settled, and a guessed total is worse than none.
   expectedTrucks: z.coerce.number().int().positive().max(200).optional(),
   trucks: z.array(pickupTruck).max(20, "Too many trucks on one order").optional(),
+  /**
+   * Raise this order with no agreed price — the manually written ticket.
+   *
+   * Note this does NOT reintroduce a client-supplied price: there is still no
+   * `price` field anywhere on this body. It says the opposite — that there is
+   * no figure yet — and carries the reason that has to accompany saying so,
+   * because it also authorises the order to load before payment.
+   */
+  unpriced: z
+    .object({
+      reason: z
+        .string()
+        .trim()
+        .min(3, "Say why this order is being raised without a price")
+        .max(500, "Reason is too long"),
+    })
+    .optional(),
 });
 
 const listOrders = pagination.extend({
@@ -175,6 +192,24 @@ const creditRelease = z.object({
     .string()
     .trim()
     .min(3, "Say why this order is being released before payment")
+    .max(500, "Reason is too long"),
+});
+
+/**
+ * Putting a price on an order raised without one.
+ *
+ * `price` is accepted from the caller here and nowhere else in the codebase.
+ * See the controller for why: the figure was negotiated, so the depot's
+ * standing price is the wrong answer, not the safe one.
+ */
+const setOrderPrice = z.object({
+  price: z.coerce
+    .number({ invalid_type_error: "Price must be a number" })
+    .positive("The price must be greater than zero"),
+  reason: z
+    .string()
+    .trim()
+    .min(3, "Say what this price was agreed against")
     .max(500, "Reason is too long"),
 });
 
@@ -378,6 +413,7 @@ module.exports = {
   releaseOrder,
   creditRelease,
   revokeCreditRelease,
+  setOrderPrice,
   gateIn,
   loadTruck,
   loadParam,

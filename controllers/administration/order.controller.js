@@ -65,6 +65,11 @@ const createOrder = asyncHandler(async (req, res) => {
     customer: customerId, state, depot: depotId,
     product: productId, quantity, deliveryType, deliveryAddress, companyName, trucks,
     expectedTrucks,
+    /**
+     * `{ reason }` to raise this order with no agreed price — the manual
+     * ticket case. Also authorises it to load on credit; see placeOrder.
+     */
+    unpriced,
   } = req.body;
 
   if (!customerId || !state || !depotId || !productId || !quantity || !deliveryType) {
@@ -84,6 +89,7 @@ const createOrder = asyncHandler(async (req, res) => {
   const { order, payment } = await placeOrder({
     customerId, state, depotId, productId, quantity, deliveryType, deliveryAddress, companyName, trucks,
     expectedTrucks,
+    unpriced: unpriced || null,
     actor: { type: "staff", staffId: req.user.id },
   });
 
@@ -775,6 +781,22 @@ const getPayableOrders = asyncHandler(async (req, res) => {
  * does not name an amount, and there is no balance to draw on.
  */
 const confirmOrderPayment = asyncHandler(async (req, res) => {
+  /**
+   * An order with no price cannot take a payment.
+   *
+   * Its total is zero, so any statement line attached to it lands entirely as
+   * SURPLUS — the money would read as an overpayment on a free order, and the
+   * order would settle as Paid having been invoiced for nothing. Pricing first
+   * is not a formality; it is what makes the arithmetic mean anything.
+   */
+  const target = await orderRepo.findById(Number(req.params.id));
+  if (target?.pricingStatus === "pending") {
+    throw httpErr(
+      409,
+      "This order has no price yet. Set the price first — otherwise the payment lands as surplus on a zero-value order.",
+    );
+  }
+
   const order = await orderService.confirmOrderPayment({
     orderId: Number(req.params.id),
     bankAccountId: Number(req.body.bankAccountId),
@@ -1358,6 +1380,105 @@ const getReceivables = asyncHandler(async (req, res) => {
   res.json({ success: true, data });
 });
 
+/**
+ * Put a price on an order that was raised without one.
+ *
+ * The other half of the manual ticket. The truck left days ago on a handwritten
+ * ticket with no figure on it; this is the moment the figure is agreed and the
+ * invoice becomes possible.
+ *
+ * ── Why the price is taken from the caller here, and nowhere else ──────────
+ *
+ * placeOrder deliberately refuses a client-supplied price — it reads the
+ * depot's configured price server-side so nobody can sell at a number they
+ * typed. That rule is right at order time and wrong here: the whole reason this
+ * order has no price is that the figure was NOT the standing one, it was
+ * negotiated. Falling back to today's depot price would quietly invent an
+ * agreement nobody made.
+ *
+ * So the number is accepted, and the protections move to where they belong: it
+ * is finance-gated, it demands a reason, the before-and-after is written to the
+ * audit log, and it can only ever be done once — a priced order is not
+ * repriced here.
+ */
+const setOrderPrice = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const price = Number(req.body.price);
+  const reason = String(req.body.reason || "").trim();
+  const actor = { type: "staff", staffId: req.user.id };
+  const audit = { ipAddress: req.ip, userAgent: req.headers["user-agent"] };
+
+  await db.transaction(async (tx) => {
+    const order = await orderRepo.lockById(orderId, tx);
+    if (!order) throw httpErr(404, "Order not found");
+
+    if (order.pricingStatus !== "pending") {
+      throw httpErr(
+        409,
+        "This order already has a price. Editing a priced order's figures is a different act, with its own trail.",
+      );
+    }
+    if (!Number.isFinite(price) || price <= 0) {
+      throw httpErr(400, "The price must be greater than zero");
+    }
+    if (!reason) throw httpErr(400, "A reason is required — say what this price was agreed against");
+
+    const quantity = Number(order.quantity);
+    const totalAmount = price * quantity;
+
+    /**
+     * The credit allowance is left exactly as it is.
+     *
+     * Tempting to clear it — the order has a price now, so the "unknown amount"
+     * part is over. But the other part is not: the product left before payment,
+     * and it is still unpaid. Clearing the allowance would drop the order off
+     * the receivables list at the very moment it finally became chaseable.
+     * It leaves when the money arrives, not when the number does.
+     */
+    await orderRepo.update(
+      orderId,
+      {
+        price: String(price),
+        totalAmount: String(totalAmount),
+        pricingStatus: "priced",
+        pricedAt: new Date(),
+        pricedBy: req.user.id,
+      },
+      tx,
+    );
+
+    await auditLogRepo.record(
+      {
+        entityType: "order",
+        entityId: orderId,
+        action: "order.priced",
+        actor,
+        metadata: {
+          price,
+          quantity,
+          totalAmount,
+          reason,
+          // How long it sat without one. The number worth watching: a day is
+          // ordinary, a month means the invoice was never going to be raised.
+          daysUnpriced: Math.max(
+            0,
+            Math.round((Date.now() - new Date(order.createdAt).getTime()) / 86400000),
+          ),
+        },
+        ...audit,
+      },
+      tx,
+    );
+  });
+
+  const order = await orderRepo.findByIdFull(orderId);
+  res.json({
+    success: true,
+    message: `Priced at ₦${price.toLocaleString()} — ₦${Number(order.totalAmount).toLocaleString()} now invoiceable`,
+    data: { order },
+  });
+});
+
 /** Credit may be authorised while an order can still take product out. */
 const CREDITABLE = new Set(["Pending", "Paid", "Released", "Loading"]);
 
@@ -1532,6 +1653,7 @@ const revokeCreditRelease = asyncHandler(async (req, res) => {
 
 module.exports = {
   getReceivables,
+  setOrderPrice,
   authoriseCreditRelease,
   revokeCreditRelease,
   getOrders,

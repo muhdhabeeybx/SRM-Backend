@@ -71,6 +71,22 @@ const orderPaymentStatusEnum = pgEnum("order_payment_status", [
 // an exit. Processing was deliberately not added — the depot confirmed there is
 // no distinct action between payment landing and release, so it would be a
 // stage with no writer.
+/**
+ * Whether anyone has agreed what this order costs.
+ *
+ * A manually written ticket usually carries no price — the customer is given
+ * the ticket, the truck loads, and the invoice follows. The sale is real from
+ * the moment the truck leaves; only the figure is outstanding.
+ *
+ * This is a flag and not a zero price on purpose. 0 does not mean "unknown" in
+ * this schema, it means free, and every consumer reads it that way — most
+ * dangerously findReceivables, which filters on an outstanding balance and
+ * would drop a valueless order off the one list built to catch product that
+ * left unpaid. On a `pending` order the zeros in price and total_amount are
+ * placeholders and are never money. See db/migrations/0049.
+ */
+const orderPricingStatusEnum = pgEnum("order_pricing_status", ["priced", "pending"]);
+
 const orderStatusEnum = pgEnum("order_status", [
   "Pending",
   "Paid",
@@ -417,6 +433,7 @@ module.exports = {
   orderDeliveryTypeEnum,
   orderPaymentStatusEnum,
   orderStatusEnum,
+  orderPricingStatusEnum,
   pfiStatusEnum,
   expenseStatusEnum,
   reportTypeEnum,
