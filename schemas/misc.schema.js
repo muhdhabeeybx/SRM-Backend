@@ -356,8 +356,19 @@ const createBankStatement = z.object({
          *
          * Cells only, as strings, and capped: this is evidence, not input,
          * and nothing downstream reads it as anything but text.
+         *
+         * A blank cell arrives as null and is kept as "". The spreadsheet
+         * reader returns a row with an empty leading cell as a sparse array,
+         * and a hole becomes null the moment it is serialised — so the day
+         * this field started being checked, any statement with a blank first
+         * column was refused outright: "rows.2.rawRow.0 — expected string,
+         * received null". An empty cell is a true fact about the bank's row,
+         * and refusing a whole statement over it loses every line in it.
          */
-        rawRow: z.array(z.string().max(2000)).max(100).optional(),
+        rawRow: z
+          .array(z.string().max(2000).nullable().transform((v) => v ?? ""))
+          .max(100)
+          .optional(),
       })
     )
     .min(1, "At least one row is required"),
