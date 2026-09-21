@@ -67,10 +67,23 @@ END $$;
 --
 -- Unpaid orders keep the 0 default. Guarded on amount_paid = 0 so a re-run
 -- cannot overwrite a figure a part payment has since moved.
+--
+-- `total_amount > 0` writes nothing different — setting amount_paid to a total
+-- of 0 on a row already holding 0 is a no-op — but it stops this statement
+-- TOUCHING such a row, and that distinction is the whole point.
+--
+-- 0049 added orders_priced_has_price_check as NOT VALID precisely because one
+-- production order violates it: LN4378 (id 4378), marked Paid and priced at
+-- 0.00, an anomaly from March 2026 left alone deliberately. NOT VALID exempts
+-- it while it sits still, but any UPDATE that touches the row re-checks it. So
+-- this six-month-old backfill began failing the moment 0049 landed, and
+-- because apply-unjournaled-migrations runs the files in order, the whole
+-- chain stopped here — 0050 never applied.
 UPDATE orders
 SET amount_paid = total_amount
 WHERE payment_status = 'Paid'
-  AND amount_paid = 0;
+  AND amount_paid = 0
+  AND total_amount > 0;
 
 -- Read by the finance report to list orders with a balance outstanding, and by
 -- the payable-orders desk. Partial index: fully-paid orders are the bulk of the
