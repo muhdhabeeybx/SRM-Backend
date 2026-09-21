@@ -81,6 +81,27 @@ const createDeliverySale = z.object({
 });
 const updateDeliverySale = z.object(base).partial();
 
+/**
+ * Many rows as one write — a station's day, or an imported spreadsheet.
+ *
+ * Each row is validated exactly as the single create route validates one,
+ * minus `lineIds`: claiming bank statement lines marks credits spent under a
+ * guard of its own (createFromStatementLines), and folding that into a bulk
+ * insert would let one bad row leave lines claimed with nothing behind them.
+ *
+ * The ceiling is a sanity bound, not a working limit. A station's day is a
+ * handful of rows and a month's import a few hundred.
+ */
+const createDeliverySalesBulk = z.object({
+  sales: z
+    .array(z.object({
+      ...base,
+      truckNumber: requiredString("Truck number", 100),
+    }))
+    .min(1, "Nothing to record")
+    .max(1000, "Too many rows in one upload — split the file"),
+});
+
 const listDeliverySales = pagination.extend({
   search: searchTerm,
   customer: searchTerm,
@@ -129,6 +150,7 @@ const cycleStandingQuery = z.object({
 
 module.exports = {
   createDeliverySale,
+  createDeliverySalesBulk,
   updateDeliverySale,
   setDepositStatus,
   listDeliverySales,

@@ -90,6 +90,26 @@ const createDeliverySale = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Several rows in one transaction: a filling station's day, or an import.
+ *
+ * `enteredBy` is stamped here from the session rather than trusted per row —
+ * an uploaded file could otherwise name anybody as its author.
+ */
+const createDeliverySalesBulk = asyncHandler(async (req, res) => {
+  const actor = req.user
+    ? [req.user.firstName, req.user.surname].filter(Boolean).join(" ") || req.user.email || ""
+    : "";
+  const rows = req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" }));
+
+  const sales = await deliverySaleRepo.createMany(rows);
+  res.status(201).json({
+    success: true,
+    message: `${sales.length} entr${sales.length === 1 ? "y" : "ies"} recorded`,
+    data: { sales, count: sales.length },
+  });
+});
+
+/**
  * Move a truck's overpayment onto other trucks.
  *
  * Its own route rather than two calls to the create endpoint: the debit and
@@ -175,6 +195,7 @@ const deleteDeliverySale = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  createDeliverySalesBulk,
   getDeliverySales,
   getDeliverySaleById,
   createDeliverySale,

@@ -143,6 +143,38 @@ const create = async (data) => {
 const httpError = (status, message) => Object.assign(new Error(message), { status });
 
 /**
+ * Insert many rows, all or none.
+ *
+ * One transaction because the callers are a day sheet and a spreadsheet
+ * import, and both are one act to the person doing them: half a day recorded
+ * is a day that reconciles wrongly, and half a spreadsheet is worse — the
+ * re-upload that follows would duplicate the half that did land.
+ *
+ * The customers are checked up front rather than left to the foreign key. The
+ * key would roll the transaction back just as surely, but with a driver error
+ * naming a constraint; this names the row, which is what someone fixing a
+ * spreadsheet needs.
+ */
+const createMany = async (rows) => {
+  const ids = [...new Set(rows.map((r) => r.customerId).filter((id) => id != null).map(Number))];
+
+  return db.transaction(async (tx) => {
+    if (ids.length) {
+      const found = await tx
+        .select({ id: deliveryCustomers.id })
+        .from(deliveryCustomers)
+        .where(inArray(deliveryCustomers.id, ids));
+      const known = new Set(found.map((c) => c.id));
+      const missing = rows.findIndex((r) => r.customerId != null && !known.has(Number(r.customerId)));
+      if (missing >= 0) {
+        throw httpError(400, `Row ${missing + 1}: customer ${rows[missing].customerId} does not exist`);
+      }
+    }
+    return tx.insert(deliverySales).values(rows).returning();
+  });
+};
+
+/**
  * Record truck-sale payments from the bank statement lines that paid them.
  *
  * The same shape as an order's confirmation (orderPayment.service
@@ -384,6 +416,7 @@ module.exports = {
   findPendingByCustomer,
   findAll,
   create,
+  createMany,
   createFromStatementLines,
   update,
   deleteById,
