@@ -755,6 +755,52 @@ async function placeOrder({
   // same decoration every other read path does.
   const reference = fullOrder.orderNumber;
 
+  /**
+   * An unpriced order sends the customer nothing at creation.
+   *
+   * The invoice email and the payment SMS below are payment demands: a
+   * quantity, a rate, a total and an account to pay it into. On an order with
+   * no agreed price every one of those figures is a placeholder zero, so they
+   * would tell a customer who is mid-negotiation to pay ₦0 — which is wrong on
+   * its face, and worse, reads as a written statement that the fuel was free.
+   * The invoice goes out when the order is priced; until then the paper ticket
+   * in the driver's hand is the only document the customer should hold.
+   */
+  if (unpriced) {
+    try {
+      notify("staff.order_placed", {
+        to: { roles: ["admin", "super_admin", "sales_manager", "finance_manager"] },
+        data: {
+          orderId: order.id,
+          orderNumber: reference,
+          reference,
+          customerName: customer.name,
+          product: fullOrder.productName || "",
+          quantity: order.quantity,
+          unit: fullOrder.productUnit || "Liters",
+          totalAmount: order.totalAmount,
+          depotName: depot.name,
+          awaitingPrice: true,
+        },
+      });
+    } catch (notifyErr) {
+      console.error("[placeOrder] post-commit notify failed (order IS created):", notifyErr.message);
+    }
+
+    return {
+      order: fullOrder,
+      isPaidWithWallet: false,
+      payment: {
+        accountNumber: virtualAccountNumber,
+        bankName: virtualAccountBank,
+        accountName: virtualAccountName,
+        emailSent: false,
+        smsSent: false,
+        awaitingPrice: true,
+      },
+    };
+  }
+
   if (customer.email) {
     try {
       await sendOrderInvoiceEmail(customer.email, {

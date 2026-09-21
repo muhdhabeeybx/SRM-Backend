@@ -134,8 +134,15 @@ describe("an order raised with no price", () => {
     });
     assert.equal(res.status, 201, JSON.stringify(res.body));
 
+    // No invoice and no payment SMS: every figure on them would be a
+    // placeholder zero, telling a customer mid-negotiation to pay ₦0.
+    assert.equal(res.body.data.payment.emailSent, false, "no ₦0 invoice email");
+    assert.equal(res.body.data.payment.smsSent, false, "no ₦0 payment SMS");
+    assert.equal(res.body.data.payment.awaitingPrice, true);
+
     const order = await orderRepo.findByIdFull(res.body.data.order.id);
     assert.equal(order.pricingStatus, "pending");
+    assert.equal(order.status, "Released", "born able to be ticketed");
     assert.equal(Number(order.price), 0);
     assert.equal(Number(order.totalAmount), 0);
     // The one act covers both halves — no second request to forget.

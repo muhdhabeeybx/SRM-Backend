@@ -20,6 +20,8 @@ const orderStatus = require("../../services/orderStatus.service");
 const truckProgress = require("../../services/truckProgress.service");
 const orderService = require("../../services/order.service");
 const orderPaymentService = require("../../services/orderPayment.service");
+const { sendOrderInvoiceEmail } = require("../../services/email.service");
+const { sendOrderSummarySMS } = require("../../services/sms.service");
 const { placeOrder, withExpiresAt } = orderService;
 
 /** Small helper: an HTTP error the error handler renders with its status. */
@@ -1472,10 +1474,67 @@ const setOrderPrice = asyncHandler(async (req, res) => {
   });
 
   const order = await orderRepo.findByIdFull(orderId);
+
+  /**
+   * NOW the invoice goes out — the one placeOrder deliberately held back.
+   *
+   * An unpriced order sends the customer nothing at creation, because every
+   * figure on the invoice would have been a placeholder zero. This is the
+   * moment those figures become real, so this is where the same email and SMS
+   * an ordinary order sends at checkout are sent instead.
+   *
+   * After the commit and never inside it: a slow mail or SMS provider must not
+   * hold the order's row lock, and a failed send must not roll back a price
+   * finance has already agreed. Both are reported back so the desk knows
+   * whether the customer actually received it.
+   */
+  let emailSent = false;
+  let smsSent = false;
+  const invoice = {
+    orderNumber: order.orderNumber,
+    orderDate: order.createdAt,
+    customerName: order.customerName,
+    companyName: order.companyName || order.customerCompanyName || "",
+    customerPhone: order.customerPhone,
+    product: order.productName || "N/A",
+    sku: order.productSku || "",
+    quantity: order.quantity,
+    unit: order.productUnit || "Liters",
+    price: order.price,
+    totalAmount: order.totalAmount,
+    deliveryType: order.deliveryType,
+    depotName: order.depotName,
+    depotCode: order.depotCode,
+    state: order.state,
+    accountNumber: order.virtualAccountNumber,
+    bankName: order.virtualAccountBank,
+    accountName: order.virtualAccountName,
+  };
+
+  if (order.customerEmail) {
+    try {
+      await sendOrderInvoiceEmail(order.customerEmail, invoice);
+      emailSent = true;
+    } catch (err) {
+      console.error("[setOrderPrice] invoice email failed (order IS priced):", err.message);
+    }
+  }
+  if (order.customerPhone) {
+    try {
+      const sms = await sendOrderSummarySMS(order.customerPhone, invoice);
+      smsSent = Boolean(sms?.success);
+    } catch (err) {
+      console.error("[setOrderPrice] invoice SMS failed (order IS priced):", err.message);
+    }
+  }
+
+  const sentTo = [emailSent && "email", smsSent && "SMS"].filter(Boolean).join(" and ");
   res.json({
     success: true,
-    message: `Priced at ₦${price.toLocaleString()} — ₦${Number(order.totalAmount).toLocaleString()} now invoiceable`,
-    data: { order },
+    message: `Priced at ₦${price.toLocaleString()} — ₦${Number(order.totalAmount).toLocaleString()} ${
+      sentTo ? `invoiced by ${sentTo}` : "now invoiceable (the customer could not be messaged)"
+    }`,
+    data: { order, invoice: { emailSent, smsSent } },
   });
 });
 
