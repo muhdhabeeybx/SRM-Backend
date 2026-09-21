@@ -78,7 +78,13 @@ const SALE_DAY = (tz) => client`(o.created_at AT TIME ZONE ${tz})::date`;
  * reconcile line by line. The service returns the total it dropped, and the
  * page prints it.
  */
-const DUPLICATE_LEGACY_IDS = client`
+/**
+ * The rule as plain SQL text, so a caller on a different driver — a drizzle
+ * transaction, which cannot interpolate a postgres.js fragment — builds from
+ * the SAME words rather than a copy of them. Two copies of a rule about which
+ * money is real is how they come to disagree. See orderRefund.service.js.
+ */
+const DUPLICATE_LEGACY_IDS_SQL = `
   SELECT op.id
     FROM order_payments op
     JOIN orders o ON o.id = op.order_id
@@ -92,6 +98,7 @@ const DUPLICATE_LEGACY_IDS = client`
      AND (SELECT COALESCE(SUM(a.amount), 0) FROM order_payments a WHERE a.order_id = op.order_id) - op.amount
          = o.total_amount::numeric
 `;
+const DUPLICATE_LEGACY_IDS = client.unsafe(DUPLICATE_LEGACY_IDS_SQL);
 
 /**
  * The day a payment becomes countable on this report.
@@ -196,7 +203,14 @@ const inflowByDay = async ({ tz, from, to, pfiIds }) => {
            COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'statement'), 0)::numeric    AS statement_amount,
            COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'legacy'), 0)::numeric       AS legacy_amount,
            COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'transfer_in'), 0)::numeric  AS transfer_in_amount,
-           COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'transfer_out'), 0)::numeric AS transfer_out_amount
+           COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'transfer_out'), 0)::numeric AS transfer_out_amount,
+           /*
+            * Overpayment sent back to the customer — negative, and its own
+            * part. Without it the four parts stopped adding up to the total
+            * the moment a refund was paid, and "traced to bank" would have
+            * been computed against a whole that no longer held.
+            */
+           COALESCE(SUM(op.amount) FILTER (WHERE op.source = 'refund'), 0)::numeric AS refund_amount
       FROM order_payments op
       JOIN orders o ON o.id = op.order_id
      WHERE o.pfi_id IS NOT NULL
@@ -403,4 +417,5 @@ module.exports = {
   // Exported for the tests, which assert the duplicate rule catches exactly
   // the 0021 rows and not the square orders that merely look like them.
   DUPLICATE_LEGACY_IDS,
+  DUPLICATE_LEGACY_IDS_SQL,
 };

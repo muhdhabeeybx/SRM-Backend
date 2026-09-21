@@ -58,7 +58,7 @@ const financeSummary = async ({ from, to }) => {
         -- between orders, not receipts, so they are excluded on both sides.
         COALESCE(SUM((
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p
-          WHERE p.order_id = o.id AND p.source NOT IN ('transfer_in', 'transfer_out')
+          WHERE p.order_id = o.id AND p.source NOT IN ('transfer_in', 'transfer_out', 'refund')
         )), 0) AS received,
         COALESCE(SUM(GREATEST(0, o.total_amount::numeric - (
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p WHERE p.order_id = o.id
@@ -200,7 +200,7 @@ const depotLeaderboard = async ({ from, to }) => {
         COALESCE(SUM(o.total_amount::numeric), 0) AS billed,
         COALESCE(SUM((
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p
-          WHERE p.order_id = o.id AND p.source NOT IN ('transfer_in', 'transfer_out')
+          WHERE p.order_id = o.id AND p.source NOT IN ('transfer_in', 'transfer_out', 'refund')
         )), 0) AS revenue
       FROM depots d
       LEFT JOIN orders o

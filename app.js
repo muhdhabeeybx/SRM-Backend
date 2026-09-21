@@ -95,6 +95,9 @@ app.use("/api/delivery-customers", require("./routes/administration/deliveryCust
 app.use("/api/delivery-inventory", require("./routes/administration/deliveryInventory.route"));
 app.use("/api/delivery-sales", require("./routes/administration/deliverySale.route"));
 app.use("/api/orders", require("./routes/administration/order.route"));
+// Overpayment sent back to the customer. Its own mount rather than a path
+// under /api/orders, where it would have to be matched above /:id.
+app.use("/api/order-refunds", require("./routes/administration/orderRefund.route"));
 app.use("/api/tickets", require("./routes/administration/ticket.route"));
 app.use("/api/deposits", require("./routes/administration/deposit.route"));
 app.use("/api/expected-payments", require("./routes/administration/expectedPayment.route"));

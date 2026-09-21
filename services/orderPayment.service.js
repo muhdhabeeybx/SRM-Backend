@@ -337,6 +337,46 @@ const removePayment = async ({ paymentId, staffId = null, reason = "" }, tx) => 
       );
     }
 
+    // A refund is the record of money that left. It is withdrawn through
+    // Undo refund, which puts its request back and keeps an audit trail —
+    // never deleted as though it were a mis-matched bank line.
+    if (payment.refundId) {
+      throw httpError(
+        400,
+        "This is a refund paid back to the customer. Use Undo refund on the Refunds page if it was recorded by mistake.",
+      );
+    }
+
+    /*
+     * Nor may removing a payment strand a refund that has already been paid.
+     *
+     * The refund was sized to the surplus this payment helped create. Take the
+     * payment away afterwards and the order is left short by money that has
+     * already gone back to the customer — a shortfall that looks like the
+     * customer's debt and is actually ours.
+     */
+    const [paidRefund] = await trx
+      .select({ id: orderPayments.id })
+      .from(orderPayments)
+      .where(and(eq(orderPayments.orderId, payment.orderId), eq(orderPayments.source, PAYMENT_SOURCE.REFUND)))
+      .limit(1);
+    if (paidRefund) {
+      const [ord] = await trx
+        .select({ totalAmount: orders.totalAmount, orderNumber: orders.orderNumber })
+        .from(orders).where(eq(orders.id, payment.orderId)).limit(1);
+      const rest = await trx
+        .select({ amount: orderPayments.amount, source: orderPayments.source })
+        .from(orderPayments)
+        .where(eq(orderPayments.orderId, payment.orderId));
+      const after = summarize(ord.totalAmount, rest).received - money(payment.amount);
+      if (after < money(ord.totalAmount) - 0.005) {
+        throw httpError(
+          409,
+          `${ord.orderNumber} has had an overpayment refunded. Removing this payment would leave it short by money already sent back — undo the refund first.`,
+        );
+      }
+    }
+
     await trx.delete(orderPayments).where(eq(orderPayments.id, paymentId));
 
     if (payment.statementLineId) {

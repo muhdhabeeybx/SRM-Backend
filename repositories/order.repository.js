@@ -15,6 +15,14 @@ const { scopeCondition } = require("../lib/scopeFilter");
 
 /** The two payment sources that are a movement between orders, not money in. */
 const TRANSFER_SOURCES = new Set(["transfer_in", "transfer_out"]);
+/**
+ * Sources that are NOT money arriving at the bank against this order.
+ *
+ * Transfer legs are movements between orders; a refund is money going back to
+ * the customer. Neither belongs in "Amount Paid", which is the column this
+ * report is checked against a bank statement line by line.
+ */
+const NOT_PAID_IN = new Set(["transfer_in", "transfer_out", "refund"]);
 
 /**
  * Weakest-first. An order is only as auditable as its least defensible payment,
@@ -34,6 +42,13 @@ const BASIS_RANK = [
 ];
 
 const weakestBasis = (rows) => {
+  /*
+   * A refund is money LEAVING, and this question is about how money arrived.
+   * Left in, a refund row would decide the order's basis — and an unranked
+   * basis sorts worst — so a clean, bank-matched order would start reporting
+   * as unaccountable the moment its overpayment was sent back.
+   */
+  rows = rows.filter((r) => r.source !== "refund");
   if (!rows.length) return null;
   let worst = null;
   let worstRank = Infinity;
@@ -910,7 +925,7 @@ const findFinanceReport = async ({
         // reconciliation against the statement adds up. See amountPaidIn.
         totalAmountPaidIn: sql`COALESCE(SUM((
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op
-          WHERE op.order_id = ${orders.id} AND op.source NOT IN ('transfer_in', 'transfer_out')
+          WHERE op.order_id = ${orders.id} AND op.source NOT IN ('transfer_in', 'transfer_out', 'refund')
         )), 0)`,
         // Movement between orders, netted. Zero over any window holding both
         // ends of every transfer in it — which is what makes it a useful check.
@@ -1283,7 +1298,7 @@ const findFinanceReport = async ({
      * A transfer is a later, separate event. It gets its own columns below.
      */
     const amountPaidIn = rowPayments
-      .filter((p) => !TRANSFER_SOURCES.has(p.source))
+      .filter((p) => !NOT_PAID_IN.has(p.source))
       .reduce((sum, p) => sum + p.amount, 0);
 
     const transferredIn = rowPayments
@@ -1296,8 +1311,16 @@ const findFinanceReport = async ({
       .reduce((sum, p) => sum + p.amount, 0);
     const netTransfers = transferredIn + transferredOut;
 
-    /** What the order actually holds now: paid in, plus what moved. */
-    const received = amountPaidIn + netTransfers;
+    /**
+     * Overpayment sent back to the customer. Negative on the row, like the
+     * outgoing leg of a transfer, so it nets without a special case.
+     */
+    const refunded = rowPayments
+      .filter((p) => p.source === "refund")
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    /** What the order actually holds now: paid in, plus what moved or went back. */
+    const received = amountPaidIn + netTransfers + refunded;
 
     return {
       ...row,
@@ -1313,6 +1336,8 @@ const findFinanceReport = async ({
       transferredOut,
       /** Signed: negative where this order gave money away. */
       netTransfers,
+      /** Negative: overpayment refunded to the customer. */
+      refunded,
       /**
        * What is left once both are taken into account. Zero on a settled
        * order, whichever route its money took — this is the column that

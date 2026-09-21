@@ -63,6 +63,51 @@ const orderPaymentTransfers = pgTable(
 );
 
 /**
+ * Overpayment sent back to the customer — see db/migrations/0043.
+ *
+ * Requested, then refunded. The request changes nothing about the order: its
+ * surplus still shows, because the money is still with us. Only marking it
+ * refunded writes a negative `refund` row into orderPayments, and the surplus
+ * falls to zero through the same SUM that produced it.
+ */
+const orderRefunds = pgTable(
+  "order_refunds",
+  {
+    id: serial("id").primaryKey(),
+    orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "restrict" }),
+    customerId: integer("customer_id").notNull(),
+    amount: numeric("amount", { precision: 15, scale: 2 }).notNull(),
+    /** 'requested' | 'refunded' | 'cancelled' */
+    status: varchar("status", { length: 16 }).notNull().default("requested"),
+    destinationBank: varchar("destination_bank", { length: 255 }).notNull().default(""),
+    destinationName: varchar("destination_name", { length: 255 }).notNull().default(""),
+    destinationNumber: varchar("destination_number", { length: 30 }).notNull().default(""),
+    reason: text("reason").notNull().default(""),
+    requestedBy: integer("requested_by").references(() => staff.id, { onDelete: "set null" }),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).defaultNow().notNull(),
+    paidFromAccountId: integer("paid_from_account_id").references(() => bankAccounts.id, {
+      onDelete: "set null",
+    }),
+    paymentReference: varchar("payment_reference", { length: 255 }).notNull().default(""),
+    paidAt: timestamp("paid_at", { withTimezone: true }),
+    paidBy: integer("paid_by").references(() => staff.id, { onDelete: "set null" }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelledBy: integer("cancelled_by").references(() => staff.id, { onDelete: "set null" }),
+    cancelReason: text("cancel_reason").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    // One open request per order: two would let the same surplus be paid twice.
+    uniqueIndex("order_refunds_one_open_idx")
+      .on(table.orderId)
+      .where(sql`${table.status} = 'requested'`),
+    index("order_refunds_status_idx").on(table.status),
+    index("order_refunds_customer_idx").on(table.customerId),
+  ],
+);
+
+/**
  * Money received against an ORDER. The single record of it — see migration
  * 0021 for what this replaced and why.
  *
@@ -122,6 +167,8 @@ const orderPayments = pgTable(
     transferId: integer("transfer_id").references(() => orderPaymentTransfers.id, {
       onDelete: "restrict",
     }),
+    /** On a `refund` row, the refund it pays out. Null on every other source. */
+    refundId: integer("refund_id").references(() => orderRefunds.id, { onDelete: "restrict" }),
     /** The wallet row this was derived from, where the backfill had one. */
     depositId: integer("deposit_id").references(() => deposits.id, { onDelete: "set null" }),
     recordedBy: integer("recorded_by").references(() => staff.id, { onDelete: "set null" }),
@@ -208,6 +255,8 @@ const PAYMENT_SOURCE = {
   TRANSFER_IN: "transfer_in",
   TRANSFER_OUT: "transfer_out",
   LEGACY: "legacy",
+  /** Overpayment sent back to the customer. Negative. See orderRefunds. */
+  REFUND: "refund",
 };
 
 /**
@@ -234,6 +283,8 @@ const CONFIRMATION_BASIS = {
   TRANSFER_AUTO: "transfer_auto",
   /** Reached by no rule. Should not occur; surfaced rather than hidden. */
   UNKNOWN: "unknown",
+  /** A person recorded money going BACK to the customer. See orderRefunds. */
+  REFUND_DESK: "refund_desk",
 };
 
 /** Bases an external auditor can check against a bank statement. */
@@ -259,9 +310,11 @@ const CONFIRMATION_BASIS_LABEL = {
   [CONFIRMATION_BASIS.TRANSFER_DESK]: "Transfer recorded by staff",
   [CONFIRMATION_BASIS.TRANSFER_AUTO]: "Transfer auto-created by the system",
   [CONFIRMATION_BASIS.UNKNOWN]: "Unknown",
+  [CONFIRMATION_BASIS.REFUND_DESK]: "Refund paid by staff",
 };
 
 module.exports = {
+  orderRefunds,
   orderPayments,
   orderPaymentTransfers,
   PAYMENT_SOURCE,

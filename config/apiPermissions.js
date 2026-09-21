@@ -28,6 +28,7 @@ const API_PERMISSIONS = {
   "/api/notifications": { read: null },
   "/api/uploads": { read: null },
   "/api/orders": { read: null },
+  "/api/order-refunds": { read: null },
   "/api/tickets": { read: null },
   "/api/customers": { read: null },
   "/api/customer-licenses": { read: null },

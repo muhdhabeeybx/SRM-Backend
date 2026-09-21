@@ -1,0 +1,73 @@
+const asyncHandler = require("express-async-handler");
+const refundService = require("../../services/orderRefund.service");
+
+/**
+ * Overpayment refunds — the replacement for moving surplus between orders.
+ *
+ * All the reasoning lives in services/orderRefund.service.js, including why a
+ * request changes nothing about the order and why the amounts read past the
+ * migration-0021 duplicates.
+ */
+
+/** Orders genuinely holding money beyond their value. */
+const getRefundable = asyncHandler(async (req, res) => {
+  const orders = await refundService.listRefundable({
+    search: req.query.search,
+    limit: req.query.limit,
+  });
+  res.json({ success: true, data: { orders } });
+});
+
+const getRefunds = asyncHandler(async (req, res) => {
+  const refunds = await refundService.listRefunds({
+    status: req.query.status || null,
+    limit: req.query.limit,
+  });
+  res.json({ success: true, data: { refunds } });
+});
+
+const createRefund = asyncHandler(async (req, res) => {
+  const refund = await refundService.requestRefund({ ...req.body, staffId: req.user?.id ?? null });
+  res.status(201).json({
+    success: true,
+    message: "Refund requested. The overpayment stays on the order until the money has been sent.",
+    data: { refund },
+  });
+});
+
+const payRefund = asyncHandler(async (req, res) => {
+  const result = await refundService.markRefunded({
+    refundId: Number(req.params.id),
+    ...req.body,
+    staffId: req.user?.id ?? null,
+  });
+  res.json({
+    success: true,
+    message: "Refund recorded. The order no longer shows an overpayment.",
+    data: result,
+  });
+});
+
+const cancelRefund = asyncHandler(async (req, res) => {
+  const refund = await refundService.cancelRefund({
+    refundId: Number(req.params.id),
+    reason: req.body.reason,
+    staffId: req.user?.id ?? null,
+  });
+  res.json({ success: true, message: "Refund request cancelled.", data: { refund } });
+});
+
+const undoRefund = asyncHandler(async (req, res) => {
+  const result = await refundService.undoRefund({
+    refundId: Number(req.params.id),
+    reason: req.body.reason,
+    staffId: req.user?.id ?? null,
+  });
+  res.json({
+    success: true,
+    message: "Refund undone. It is waiting to be paid again, and the overpayment is back on the order.",
+    data: result,
+  });
+});
+
+module.exports = { getRefundable, getRefunds, createRefund, payRefund, cancelRefund, undoRefund };

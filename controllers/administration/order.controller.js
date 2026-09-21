@@ -862,24 +862,26 @@ const removeOrderPayment = asyncHandler(async (req, res) => {
 });
 
 /**
- * Move surplus from this order to another one.
+ * Moving surplus between orders — switched off.
  *
- * The sanctioned replacement for what used to be done as a wallet transfer
- * with the destination typed into a description field.
+ * Overpayment now goes back to the customer through the refunds page
+ * (services/orderRefund.service.js) rather than being moved onto another
+ * order. A refusal here rather than only a hidden button: the endpoint
+ * answered any signed-in caller, so removing the UI alone would leave it one
+ * devtools tab away, and a transfer recorded after the cutover would be money
+ * moved by a route nobody is reconciling any more.
+ *
+ * 410 rather than 404 — the same answer POST /deposits gives for the wallet
+ * path it replaced. The route is gone on purpose, and says so.
+ *
+ * The 72 transfers already made are untouched: the finance report is audited
+ * against them, and reversing and reviewing them both still work.
  */
-const transferOrderPayment = asyncHandler(async (req, res) => {
-  const result = await orderPaymentService.transferSurplus({
-    fromOrderId: Number(req.params.id),
-    toOrderId: Number(req.body.toOrderId),
-    amount: Number(req.body.amount),
-    reason: req.body.reason,
-    staffId: req.user.id,
-  });
-
-  res.json({
-    success: true,
-    message: `₦${Number(req.body.amount).toLocaleString()} moved to the destination order. Both orders now show the movement.`,
-    data: result,
+const transferOrderPayment = asyncHandler(async (_req, res) => {
+  res.status(410).json({
+    success: false,
+    message:
+      "Surplus is no longer moved between orders. Refund the overpayment to the customer from Finance → Overpayment refunds.",
   });
 });
 
