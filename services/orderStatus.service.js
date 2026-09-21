@@ -22,7 +22,16 @@ const { generateOrderReference } = require("../utils/helpers");
 const TRANSITIONS = Object.freeze({
   // Expired is only reachable from Pending: once an order is Paid it has been
   // funded and can never lapse.
-  Pending: ["Paid", "Cancelled", "Expired"],
+  //
+  // Released is reachable from Pending ONLY through an authorised credit
+  // release (order.controller.authoriseCreditRelease) — role-gated, and it
+  // refuses without a reason and an allowance. Widening the map does NOT
+  // weaken the money gate, because the map was never the money gate:
+  // releasableQuantity() is, and it still returns zero for an unpaid order
+  // nobody has authorised. A Released order with no allowance can therefore be
+  // ticketed for nothing at all, exactly as an unpaid Paid-path order could
+  // not be before.
+  Pending: ["Paid", "Released", "Cancelled", "Expired"],
   Paid: ["Released", "Cancelled"],
   Released: ["Loading", "Cancelled"], // cancel allowed THROUGH Released
   Loading: ["Completed"], // no cancel once a truck has gated in

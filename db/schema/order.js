@@ -49,6 +49,26 @@ const orders = pgTable(
     // finance report reports, and rejecting it here would turn a fact into a
     // failed request. See db/migrations/0020.
     amountPaid: decimal("amount_paid", { precision: 15, scale: 2 }).default("0").notNull(),
+    /**
+     * Quantity this order is trusted to load before paying for it.
+     *
+     * A SECOND allowance, added to the one the received money buys rather than
+     * replacing it — see releasableQuantity in services/order.service.js. It
+     * exists because the depot writes tickets by hand before payment and the
+     * system had no way to express that except by having no payment gate at
+     * all, which is worse.
+     *
+     * Never set on its own: a CHECK constraint (migration 0048) requires an
+     * authoriser, a time and a reason alongside any non-zero value, because an
+     * allowance with nobody's name against it is exactly what this is meant to
+     * prevent.
+     */
+    creditQty: decimal("credit_qty", { precision: 15, scale: 2 }).default("0").notNull(),
+    creditReason: text("credit_reason").default("").notNull(),
+    creditAuthorisedBy: integer("credit_authorised_by").references(() => staff.id, {
+      onDelete: "set null",
+    }),
+    creditAuthorisedAt: timestamp("credit_authorised_at", { withTimezone: true }),
     deliveryType: orderDeliveryTypeEnum("delivery_type").notNull(),
     /**
      * How many trucks this order is expected to take, stated when it is

@@ -191,6 +191,24 @@ const FULL_ORDER_COLUMNS = {
   // instalments. Equal to totalAmount on a fully-paid order; the difference is
   // the balance still expected on a part-paid one.
   amountPaid: orders.amountPaid,
+  /**
+   * The authorised-on-credit allowance, and who gave it.
+   *
+   * These have to be in this projection, not merely on the table:
+   * releasableQuantity() reads creditQty off whatever row it is handed, and
+   * this is the row every read path hands it — GET /orders/:id, the order page,
+   * the ticketing desk. Omitted, an order authorised for 30,000 reads back as
+   * releasing zero, and the desk is told to refuse a truck somebody was
+   * explicitly told to load. That is not hypothetical; the tests caught it.
+   */
+  creditQty: orders.creditQty,
+  creditReason: orders.creditReason,
+  creditAuthorisedBy: orders.creditAuthorisedBy,
+  creditAuthorisedAt: orders.creditAuthorisedAt,
+  creditAuthorisedByName: sql`(
+    SELECT NULLIF(TRIM(CONCAT(s.first_name, ' ', s.surname)), '')
+      FROM staff s WHERE s.id = ${orders.creditAuthorisedBy}
+  )`,
   deliveryType: orders.deliveryType,
   deliveryAddress: orders.deliveryAddress,
   companyName: orders.companyName,

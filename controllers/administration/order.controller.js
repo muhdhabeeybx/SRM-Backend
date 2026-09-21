@@ -1037,6 +1037,11 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
         if (dup.driverName !== driverName || dup.driverPhone !== driverPhone) {
           Object.assign(patch, { driverName, driverPhone });
         }
+        // A paper ticket number supplied on a resubmission fills one that was
+        // missing, but never overwrites one already recorded — the first entry
+        // is the one taken off the physical ticket.
+        const paper = String(t.manualTicketNumber ?? "").trim();
+        if (paper && !dup.manualTicketNumber) Object.assign(patch, { manualTicketNumber: paper });
         // An allocation made at release is still `pending`; ticketing it now is
         // what makes it loaded. A truck already at the gate keeps its own state.
         if (dup.status === "pending") Object.assign(patch, loadedNow);
@@ -1062,6 +1067,10 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
           driverPhone,
           loaderName: t.loaderName ?? null,
           loaderPhone: t.loaderPhone ?? null,
+          // The number on the paper ticket the driver is already carrying,
+          // where the depot wrote one before this system saw the order. Blank
+          // on every load ticketed here first, which is most of them.
+          manualTicketNumber: String(t.manualTicketNumber ?? "").trim(),
           ...loadedNow,
         },
       });
@@ -1334,7 +1343,181 @@ const getOrderTimeline = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { events } });
 });
 
+/** Credit may be authorised while an order can still take product out. */
+const CREDITABLE = new Set(["Pending", "Paid", "Released", "Loading"]);
+
+/**
+ * Trust this order for a quantity it has not paid for.
+ *
+ * The depot writes tickets by hand before payment — a customer arrives, a paper
+ * ticket is written, the truck loads and goes, and the money follows. The system
+ * could not express that: releasableQuantity() returns what the RECEIVED money
+ * covers, so an unpaid order could be ticketed for nothing.
+ *
+ * This does not relax that. It records an explicit, named, reasoned allowance
+ * beside it, which releasableQuantity then ADDS to the paid share. The
+ * difference matters: an order nobody has authorised behaves exactly as it
+ * always did, and every litre released ahead of payment has a person's name
+ * against it and a sentence saying why.
+ *
+ * Finance-gated rather than ticketing-gated on purpose. Cutting a ticket is the
+ * loading desk's act; deciding this customer may owe us for a truckload is not,
+ * and the desk standing in front of the customer is the worst-placed person to
+ * be making it.
+ *
+ * Idempotent in the useful sense: calling it again REPLACES the allowance
+ * rather than adding to it, so a figure typed wrong is corrected by sending the
+ * right one, not by working out the difference.
+ */
+const authoriseCreditRelease = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const quantity = Number(req.body.quantity);
+  const reason = String(req.body.reason || "").trim();
+  const actor = { type: "staff", staffId: req.user.id };
+  const audit = { ipAddress: req.ip, userAgent: req.headers["user-agent"] };
+
+  const result = await db.transaction(async (tx) => {
+    const order = await orderRepo.lockById(orderId, tx);
+    if (!order) throw httpErr(404, "Order not found");
+    if (!CREDITABLE.has(order.status)) {
+      throw httpErr(409, `Order is ${order.status}; credit cannot be authorised on it`);
+    }
+    if (!reason) throw httpErr(400, "A reason is required to release on credit");
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw httpErr(400, "The quantity to trust must be greater than zero");
+    }
+    if (quantity > Number(order.quantity)) {
+      throw httpErr(
+        400,
+        `Cannot trust ${quantity.toLocaleString()} on an order of ${Number(order.quantity).toLocaleString()}`,
+      );
+    }
+
+    const previous = Number(order.creditQty ?? 0);
+    const updated = await orderRepo.update(
+      orderId,
+      {
+        creditQty: String(quantity),
+        creditReason: reason,
+        creditAuthorisedBy: req.user.id,
+        creditAuthorisedAt: new Date(),
+      },
+      tx,
+    );
+
+    /**
+     * A Pending order has to reach Released to be ticketed at all (TICKETABLE),
+     * and that is the whole point of authorising it. An order already past
+     * Pending is left where it is — this grants an allowance, it does not move
+     * an order backwards or forwards through its own lifecycle.
+     */
+    let releasedNow = false;
+    if (order.status === "Pending") {
+      await orderStatus.transition(orderId, "Released", {
+        tx,
+        actor,
+        set: { releasedAt: new Date(), releasedBy: req.user.id },
+        metadata: { trigger: "credit", quantity, reason },
+        ...audit,
+      });
+      releasedNow = true;
+    }
+
+    await auditLogRepo.record(
+      {
+        entityType: "order",
+        entityId: orderId,
+        action: "order.credit_authorised",
+        actor,
+        metadata: {
+          quantity,
+          previous,
+          reason,
+          orderQuantity: Number(order.quantity),
+          outstanding: Number(order.totalAmount) - Number(order.amountPaid ?? 0),
+          releasedNow,
+        },
+        ...audit,
+      },
+      tx,
+    );
+
+    return { order: updated, releasedNow };
+  });
+
+  const order = await orderRepo.findByIdFull(orderId);
+  res.json({
+    success: true,
+    message: `Trusted for ${quantity.toLocaleString()} ${result.releasedNow ? "— order released for loading" : ""}`.trim(),
+    data: { order, releasableQuantity: orderService.releasableQuantity(order) },
+  });
+});
+
+/**
+ * Withdraw the allowance.
+ *
+ * Refused once trucks have been ticketed against it, and that refusal is the
+ * important part: revoking below what has already been authorised on paper
+ * would leave loads on the order that the order itself says were never allowed
+ * — a contradiction nothing downstream could resolve. Pay the order down or
+ * cancel the loads first.
+ */
+const revokeCreditRelease = asyncHandler(async (req, res) => {
+  const orderId = Number(req.params.id);
+  const reason = String(req.body.reason || "").trim();
+  const actor = { type: "staff", staffId: req.user.id };
+  const audit = { ipAddress: req.ip, userAgent: req.headers["user-agent"] };
+
+  await db.transaction(async (tx) => {
+    const order = await orderRepo.lockById(orderId, tx);
+    if (!order) throw httpErr(404, "Order not found");
+
+    const previous = Number(order.creditQty ?? 0);
+    if (previous <= 0) throw httpErr(409, "This order carries no credit allowance");
+    if (!reason) throw httpErr(400, "A reason is required to withdraw credit");
+
+    // What the money alone would permit, once the allowance is gone.
+    const withoutCredit = orderService.releasableQuantity({ ...order, creditQty: 0 });
+    const loads = await orderTruckRepo.findByOrder(orderId, tx);
+    const ticketed = loads.reduce((sum, l) => sum + Number(l.quantity || 0), 0);
+
+    if (ticketed > withoutCredit) {
+      throw httpErr(
+        409,
+        `${ticketed.toLocaleString()} is already ticketed on this order and only ${withoutCredit.toLocaleString()} is paid for. Settle the balance or remove those loads before withdrawing the credit.`,
+      );
+    }
+
+    await orderRepo.update(
+      orderId,
+      { creditQty: "0", creditReason: "", creditAuthorisedBy: null, creditAuthorisedAt: null },
+      tx,
+    );
+
+    await auditLogRepo.record(
+      {
+        entityType: "order",
+        entityId: orderId,
+        action: "order.credit_revoked",
+        actor,
+        metadata: { previous, reason, ticketed },
+        ...audit,
+      },
+      tx,
+    );
+  });
+
+  const order = await orderRepo.findByIdFull(orderId);
+  res.json({
+    success: true,
+    message: "Credit withdrawn",
+    data: { order, releasableQuantity: orderService.releasableQuantity(order) },
+  });
+});
+
 module.exports = {
+  authoriseCreditRelease,
+  revokeCreditRelease,
   getOrders,
   getOrderById,
   createOrder,

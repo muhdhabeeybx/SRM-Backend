@@ -108,6 +108,20 @@ function releasableQuantity(order) {
   const paid = Number(order.amountPaid ?? 0);
   const total = Number(order.totalAmount);
   const price = Number(order.price);
+  /**
+   * The authorised-on-credit allowance, ADDED to what the money buys.
+   *
+   * Added rather than substituted, so the two sources of permission compose:
+   * an order that has paid for 20,000 and is trusted for 25,000 may load
+   * 45,000, and a later payment widens nothing by itself — the paid share
+   * simply grows underneath the same total. Substituting would have made
+   * authorising credit on a part-paid order silently REDUCE what it could
+   * load, which is the opposite of what the person granting it intended.
+   *
+   * Zero on every order nobody has authorised, which is all of them until
+   * somebody does — so the behaviour below is exactly what it was before.
+   */
+  const credit = Number(order.creditQty ?? 0);
 
   /**
    * A settled order releases in full — and that is decided by the order's own
@@ -125,9 +139,19 @@ function releasableQuantity(order) {
    * bricking the ticketing desk.
    */
   if (order.paymentStatus === "Paid" || paid >= total) return quantity;
-  if (!(price > 0)) return 0;
 
-  return Math.min(quantity, Math.floor((paid / price) * 100) / 100);
+  /**
+   * A priceless order releases only what it was trusted for.
+   *
+   * The paid share cannot be computed without a unit price, but the credit
+   * allowance is a quantity already and needs no conversion — so an order with
+   * a broken price still honours an explicit authorisation instead of
+   * returning zero and stranding a truck somebody was told to load.
+   */
+  if (!(price > 0)) return Math.min(quantity, credit);
+
+  const paidFor = Math.floor((paid / price) * 100) / 100;
+  return Math.min(quantity, paidFor + credit);
 }
 
 /**

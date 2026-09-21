@@ -24,6 +24,8 @@ const {
   confirmOrderPayment,
   getOrderPayments,
   getOrderTimeline,
+  authoriseCreditRelease,
+  revokeCreditRelease,
   removeOrderPayment,
   transferOrderPayment,
   reverseOrderPaymentTransfer,
@@ -84,6 +86,32 @@ router.post(
   requireRole("finance", "super_admin", { message: "Finance access required to cancel" }),
   validate({ params: orderSchemas.idParam, body: orderSchemas.cancelOrder }),
   cancelOrder
+);
+
+/**
+ * Release an order for loading before it has been paid for.
+ *
+ * Finance-gated, not ticketing-gated. Cutting a ticket is the loading desk's
+ * act; deciding that this customer may owe us for a truckload is not, and the
+ * person standing in front of the customer is the worst-placed one to decide
+ * it. The body carries a quantity and a required reason.
+ */
+router.post(
+  "/:id/credit-release",
+  authenticateStaff,
+  requireRole("finance", "super_admin", {
+    message: "Finance access required to release an order before payment",
+  }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.creditRelease }),
+  authoriseCreditRelease
+);
+
+router.delete(
+  "/:id/credit-release",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.revokeCreditRelease }),
+  revokeCreditRelease
 );
 
 // Orders holding money beyond their own value — where the desk finds surplus

@@ -154,6 +154,38 @@ const cancelOrder = z.object({
   reason: z.string().trim().max(500, "Reason is too long").optional(),
 });
 
+/**
+ * Trust an order for a quantity it has not paid for.
+ *
+ * The reason is REQUIRED here, unlike the optional one on cancel. A cancelled
+ * order explains itself — there is no product and no exposure. An order
+ * released on credit is money at risk with nothing on the screen to say why,
+ * and "who authorised this and on what grounds" is the first question anyone
+ * asks about it weeks later. Making it optional would mean most rows never
+ * carry one.
+ *
+ * The ceiling (not more than the order's own quantity) is enforced in the
+ * controller, which can see the order; only the shape is checked here.
+ */
+const creditRelease = z.object({
+  quantity: z.coerce
+    .number({ invalid_type_error: "Quantity must be a number" })
+    .positive("The quantity to trust must be greater than zero"),
+  reason: z
+    .string()
+    .trim()
+    .min(3, "Say why this order is being released before payment")
+    .max(500, "Reason is too long"),
+});
+
+const revokeCreditRelease = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(3, "Say why the credit is being withdrawn")
+    .max(500, "Reason is too long"),
+});
+
 // Confirm a payment against an order. `amount` is the naira actually received
 // now; omit it to settle the whole outstanding balance, which is what every
 // caller did before instalments existed and remains the default.
@@ -344,6 +376,8 @@ module.exports = {
   reviewOrderPayment,
   updateMyTrucks,
   releaseOrder,
+  creditRelease,
+  revokeCreditRelease,
   gateIn,
   loadTruck,
   loadParam,

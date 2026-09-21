@@ -62,6 +62,15 @@ const orderTrucks = pgTable(
     loaderName: varchar("loader_name", { length: 255 }),
     loaderPhone: varchar("loader_phone", { length: 50 }),
 
+    /**
+     * The handwritten ticket the driver is already carrying.
+     *
+     * Written in the depot's own book before this system saw the order, so it
+     * follows whatever numbering that book uses and cannot share tickets.
+     * ticket_number, which is UNIQUE and system-generated. Recording it here is
+     * what ties the paper in the cab to the row in the database.
+     */
+    manualTicketNumber: varchar("manual_ticket_number", { length: 50 }).default("").notNull(),
     status: orderTruckStatusEnum("status").default("pending").notNull(),
 
     // Gate stamps. entered/exited are the two security roles; loaded is ticketing.
