@@ -26,6 +26,7 @@ const {
   getOrderTimeline,
   authoriseCreditRelease,
   revokeCreditRelease,
+  getReceivables,
   removeOrderPayment,
   transferOrderPayment,
   reverseOrderPaymentTransfer,
@@ -48,6 +49,10 @@ router.delete(
 );
 
 router.get("/payable", verifyStaff, getPayableOrders);
+
+// What has left the yard unpaid. Before "/:id" so the literal segment wins the
+// match, like /payable and /with-surplus above it.
+router.get("/receivables", verifyStaff, getReceivables);
 
 // Reads and creation stay behind the admin gate (verifyStaff).
 // The gate's own queue, before any "/:id" route can swallow the path.

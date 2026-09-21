@@ -1343,6 +1343,21 @@ const getOrderTimeline = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { events } });
 });
 
+/**
+ * Everything that has gone out and not been paid for.
+ *
+ * The compensating control for credit releases — see the repository note. A
+ * plain read, gated on being signed-in staff like every other read here: an
+ * exposure list nobody can open is not a control.
+ */
+const getReceivables = asyncHandler(async (req, res) => {
+  const data = await orderRepo.findReceivables({
+    search: req.query.search || "",
+    minDays: Number(req.query.minDays) || 0,
+  });
+  res.json({ success: true, data });
+});
+
 /** Credit may be authorised while an order can still take product out. */
 const CREDITABLE = new Set(["Pending", "Paid", "Released", "Loading"]);
 
@@ -1516,6 +1531,7 @@ const revokeCreditRelease = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  getReceivables,
   authoriseCreditRelease,
   revokeCreditRelease,
   getOrders,

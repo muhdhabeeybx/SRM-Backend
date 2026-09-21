@@ -10,6 +10,7 @@ const {
   SYSTEM_DECIDED_BASES,
 } = require("../db/schema/orderPayment");
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
+const { orderReferenceSql } = require("../lib/orderReferenceSql");
 const { scopeCondition } = require("../lib/scopeFilter");
 
 /** The two payment sources that are a movement between orders, not money in. */
@@ -1591,7 +1592,107 @@ const findStalePending = async (cutoff) => {
     .orderBy(asc(orders.createdAt));
 };
 
+/**
+ * What has gone out and not been paid for.
+ *
+ * This is the compensating control for credit releases, and it is not optional
+ * furniture around the feature — it IS the feature's safety. releasableQuantity
+ * used to be arithmetic nobody could argue with; once an allowance can be
+ * granted by a person, the only thing standing between "trusted on Tuesday" and
+ * "written off in March" is that somebody can see the list. So it is built to
+ * be read every day rather than discovered during a stock take.
+ *
+ * ── What counts as exposure ────────────────────────────────────────────────
+ *
+ * Two populations, deliberately both:
+ *
+ *   - an order with an allowance on it, whatever it has done since, because
+ *     somebody accepted the risk and that decision should not disappear from
+ *     view just because the trucks have not moved yet; and
+ *   - an order in Loading or Completed with a balance, allowance or not,
+ *     because product is out of the gate and the money is not in. An order
+ *     part-paid and loaded is exposure by exactly the same arithmetic, and it
+ *     was invisible before this existed.
+ *
+ * Cancelled and Expired are excluded: nothing left, so nothing is owed.
+ *
+ * ── Ageing ─────────────────────────────────────────────────────────────────
+ *
+ * `exposedSince` is the earliest moment the risk actually began — the credit
+ * authorisation, or failing that the release, the loading, the completion.
+ * COALESCE order runs oldest-cause-first on purpose: an order authorised on
+ * credit in January and completed in March has been exposed since January, and
+ * dating it from completion would flatter the number by two months.
+ */
+const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
+  const ref = orderReferenceSql("o", "c");
+  const term = String(search || "").trim();
+  const pattern = `%${term}%`;
+
+  const rows = await db.execute(sql`
+    SELECT o.id,
+           ${ref} AS "orderNumber",
+           o.status,
+           o.payment_status                          AS "paymentStatus",
+           o.quantity,
+           o.total_amount                            AS "totalAmount",
+           o.amount_paid                             AS "amountPaid",
+           (o.total_amount - o.amount_paid)          AS outstanding,
+           o.credit_qty                              AS "creditQty",
+           o.credit_reason                           AS "creditReason",
+           o.credit_authorised_at                    AS "creditAuthorisedAt",
+           NULLIF(TRIM(CONCAT(s.first_name, ' ', s.surname)), '') AS "creditAuthorisedByName",
+           COALESCE(NULLIF(BTRIM(o.company_name), ''), NULLIF(BTRIM(c.company_name), ''), c.name) AS "customerName",
+           c.phone                                   AS "customerPhone",
+           d.name                                    AS "depotName",
+           p.name                                    AS "productName",
+           o.created_at                              AS "createdAt",
+           o.released_at                             AS "releasedAt",
+           o.completed_at                            AS "completedAt",
+           COALESCE(o.credit_authorised_at, o.released_at, o.loading_started_at, o.completed_at, o.created_at)
+                                                     AS "exposedSince",
+           GREATEST(
+             0,
+             EXTRACT(DAY FROM (NOW() - COALESCE(o.credit_authorised_at, o.released_at, o.loading_started_at, o.completed_at, o.created_at)))
+           )::int                                    AS "daysOutstanding"
+      FROM orders o
+      LEFT JOIN customers c ON c.id = o.customer_id
+      LEFT JOIN depots    d ON d.id = o.depot_id
+      LEFT JOIN products  p ON p.id = o.product_id
+      LEFT JOIN staff     s ON s.id = o.credit_authorised_by
+     WHERE o.status NOT IN ('Cancelled', 'Expired')
+       AND (o.total_amount - o.amount_paid) > 0
+       AND (o.credit_qty > 0 OR o.status IN ('Loading', 'Completed'))
+       ${term ? sql`AND (${ref} ILIKE ${pattern} OR c.name ILIKE ${pattern} OR o.company_name ILIKE ${pattern} OR c.company_name ILIKE ${pattern})` : sql``}
+     ORDER BY "exposedSince" ASC NULLS LAST
+  `);
+
+  const all = (rows.rows ?? rows).map((r) => ({
+    ...r,
+    outstanding: Number(r.outstanding),
+    creditQty: Number(r.creditQty ?? 0),
+    daysOutstanding: Number(r.daysOutstanding ?? 0),
+  }));
+
+  const list = minDays > 0 ? all.filter((r) => r.daysOutstanding >= Number(minDays)) : all;
+
+  return {
+    orders: list,
+    summary: {
+      count: list.length,
+      outstanding: list.reduce((sum, r) => sum + r.outstanding, 0),
+      // Split out because they are different conversations: one is a debt
+      // somebody authorised, the other is a debt that simply accumulated.
+      onCredit: list.filter((r) => r.creditQty > 0).reduce((sum, r) => sum + r.outstanding, 0),
+      overThirtyDays: list
+        .filter((r) => r.daysOutstanding >= 30)
+        .reduce((sum, r) => sum + r.outstanding, 0),
+    },
+  };
+};
+
 module.exports = {
+  findReceivables,
   findById,
   lockById,
   findByNumber,

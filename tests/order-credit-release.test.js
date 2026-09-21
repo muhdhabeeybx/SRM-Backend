@@ -263,6 +263,55 @@ describe("manual loading ticket — released on credit, paid afterwards", () => 
     assert.ok(row.actorName, "with the name of whoever gave it");
   });
 
+  /**
+   * The point of the whole feature. An order that left on credit has to be
+   * findable afterwards, because the list is the only thing replacing the
+   * arithmetic that used to refuse it.
+   */
+  test("an order that left on credit shows up in receivables", async () => {
+    const order = await unpaidOrder(customerId, depotId, productId, 10000);
+
+    await request(app)
+      .post(`/api/orders/${order.id}/credit-release`)
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .send({ quantity: 10000, reason: "Receivables coverage" })
+      .expect(200);
+
+    const res = await request(app)
+      .get("/api/orders/receivables")
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .expect(200);
+
+    const mine = res.body.data.orders.find((o) => o.id === order.id);
+    assert.ok(mine, "the exposed order is on the list");
+    assert.equal(Number(mine.outstanding), 10000 * 200, "the full value is still owed");
+    assert.equal(Number(mine.creditQty), 10000);
+    assert.ok(mine.creditAuthorisedByName, "with the name of whoever authorised it");
+    assert.ok(mine.orderNumber && !String(mine.orderNumber).startsWith("ORD-"),
+      "shown by the reference people can actually look up");
+    assert.ok(res.body.data.summary.onCredit >= 10000 * 200, "and counted in the credit total");
+  });
+
+  test("a settled order is not on the receivables list", async () => {
+    const order = await unpaidOrder(customerId, depotId, productId, 5000);
+    // Settle it outright, the way the payment sweep would.
+    await orderRepo.update(order.id, {
+      amountPaid: String(5000 * 200),
+      paymentStatus: "Paid",
+    });
+
+    const res = await request(app)
+      .get("/api/orders/receivables")
+      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .expect(200);
+
+    assert.equal(
+      res.body.data.orders.find((o) => o.id === order.id),
+      undefined,
+      "nothing owed, nothing listed",
+    );
+  });
+
   test("after (close db)", async () => {
     await closeDb();
   });
