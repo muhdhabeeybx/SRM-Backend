@@ -1733,6 +1733,8 @@ async function confirmOrderPayment({
   actor,
   note = "",
   notifyWhatsApp = true,
+  /** Who is asking — carries their PFI scope. See lib/pfiBankScope.js. */
+  scopeUser = null,
 }) {
   // Lapsed orders are expired-and-refused, never paid at a stale price. The
   // guard commits the Expired flag first; the transaction below then sees it.
@@ -1803,7 +1805,7 @@ async function confirmOrderPayment({
     const shouldTransition = orderStatus.isLegal(order.status, "Paid");
 
     const { payments, summary } = await orderPaymentService.recordFromStatementLines(
-      { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note },
+      { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note, scopeUser },
       tx,
     );
 

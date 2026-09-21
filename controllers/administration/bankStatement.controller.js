@@ -1,5 +1,33 @@
 const repo = require("../../repositories/bankStatement.repository");
 const { generateOrderReference } = require("../../utils/helpers");
+const { client } = require("../../config/db");
+const pfiBankScope = require("../../lib/pfiBankScope");
+
+/*
+  ── Scope, on every route in this file ────────────────────────────────────
+
+  Somebody confined to a PFI sees that PFI's bank accounts and no others: they
+  cannot list, open, set up, upload to, search or match against any other
+  account. Each handler below either refuses an account outside their PFI or
+  filters it out of a list. See lib/pfiBankScope.js for who counts as confined
+  and why an empty answer is the safe one.
+*/
+
+/** Refuse (403) when this person may not touch that account. */
+const guard = (req, bankAccountId) => pfiBankScope.assertAccountAllowed(req.user, bankAccountId);
+
+/** A list, less whatever this person may not see. */
+const onlyAllowed = async (req, rows, accountOf) => {
+  const allowed = await pfiBankScope.allowedBankAccountIds(req.user);
+  if (allowed === null) return rows;
+  return rows.filter((r) => allowed.includes(Number(accountOf(r))));
+};
+
+/** The account an uploaded statement belongs to, or null when there is none. */
+const accountOfStatement = async (statementId) => {
+  const [row] = await client`SELECT bank_account_id FROM bank_statements WHERE id = ${Number(statementId)}`;
+  return row ? Number(row.bank_account_id) : null;
+};
 
 const ok = (res, data, message) => res.json({ success: true, message, data });
 const fail = (res, code, message) => res.status(code).json({ success: false, message });
@@ -45,6 +73,7 @@ const decorateLine = (l) => ({
 
 /** GET /api/bank-statements/mapping/:bankAccountId */
 async function getMapping(req, res) {
+  await guard(req, req.params.bankAccountId);
   const mapping = await repo.getMapping(Number(req.params.bankAccountId));
   return ok(res, { mapping });
 }
@@ -52,6 +81,7 @@ async function getMapping(req, res) {
 /** PUT /api/bank-statements/mapping/:bankAccountId */
 async function saveMapping(req, res) {
   const bankAccountId = Number(req.params.bankAccountId);
+  await guard(req, bankAccountId);
   const { dateColumn, amountColumn, creditColumn } = req.body || {};
 
   if (dateColumn === undefined || dateColumn === null) {
@@ -77,6 +107,7 @@ async function saveMapping(req, res) {
 async function uploadStatement(req, res) {
   const { bankAccountId, filename, rows } = req.body || {};
   if (!bankAccountId) return fail(res, 400, "bankAccountId is required");
+  await guard(req, bankAccountId);
 
   const mapping = await repo.getMapping(Number(bankAccountId));
   if (!mapping) {
@@ -150,6 +181,7 @@ async function uploadStatement(req, res) {
 async function previewStatement(req, res) {
   const { bankAccountId, rows } = req.body || {};
   if (!bankAccountId) return fail(res, 400, "bankAccountId is required");
+  await guard(req, bankAccountId);
 
   const mapping = await repo.getMapping(Number(bankAccountId));
   if (!mapping) {
@@ -184,8 +216,10 @@ async function previewStatement(req, res) {
 /** GET /api/bank-statements?bankAccountId= */
 async function listStatements(req, res) {
   const { bankAccountId } = req.query;
+  if (bankAccountId) await guard(req, bankAccountId);
   const statements = await repo.listStatements(bankAccountId ? Number(bankAccountId) : null);
-  return ok(res, { statements });
+  // "Every account" means every account this person may see.
+  return ok(res, { statements: await onlyAllowed(req, statements, (s) => s.bank_account_id) });
 }
 
 /**
@@ -197,6 +231,8 @@ async function listStatements(req, res) {
  */
 async function statementLines(req, res) {
   const { page, limit, status } = req.query;
+  const account = await accountOfStatement(req.params.id);
+  if (account != null) await guard(req, account);
   const result = await repo.listStatementLines({
     statementId: Number(req.params.id),
     page: page ? Number(page) : 1,
@@ -216,7 +252,7 @@ async function statementLines(req, res) {
  */
 async function accountSummary(req, res) {
   const accounts = await repo.accountSummaries();
-  return ok(res, { accounts });
+  return ok(res, { accounts: await onlyAllowed(req, accounts, (a) => a.bank_account_id) });
 }
 
 /**
@@ -227,6 +263,7 @@ async function accountSummary(req, res) {
  */
 async function accountDays(req, res) {
   const { from, to } = req.query;
+  await guard(req, req.params.bankAccountId);
   const days = await repo.accountDays({
     bankAccountId: Number(req.params.bankAccountId),
     from: day(from),
@@ -244,6 +281,7 @@ async function accountDays(req, res) {
  */
 async function accountLines(req, res) {
   const { from, to, day: onDay, status, q, page, limit } = req.query;
+  await guard(req, req.params.bankAccountId);
   const result = await repo.accountLines({
     bankAccountId: Number(req.params.bankAccountId),
     from: day(from),
@@ -260,6 +298,8 @@ async function accountLines(req, res) {
 
 /** DELETE /api/bank-statements/:id */
 async function deleteStatement(req, res) {
+  const account = await accountOfStatement(req.params.id);
+  if (account != null) await guard(req, account);
   const result = await repo.deleteStatement(Number(req.params.id));
   if (!result.deleted) {
     return fail(
@@ -275,6 +315,7 @@ async function deleteStatement(req, res) {
 async function searchLines(req, res) {
   const { bankAccountId, q, limit } = req.query;
   if (!bankAccountId) return fail(res, 400, "bankAccountId is required");
+  await guard(req, bankAccountId);
   const lines = await repo.searchUnmatched({
     bankAccountId: Number(bankAccountId),
     q,
@@ -286,6 +327,30 @@ async function searchLines(req, res) {
 /** POST /api/bank-statements/match */
 async function matchLines(req, res) {
   const { lineIds, orderId, depositId } = req.body || {};
+
+  /*
+    This marks lines matched without going through recordFromStatementLines,
+    so it carries the same two rules itself: every line must be on an account
+    this person may touch, and a line matched to an order must be on one of
+    that order's PFI's own accounts. Unused today — which is exactly why a
+    side door like this has to be shut rather than trusted to stay unused.
+  */
+  const ids = (Array.isArray(lineIds) ? lineIds : []).map(Number).filter(Number.isFinite);
+  const lineAccounts = ids.length
+    ? await client`SELECT DISTINCT bank_account_id FROM bank_statement_lines WHERE id = ANY(${ids}::int[])`
+    : [];
+  for (const { bank_account_id: account } of lineAccounts) await guard(req, account);
+
+  if (orderId != null) {
+    const [order] = await client`SELECT id, pfi_id FROM orders WHERE id = ${Number(orderId)}`;
+    if (!order) return fail(res, 404, "Order not found");
+    const target = { id: Number(order.id), pfiId: order.pfi_id == null ? null : Number(order.pfi_id) };
+    pfiBankScope.assertOrderInScope(req.user, target);
+    for (const { bank_account_id: account } of lineAccounts) {
+      await pfiBankScope.assertAccountServesOrder(target, account);
+    }
+  }
+
   const result = await repo.markMatched({
     lineIds,
     orderId,

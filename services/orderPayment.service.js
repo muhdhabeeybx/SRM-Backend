@@ -1,3 +1,4 @@
+const pfiBankScope = require("../lib/pfiBankScope");
 const { eq, and, sql, inArray, asc } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
@@ -195,7 +196,7 @@ const recomputeOrder = async (orderId, tx) => {
  * Amounts are never taken from the client. Each comes from the claimed line.
  */
 const recordFromStatementLines = async (
-  { orderId, bankAccountId, lineIds, staffId = null, note = "" },
+  { orderId, bankAccountId, lineIds, staffId = null, note = "", scopeUser = null },
   tx,
 ) => {
   if (!Array.isArray(lineIds) || !lineIds.length) {
@@ -212,12 +213,27 @@ const recordFromStatementLines = async (
         orderNumber: orders.orderNumber,
         status: orders.status,
         pricingStatus: orders.pricingStatus,
+        pfiId: orders.pfiId,
       })
       .from(orders)
       .where(eq(orders.id, orderId))
       .limit(1);
     if (!order) throw httpError(404, "Order not found");
     assertPriced(order);
+
+    /*
+      Every statement line that becomes an order payment passes through here,
+      so the PFI rules are enforced here and nowhere else — a new route that
+      forgets to check cannot get past this. See lib/pfiBankScope.js.
+
+        · somebody confined to PFIs may only pay orders on those PFIs, and only
+          through their PFIs' accounts;
+        · anybody at all may only pay an order on a PFI through one of that
+          PFI's own accounts, where it has any.
+    */
+    pfiBankScope.assertOrderInScope(scopeUser, order);
+    await pfiBankScope.assertAccountAllowed(scopeUser, bankAccountId);
+    await pfiBankScope.assertAccountServesOrder(order, bankAccountId);
 
     const bankAccount = await bankAccountRepo.findById(bankAccountId);
 

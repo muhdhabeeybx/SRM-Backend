@@ -2,10 +2,19 @@ const asyncHandler = require("express-async-handler");
 const { sql } = require("drizzle-orm");
 const { db } = require("../../config/db");
 const { bankAccountRepo } = require("../../repositories");
+const pfiBankScope = require("../../lib/pfiBankScope");
 
 const getBankAccounts = asyncHandler(async (req, res) => {
   const { search, status, depotId, lpgStationId, usage } = req.query;
-  const accounts = await bankAccountRepo.findAll({ search, status, depotId, lpgStationId, usage });
+  const all = await bankAccountRepo.findAll({ search, status, depotId, lpgStationId, usage });
+
+  /*
+    Somebody confined to a PFI sees that PFI's accounts and nothing else — not
+    in this list, and so not in any dropdown that reads it. See
+    lib/pfiBankScope.js.
+  */
+  const allowed = await pfiBankScope.allowedBankAccountIds(req.user);
+  const accounts = allowed === null ? all : all.filter((a) => allowed.includes(Number(a.id)));
 
   res.json({
     success: true,
@@ -16,7 +25,10 @@ const getBankAccounts = asyncHandler(async (req, res) => {
 const getBankAccountById = asyncHandler(async (req, res) => {
   const account = await bankAccountRepo.findById(req.params.id);
 
-  if (!account) {
+  // Outside this person's PFI reads as not found, not as forbidden: saying
+  // "you may not see it" confirms the account exists.
+  const allowed = await pfiBankScope.allowedBankAccountIds(req.user);
+  if (!account || (allowed !== null && !allowed.includes(Number(account.id)))) {
     return res.status(404).json({ success: false, message: "Bank account not found" });
   }
 
@@ -108,7 +120,9 @@ const createBankAccount = asyncHandler(async (req, res) => {
 const updateBankAccount = asyncHandler(async (req, res) => {
   const account = await bankAccountRepo.findById(req.params.id);
 
-  if (!account) {
+  // An account outside this person's PFI does not exist, as far as they know.
+  const allowed = await pfiBankScope.allowedBankAccountIds(req.user);
+  if (!account || (allowed !== null && !allowed.includes(Number(account.id)))) {
     return res.status(404).json({ success: false, message: "Bank account not found" });
   }
 
@@ -134,7 +148,9 @@ const updateBankAccount = asyncHandler(async (req, res) => {
 const deleteBankAccount = asyncHandler(async (req, res) => {
   const account = await bankAccountRepo.findById(req.params.id);
 
-  if (!account) {
+  // An account outside this person's PFI does not exist, as far as they know.
+  const allowed = await pfiBankScope.allowedBankAccountIds(req.user);
+  if (!account || (allowed !== null && !allowed.includes(Number(account.id)))) {
     return res.status(404).json({ success: false, message: "Bank account not found" });
   }
 

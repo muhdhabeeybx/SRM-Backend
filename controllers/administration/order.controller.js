@@ -1,3 +1,4 @@
+const pfiBankScope = require("../../lib/pfiBankScope");
 const asyncHandler = require("express-async-handler");
 const QRCode = require("qrcode");
 const {
@@ -792,6 +793,9 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
    * is not a formality; it is what makes the arithmetic mean anything.
    */
   const target = await orderRepo.findById(Number(req.params.id));
+  // Scope before anything else is said about the order — even "it has no
+  // price yet" tells somebody outside its PFI that it exists.
+  if (target) pfiBankScope.assertOrderInScope(req.user, target);
   if (target?.pricingStatus === "pending") {
     throw httpErr(
       409,
@@ -805,6 +809,7 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
     lineIds: req.body.lineIds.map(Number),
     note: req.body.note || "",
     actor: { type: "staff", staffId: req.user.id },
+    scopeUser: req.user,
   });
 
   const summary = await orderPaymentService.summarizeOrder(order.id);
