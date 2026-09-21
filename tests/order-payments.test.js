@@ -71,7 +71,10 @@ describe("order payments", () => {
       .values({
         statementId: statement.id,
         bankAccountId: bankAccount.id,
-        txnDate: new Date("2026-08-20T23:00:00Z"),
+        // A `date` column, bound as a string. This used to be the instant
+        // 2026-08-20T23:00Z — already the 21st in Lagos, which is the banking
+        // day it stood for — and postgres.js refused the Date object outright.
+        txnDate: "2026-08-21",
         amount: String(amount),
         depositor,
         narration: `NIP/${depositor}`,

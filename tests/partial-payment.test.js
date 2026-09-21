@@ -88,7 +88,8 @@ describe("part payment", () => {
       .values({
         statementId: statement.id,
         bankAccountId: bankAccount.id,
-        txnDate: new Date("2026-08-20T09:00:00Z"),
+        // A `date` column, bound as a string — postgres.js refuses a Date here.
+        txnDate: "2026-08-20",
         amount: String(amount),
         depositor: "PART PAY FIXTURE",
         narration: `NIP/PART PAY FIXTURE/${key}`,

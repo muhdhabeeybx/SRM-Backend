@@ -92,7 +92,8 @@ describe("recording payment after delivery", () => {
       .values({
         statementId: statement.id,
         bankAccountId: bankAccount.id,
-        txnDate: new Date("2026-09-01T09:00:00Z"),
+        // A `date` column, bound as a string — postgres.js refuses a Date here.
+        txnDate: "2026-09-01",
         amount: String(amount),
         depositor: "AFTER DELIVERY FIXTURE",
         narration: `NIP/AFTER DELIVERY FIXTURE/${key}`,

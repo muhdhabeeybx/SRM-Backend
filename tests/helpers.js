@@ -161,6 +161,23 @@ async function ensureFixtureBankAccount() {
   return sharedBankAccount;
 }
 
+/**
+ * Today as a statement day — "YYYY-MM-DD", in Lagos.
+ *
+ * bank_statement_lines.txn_date is a `date` column, which Drizzle binds as a
+ * string. The fixtures passed a Date object, which postgres.js refuses outright
+ * ("The string argument must be of type string… Received an instance of Date"),
+ * so every test built on a statement line failed at setup — 26 of them across
+ * order-payments, partial-payment and payment-after-delivery — while reading as
+ * though the payment code under test were broken.
+ *
+ * Lagos rather than UTC because a statement day is the bank's calendar day,
+ * and between midnight and 1am WAT the UTC date is still yesterday.
+ */
+function todayStatementDay() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos" }).format(new Date());
+}
+
 async function payOrderWithStatementLine(orderId, amount = null) {
   // Required late: config/db must not be reached before dotenv has run, and
   // these modules pull it in transitively.
@@ -185,7 +202,7 @@ async function payOrderWithStatementLine(orderId, amount = null) {
     .values({
       statementId: sharedStatement.id,
       bankAccountId: sharedBankAccount.id,
-      txnDate: new Date(),
+      txnDate: todayStatementDay(),
       amount: String(value),
       depositor: "TEST FIXTURE PAYER",
       narration: `Fixture payment for order ${orderId}`,
@@ -250,7 +267,7 @@ async function makeStatementLine(amount, depositor = "TEST FIXTURE PAYER") {
     .values({
       statementId: sharedStatement.id,
       bankAccountId: sharedBankAccount.id,
-      txnDate: new Date(),
+      txnDate: todayStatementDay(),
       amount: String(amount),
       depositor,
       narration: `NIP/${depositor}/${key}`,
