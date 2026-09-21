@@ -423,6 +423,17 @@ const findAll = async ({
         virtualAccountBank: orders.virtualAccountBank,
         virtualAccountName: orders.virtualAccountName,
         paymentStatus: orders.paymentStatus,
+        /**
+         * The allowance, on the list row.
+         *
+         * Needed so the Owing chip fires on an order released on credit that
+         * has not loaded yet. Without it the list and the receivables page
+         * disagree about the same order — the page counts it as exposure from
+         * the moment it is authorised, the list would wait for a truck to move
+         * — and two screens contradicting each other about who owes money is
+         * worse than either one being silent.
+         */
+        creditQty: orders.creditQty,
         status: orders.status,
         expiredAt: orders.expiredAt,
         /**
