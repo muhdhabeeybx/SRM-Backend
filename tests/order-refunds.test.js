@@ -233,6 +233,91 @@ describe("overpayment refunds", () => {
   });
 });
 
+describe("surplus already moved away", () => {
+  /**
+   * What is left to refund is the BALANCE, not the gross overpayment.
+   *
+   * Transfers are a balanced pair of payment rows — positive onto the order
+   * that received the money, negative off the one that lost it — so summing
+   * the payments already nets them out. In production the two sides are 72
+   * rows each and cancel to the naira, and order 11293 shows ₦54,540,000
+   * rather than ₦54,665,000 for exactly this reason.
+   *
+   * Pinned because it is invisible when it breaks: change the sign convention,
+   * or filter a source out of the sum, and every refund figure on the page
+   * quietly becomes the amount BEFORE the money that already left. Somebody
+   * would then send it a second time.
+   */
+  let orderId = null;
+  let ready = false;
+
+  before(async () => {
+    const [{ exists }] = await client`
+      SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='order_refunds') AS exists`;
+    if (!exists) return;
+    const c = await client`SELECT id FROM customers ORDER BY id LIMIT 1`;
+    const d = await client`SELECT id FROM depots LIMIT 1`;
+    const p = await client`SELECT id FROM products LIMIT 1`;
+    if (!c.length || !d.length || !p.length) return;
+    const [o] = await client`
+      INSERT INTO orders (order_number, customer_id, state, depot_id, product_id, quantity,
+                          price, total_amount, delivery_type, company_name)
+      SELECT ${"TR" + Math.floor(Math.random() * 1e9)}, ${Number(c[0].id)}, 'Lagos', d.id, p.id, 1000,
+             1000, 1000000, 'pickup', 'Transfer Test Co'
+        FROM (SELECT id FROM depots LIMIT 1) d, (SELECT id FROM products LIMIT 1) p
+      RETURNING id`;
+    orderId = Number(o.id);
+    // ₦300,000 over, then ₦100,000 of it moved onto another order.
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, txn_date, depositor, narration, bank_ref)
+      VALUES (${orderId}, 1300000, 'statement', now(), 'Test', 'seed', ${"TRF" + orderId})`;
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, txn_date, depositor, narration, bank_ref)
+      VALUES (${orderId}, -100000, 'transfer_out', now(), 'Test', 'moved to another order', ${"TRFOUT" + orderId})`;
+    await client`UPDATE orders SET amount_paid = 1200000, payment_status = 'Paid' WHERE id = ${orderId}`;
+    ready = true;
+  });
+
+  after(async () => {
+    if (!ready) return;
+    await client`DELETE FROM order_payments WHERE order_id = ${orderId}`;
+    await client`DELETE FROM order_refunds WHERE order_id = ${orderId}`;
+    await client`DELETE FROM orders WHERE id = ${orderId}`;
+  });
+
+  test("what is left to refund is net of what already left", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    const s = await refundService.realSurplus(orderId);
+    // ₦1,300,000 in, ₦100,000 out, against a ₦1,000,000 order.
+    assert.equal(s.received, 1200000);
+    assert.equal(s.surplus, 200000, "not the ₦300,000 it held before the transfer");
+
+    const rows = await refundService.listRefundable({ limit: 1000 });
+    const row = rows.find((r) => r.orderId === orderId);
+    assert.ok(row, "still owed something, so still listed");
+    assert.equal(row.surplus, 200000);
+    assert.equal(row.transferredOut, 100000, "stated, so the figure can be understood");
+  });
+
+  test("a refund cannot reach back past the transfer", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    await assert.rejects(
+      () => refundService.requestRefund({
+        orderId, amount: 300000,
+        destinationBank: "GTBank", destinationName: "Test", destinationNumber: "0123456789",
+      }),
+      (e) => e.status === 400,
+      "the ₦100,000 already moved cannot be sent a second time",
+    );
+
+    const refund = await refundService.requestRefund({
+      orderId,
+      destinationBank: "GTBank", destinationName: "Test", destinationNumber: "0123456789",
+    });
+    assert.equal(Number(refund.amount), 200000, "the default is the balance");
+  });
+});
+
 describe("setting an overpayment aside", () => {
   /**
    * The list has to be clearable or it stops being read.
