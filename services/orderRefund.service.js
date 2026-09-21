@@ -8,6 +8,54 @@ const { DUPLICATE_LEGACY_IDS, DUPLICATE_LEGACY_IDS_SQL } = require("../repositor
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
 
 /**
+ * Payments a person deleted that the 0021 backfill put back.
+ *
+ * Every section of that migration treats "no such row" as "never recorded",
+ * and scripts/apply-unjournaled-migrations.js re-runs every hand-written file
+ * on every run — so a payment somebody removed was re-created the next time
+ * migrations were applied. 0021 now refuses to do that, but the rows it
+ * already re-created are still here, and they are not money we hold.
+ *
+ * Order 11332 is the case that exposed it: four bank payments totalling
+ * exactly its ₦62,400,000 value, plus a resurrected wallet-era duplicate for
+ * the whole ₦62,400,000 again — a fully settled order reporting an
+ * overpayment of its entire value, twice deleted and twice back.
+ *
+ * ── Why the rule is this narrow ───────────────────────────────────────────
+ *
+ * Only rows the BACKFILL wrote (its note names the migration) that came into
+ * existence AFTER a person removed the same amount from that order — the id
+ * ordering is what says "after". Matching on the amount alone would catch the
+ * genuine bank payments too: on order 11293 the real statement rows carry the
+ * same ₦36,360,000 and ₦18,180,000 as the duplicates beside them, and are
+ * only told apart by which came first.
+ *
+ * ── Why they are excluded rather than deleted ─────────────────────────────
+ *
+ * The finance report is audited and reads this table. Deleting rows would move
+ * figures that were signed off; leaving them and refusing to count them as
+ * refundable moves nothing except the question this page answers — what do we
+ * owe a customer back. The rows stay, visible, for somebody to settle
+ * deliberately.
+ */
+const RESURRECTED_PAYMENT_IDS_SQL = `
+  SELECT p.id
+    FROM order_payments p
+   WHERE p.note LIKE '%migration 0021%'
+     AND EXISTS (
+       SELECT 1 FROM audit_logs al
+        WHERE al.entity_type = 'order'
+          AND al.action = 'order.payment_removed'
+          AND al.entity_id = p.order_id
+          AND al.metadata->>'amount' ~ '^[0-9]+(\\.[0-9]+)?$'
+          AND al.metadata->>'paymentId' ~ '^[0-9]+$'
+          AND (al.metadata->>'amount')::numeric = p.amount
+          AND (al.metadata->>'paymentId')::int < p.id
+     )
+`;
+const RESURRECTED_PAYMENT_IDS = client.unsafe(RESURRECTED_PAYMENT_IDS_SQL);
+
+/**
  * Overpayment goes back to the customer.
  *
  * This replaces moving surplus between orders, which is switched off at the
@@ -58,12 +106,16 @@ const realSurplus = async (orderId, trx = db) => {
    * leaves the order short by money that has already left.
    */
   const dup = sql.raw(DUPLICATE_LEGACY_IDS_SQL);
+  const back = sql.raw(RESURRECTED_PAYMENT_IDS_SQL);
   const result = await trx.execute(sql`
     SELECT o.total_amount::numeric AS total,
            COALESCE((SELECT SUM(op.amount) FROM order_payments op
-                      WHERE op.order_id = o.id AND op.id NOT IN (${dup})), 0) AS received,
+                      WHERE op.order_id = o.id
+                        AND op.id NOT IN (${dup}) AND op.id NOT IN (${back})), 0) AS received,
            COALESCE((SELECT SUM(op.amount) FROM order_payments op
-                      WHERE op.order_id = o.id AND op.id IN (${dup})), 0) AS phantom
+                      WHERE op.order_id = o.id AND op.id IN (${dup})), 0) AS phantom,
+           COALESCE((SELECT SUM(op.amount) FROM order_payments op
+                      WHERE op.order_id = o.id AND op.id IN (${back})), 0) AS resurrected
       FROM orders o WHERE o.id = ${Number(orderId)}`);
   const rows = result.rows ?? result;
   if (!rows.length) throw httpError(404, "Order not found");
@@ -73,6 +125,8 @@ const realSurplus = async (orderId, trx = db) => {
     total,
     received,
     phantom: round2(rows[0].phantom),
+    /** Deleted by a person, re-created by the backfill — not money we hold. */
+    resurrected: round2(rows[0].resurrected),
     surplus: Math.max(0, round2(received - total)),
   };
 };
@@ -90,7 +144,11 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
   const rows = await client`
     WITH p AS (
       SELECT order_id,
-             SUM(amount) FILTER (WHERE id NOT IN (${DUPLICATE_LEGACY_IDS})) AS received,
+             SUM(amount) FILTER (
+               WHERE id NOT IN (${DUPLICATE_LEGACY_IDS})
+                 AND id NOT IN (${RESURRECTED_PAYMENT_IDS})
+             ) AS received,
+             SUM(amount) FILTER (WHERE id IN (${RESURRECTED_PAYMENT_IDS})) AS resurrected,
              SUM(amount) FILTER (WHERE id IN (${DUPLICATE_LEGACY_IDS}))     AS phantom,
              -- Money that reached this order by being moved off another one,
              -- back when surplus was transferred rather than refunded. It is
@@ -105,6 +163,7 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
            o.created_at, o.customer_id, c.name AS customer_name, c.phone AS customer_phone,
            c.company_name AS customer_company,
            COALESCE(p.received, 0) AS received, COALESCE(p.phantom, 0) AS phantom,
+           COALESCE(p.resurrected, 0) AS resurrected,
            COALESCE(p.transferred_in, 0) AS transferred_in,
            COALESCE(p.transferred_out, 0) AS transferred_out,
            r.id AS open_refund_id, r.amount AS open_refund_amount, r.requested_at AS open_refund_at,
@@ -140,6 +199,7 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
     received: round2(r.received),
     surplus: round2(money(r.received) - money(r.total)),
     phantomExcluded: round2(r.phantom),
+    resurrectedExcluded: round2(r.resurrected),
     createdAt: r.created_at,
     transferredIn: round2(r.transferred_in),
     transferredOut: round2(r.transferred_out),

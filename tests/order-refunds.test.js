@@ -233,6 +233,120 @@ describe("overpayment refunds", () => {
   });
 });
 
+describe("a payment somebody deleted does not come back as an overpayment", () => {
+  /**
+   * The defect this pins, in full.
+   *
+   * Migration 0021 backfills payments and treats "no such row" as "never
+   * recorded" — but a row a person DELETED is also absent, and
+   * apply-unjournaled-migrations re-runs every hand-written file on every run.
+   * So each time migrations were applied, deleted payments came back.
+   *
+   * Order 11332 in production: four bank payments totalling exactly its
+   * ₦62,400,000 value, plus a wallet-era duplicate for the whole ₦62,400,000
+   * re-created after being deleted — a fully settled order reporting an
+   * overpayment of its entire value. Deleted twice, back twice. Three orders
+   * were affected, ₦147,669,000 between them, all of it on the refunds page.
+   *
+   * 0021 now refuses to re-create a payment a person removed. The rows it
+   * already re-created stay — the finance report is audited and reads this
+   * table — but they are not counted as money owed back.
+   */
+  let orderId = null;
+  let ready = false;
+
+  before(async () => {
+    const [{ exists }] = await client`
+      SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='order_refunds') AS exists`;
+    if (!exists) return;
+    const c = await client`SELECT id FROM customers ORDER BY id LIMIT 1`;
+    const d = await client`SELECT id FROM depots LIMIT 1`;
+    const p = await client`SELECT id FROM products LIMIT 1`;
+    if (!c.length || !d.length || !p.length) return;
+    const [o] = await client`
+      INSERT INTO orders (order_number, customer_id, state, depot_id, product_id, quantity,
+                          price, total_amount, delivery_type, company_name)
+      SELECT ${"RS" + Math.floor(Math.random() * 1e9)}, ${Number(c[0].id)}, 'Lagos', d.id, p.id, 1000,
+             1000, 1000000, 'pickup', 'Resurrect Test Co'
+        FROM (SELECT id FROM depots LIMIT 1) d, (SELECT id FROM products LIMIT 1) p
+      RETURNING id`;
+    orderId = Number(o.id);
+
+    // The real money: the order is settled exactly.
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, txn_date, depositor, narration, bank_ref)
+      VALUES (${orderId}, 1000000, 'statement', now(), 'Test', 'the real payment', ${"RS" + orderId})`;
+
+    // …and a wallet-era duplicate of the same amount, which somebody then
+    // removed. Written and deleted for real rather than invented, so the id
+    // ordering the rule turns on is the ordering production actually had.
+    const [dup] = await client`
+      INSERT INTO order_payments (order_id, amount, source, note)
+      VALUES (${orderId}, 1000000, 'legacy', 'the wallet duplicate')
+      RETURNING id`;
+    await client`
+      INSERT INTO audit_logs (entity_type, entity_id, action, actor_type, metadata)
+      VALUES ('order', ${orderId}, 'order.payment_removed', 'system',
+              ${JSON.stringify({ amount: "1000000.00", reason: "Wrong", paymentId: Number(dup.id) })}::jsonb)`;
+    await client`DELETE FROM order_payments WHERE id = ${Number(dup.id)}`;
+
+    // …and the backfill put it back, after the removal — a higher id, and its
+    // own note naming the migration.
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, note)
+      VALUES (${orderId}, 1000000, 'legacy',
+              'Backfilled from the wallet allocation ledger (migration 0021) — no bank statement line was ever recorded for this payment')`;
+    ready = true;
+  });
+
+  after(async () => {
+    if (!ready) return;
+    await client`DELETE FROM audit_logs WHERE entity_type='order' AND entity_id=${orderId}`;
+    await client`DELETE FROM order_payments WHERE order_id = ${orderId}`;
+    await client`DELETE FROM order_refunds WHERE order_id = ${orderId}`;
+    await client`DELETE FROM orders WHERE id = ${orderId}`;
+  });
+
+  test("the re-created row is not counted as money we hold", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    const s = await refundService.realSurplus(orderId);
+    assert.equal(s.received, 1000000, "the real payment, and only that");
+    assert.equal(s.surplus, 0, "a settled order is settled");
+    assert.equal(s.resurrected, 1000000, "stated, not silently dropped");
+  });
+
+  test("so the order is not on the refunds list at all", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    const rows = await refundService.listRefundable({ limit: 1000 });
+    assert.equal(rows.find((r) => r.orderId === orderId), undefined);
+  });
+
+  test("and nothing can be refunded from it", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    await assert.rejects(
+      () => refundService.requestRefund({
+        orderId, destinationBank: "GTBank", destinationName: "Test", destinationNumber: "0123456789",
+      }),
+      (e) => e.status === 409,
+    );
+  });
+
+  test("a genuine payment of the same amount entered BEFORE the removal still counts", async (t) => {
+    if (!ready) return t.skip("schema or fixtures unavailable");
+    /*
+     * The trap the id ordering exists for: on order 11293 the real statement
+     * rows carry the same ₦36,360,000 and ₦18,180,000 as the duplicates beside
+     * them. Matching on amount alone would throw the real money away too.
+     */
+    const [{ received }] = await client`
+      SELECT SUM(amount)::numeric AS received FROM order_payments
+       WHERE order_id = ${orderId} AND source = 'statement'`;
+    assert.equal(Number(received), 1000000);
+    const s = await refundService.realSurplus(orderId);
+    assert.equal(s.received, 1000000, "the older, person-entered row survives the rule");
+  });
+});
+
 describe("surplus already moved away", () => {
   /**
    * What is left to refund is the BALANCE, not the gross overpayment.

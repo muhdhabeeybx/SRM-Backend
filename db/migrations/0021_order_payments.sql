@@ -212,6 +212,31 @@ FROM (
   ORDER BY l.id, (a.source = 'bank') DESC, a.applied_amount::numeric DESC, a.order_id ASC
 ) chosen
 LEFT JOIN bank_accounts ba ON ba.id = chosen.bank_account_id
+/*
+  ── A payment somebody deleted stays deleted ─────────────────────────────
+
+  Every section of this backfill treats "no such row" as "never recorded".
+  A row a person REMOVED is also absent, so each re-run of this file — and
+  scripts/apply-unjournaled-migrations.js re-runs all of them, every time —
+  put it back.
+
+  That is not hypothetical: 23 payments totalling ₦504,879,000 have been
+  removed by staff across 8 orders, and on three of those the removal was
+  undone this way. Order 11332 is the clearest: its ₦62,400,000 wallet-era
+  duplicate was deleted on 11 September and re-created by the next run, which
+  is why a fully settled order went on reporting an overpayment of its entire
+  value on the refunds page.
+
+  The same reasoning the reversed-deposit guard above already applies: a
+  payment that was undone must not come back.
+*/
+WHERE NOT EXISTS (
+  SELECT 1 FROM audit_logs al
+   WHERE al.entity_type = 'order'
+     AND al.action = 'order.payment_removed'
+     AND al.entity_id = chosen.order_id
+     AND (al.metadata->>'amount')::numeric = chosen.line_amount
+)
 -- Idempotent: the unique index on statement_line_id is what makes re-running
 -- this file a no-op rather than a duplicate-key failure.
 ON CONFLICT (statement_line_id) WHERE statement_line_id IS NOT NULL DO NOTHING;
@@ -319,6 +344,14 @@ WHERE a.amount::numeric > 0
   AND NOT EXISTS (
     SELECT 1 FROM order_payments p
     WHERE p.order_id = a.order_id AND p.deposit_id = a.deposit_id AND p.source = 'legacy'
+  )
+  -- And stays gone once a person has removed it. See the note in section 3.
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_logs al
+     WHERE al.entity_type = 'order'
+       AND al.action = 'order.payment_removed'
+       AND al.entity_id = a.order_id
+       AND (al.metadata->>'amount')::numeric = a.amount::numeric
   );
 
 -- ── 6. Backfill: paid orders the ledger never recorded at all ──────────────
@@ -347,7 +380,19 @@ SELECT
 FROM orders o
 WHERE o.payment_status IN ('Paid', 'Part Paid')
   AND o.amount_paid::numeric > 0
-  AND NOT EXISTS (SELECT 1 FROM order_payments p WHERE p.order_id = o.id);
+  AND NOT EXISTS (SELECT 1 FROM order_payments p WHERE p.order_id = o.id)
+  /*
+    An order left with no payments because somebody removed them is not an
+    order whose funding was never recorded — it is one where the record was
+    deliberately taken away. Refilling it from amount_paid would overwrite
+    that decision with a figure the person had just rejected.
+  */
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_logs al
+     WHERE al.entity_type = 'order'
+       AND al.action = 'order.payment_removed'
+       AND al.entity_id = o.id
+  );
 
 -- ── 7. What the backfill is expected to leave behind ───────────────────────
 --
