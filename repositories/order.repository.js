@@ -447,6 +447,9 @@ const findAll = async ({
         trucksOut: sql`(SELECT COUNT(*)::int FROM order_trucks t WHERE t.order_id = ${orders.id} AND t.status = 'gated_out')`,
         price: orders.price,
         totalAmount: orders.totalAmount,
+        // Without it a list reading `totalAmount - amountPaid` subtracts
+        // nothing, and every paid order shows its whole value as outstanding.
+        amountPaid: orders.amountPaid,
         deliveryType: orders.deliveryType,
         deliveryAddress: orders.deliveryAddress,
         companyName: orders.companyName,
