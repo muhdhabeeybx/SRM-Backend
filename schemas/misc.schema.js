@@ -673,6 +673,33 @@ const optPfiDate = (label = "Date") =>
     .optional()
     .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : v));
 
+/**
+ * A plain calendar day, normalised to YYYY-MM-DD.
+ *
+ * Stricter than optPfiDate, which takes any string up to 50 characters
+ * because the columns behind it are timestamps run through parseDate() in the
+ * controller. This one lands in a `date` column, where "not-a-date" is a 500
+ * from the driver rather than a validation message.
+ *
+ * "" and null mean "clear it", which for a collections window means no window
+ * at all rather than a date nobody chose.
+ */
+const optCalendarDay = (label = "Date") =>
+  z
+    .union([z.string().trim().max(40), z.date(), z.literal(""), z.null()])
+    .optional()
+    .transform((v, ctx) => {
+      if (v === "" || v === null) return null;
+      if (v === undefined) return undefined;
+      const d = v instanceof Date ? v : new Date(String(v));
+      if (Number.isNaN(d.getTime())) {
+        ctx.addIssue({ code: "custom", message: `${label} is not a date` });
+        return z.NEVER;
+      }
+      const p = (n) => String(n).padStart(2, "0");
+      return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+    });
+
 const pfiBase = {
   pfiNumber: z.string().trim().max(100).optional(),
   pfi_number: z.string().trim().max(100).optional(),
@@ -720,6 +747,10 @@ const pfiBase = {
   description: optPfiStr("Description", 1000),
   pfiDate: optPfiDate("PFI date"),
   pfi_date: optPfiDate("PFI date"),
+  // When this PFI started taking money — the window on the credits offered
+  // when confirming an order's payment. See migration 0052.
+  collectionsOpenFrom: optCalendarDay("Collections open from"),
+  collections_open_from: optCalendarDay("Collections open from"),
   locationId: optPfiId("Location"),
   location_id: optPfiId("Location"),
   depotId: optPfiId("Depot"),

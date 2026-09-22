@@ -681,8 +681,14 @@ const bankStatementRepo = {
    * Unmatched lines for an account.
    *
    * Amount search strips commas, so "150,000" and "150000" behave the same.
+   *
+   * `notBefore` is the PFI's collections window: credits older than the day
+   * the cargo started taking money are left out, because one account collects
+   * for as many as twenty-six PFIs and the account alone does not say which
+   * cargo a credit answers to. Omitted, nothing is filtered — every other
+   * caller of this search is unchanged.
    */
-  async searchUnmatched({ bankAccountId, q, limit = 50 }) {
+  async searchUnmatched({ bankAccountId, q, limit = 50, notBefore = null }) {
     const term = String(q || "").trim();
     // Amount search ignores thousands separators, so "150,000" finds 150000.
     const numeric = term.replace(/,/g, "");
@@ -693,6 +699,7 @@ const bankStatementRepo = {
       SELECT * FROM bank_statement_lines
       WHERE bank_account_id = ${bankAccountId}
         AND status = 'UNMATCHED'
+        AND (${notBefore}::date IS NULL OR txn_date >= ${notBefore}::date)
         AND (
           ${like}::text IS NULL
           OR depositor ILIKE ${like}::text
@@ -703,6 +710,18 @@ const bankStatementRepo = {
       ORDER BY txn_date DESC
       LIMIT ${Math.min(Number(limit) || 50, 200)}
     `;
+  },
+
+  /** How many unmatched credits the window is holding back, so it can say so. */
+  async countUnmatchedBefore({ bankAccountId, notBefore }) {
+    if (!notBefore) return 0;
+    const [row] = await client`
+      SELECT COUNT(*)::int AS n FROM bank_statement_lines
+       WHERE bank_account_id = ${bankAccountId}
+         AND status = 'UNMATCHED'
+         AND txn_date < ${notBefore}::date
+    `;
+    return Number(row?.n || 0);
   },
 
   /**

@@ -7,6 +7,7 @@ const {
   real,
   decimal,
   timestamp,
+  date,
   jsonb,
   index,
   uniqueIndex,
@@ -33,6 +34,21 @@ const pfis = pgTable(
     status: pfiStatusEnum("status").default("active").notNull(),
     description: text("description").default(""),
     pfiDate: timestamp("pfi_date", { withTimezone: true }),
+    /**
+     * The day this PFI started taking money.
+     *
+     * Confirming an order's payment offers the unmatched credits on the
+     * account it collects into — and one account collects for as many as
+     * twenty-six PFIs, so the account alone does not narrow a credit to one
+     * cargo. Credits older than this are held back, behind an explicit
+     * "include earlier credits".
+     *
+     * Its own date rather than pfi_date, which is the document's date and not
+     * when money starts arriving: customers pay ahead of a cargo being
+     * raised. NULL means no window — every credit stays on offer. See
+     * migration 0052.
+     */
+    collectionsOpenFrom: date("collections_open_from"),
     locationId: integer("location_id").references(() => depots.id, { onDelete: "set null" }),
     lpgStationId: integer("lpg_station_id").references(() => lpgStations.id, { onDelete: "set null" }),
     locationName: varchar("location_name", { length: 255 }).default(""),

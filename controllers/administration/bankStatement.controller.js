@@ -316,17 +316,62 @@ async function deleteStatement(req, res) {
   );
 }
 
-/** GET /api/bank-statements/lines?bankAccountId=&q= */
+/**
+ * The credits an order's payment may be matched to.
+ *
+ * GET /api/bank-statements/lines?bankAccountId=&q=&orderId=&includeEarlier=
+ *
+ * With an `orderId`, the search is narrowed to that order's PFI collections
+ * window: credits dated before the day the cargo started taking money are
+ * held back. One account collects for as many as twenty-six PFIs, so naming
+ * the account does not narrow a credit to one cargo, and the pool reaches
+ * months back — a credit that paid for a cargo finished in July sits beside
+ * today's.
+ *
+ * It is a default, not a rule. `includeEarlier=true` lifts it, because money
+ * does legitimately arrive before a PFI is raised: 275 payments worth ₦10.9bn
+ * on PFI/32 were matched to credits dated in the month before its own date.
+ * The window is returned either way so the caller can say what it is doing.
+ */
 async function searchLines(req, res) {
-  const { bankAccountId, q, limit } = req.query;
+  const { bankAccountId, q, limit, orderId, includeEarlier } = req.query;
   if (!bankAccountId) return fail(res, 400, "bankAccountId is required");
   await guard(req, bankAccountId);
+
+  let window = null;
+  if (orderId) {
+    const [row] = await client`
+      SELECT p.id, p.pfi_number, p.collections_open_from
+        FROM orders o JOIN pfis p ON p.id = o.pfi_id
+       WHERE o.id = ${Number(orderId)}`;
+    if (row?.collections_open_from) {
+      window = {
+        pfiNumber: row.pfi_number,
+        opensFrom: String(row.collections_open_from).slice(0, 10),
+      };
+    }
+  }
+
+  const lifted = String(includeEarlier || "") === "true";
+  const notBefore = window && !lifted ? window.opensFrom : null;
+
   const lines = await repo.searchUnmatched({
     bankAccountId: Number(bankAccountId),
     q,
     limit,
+    notBefore,
   });
-  return ok(res, { lines });
+
+  // Counted against the window itself, not against `notBefore`, so the caller
+  // can still say how many it is choosing to show once the window is lifted.
+  const hiddenBefore = window
+    ? await repo.countUnmatchedBefore({
+        bankAccountId: Number(bankAccountId),
+        notBefore: window.opensFrom,
+      })
+    : 0;
+
+  return ok(res, { lines, window: window ? { ...window, hiddenBefore, lifted } : null });
 }
 
 /** POST /api/bank-statements/match */

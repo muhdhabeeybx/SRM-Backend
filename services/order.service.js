@@ -1850,8 +1850,35 @@ async function confirmOrderPayment({
      */
     const shouldTransition = orderStatus.isLegal(order.status, "Paid");
 
+    /**
+     * A credit from before this PFI opened is allowed, and said so on the row.
+     *
+     * The picker hides those by default (see the lines endpoint) and lifting
+     * the window is a deliberate act, so the fact that it was lifted belongs
+     * with the payment rather than only in somebody's memory. Money genuinely
+     * does arrive before a cargo is raised — 275 payments worth ₦10.9bn on
+     * PFI/32 did — which is why this records rather than refuses.
+     */
+    let paymentNote = note;
+    if (order.pfiId && Array.isArray(lineIds) && lineIds.length) {
+      const early = await tx.execute(sql`
+        SELECT l.txn_date, p.collections_open_from, p.pfi_number
+          FROM bank_statement_lines l
+          JOIN pfis p ON p.id = ${order.pfiId}
+         WHERE l.id = ANY(${lineIds.map(Number)}::int[])
+           AND p.collections_open_from IS NOT NULL
+           AND l.txn_date < p.collections_open_from`);
+      const rows = early?.rows ?? early ?? [];
+      if (rows.length > 0) {
+        const opened = String(rows[0].collections_open_from).slice(0, 10);
+        const dates = rows.map((r) => String(r.txn_date).slice(0, 10)).join(", ");
+        const flag = `Matched outside the PFI window (${rows[0].pfi_number} opened ${opened}): ${rows.length} credit${rows.length === 1 ? "" : "s"} dated ${dates}`;
+        paymentNote = paymentNote ? `${paymentNote} — ${flag}` : flag;
+      }
+    }
+
     const { payments, summary } = await orderPaymentService.recordFromStatementLines(
-      { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note, scopeUser },
+      { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note: paymentNote, scopeUser },
       tx,
     );
 

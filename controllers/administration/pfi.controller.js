@@ -44,6 +44,14 @@ const withFinancials = async (rows) => {
   return many ? decorated : decorated[0];
 };
 
+/** A calendar day as the `date` columns want it, from anything parseable. */
+const calendarDay = (val) => {
+  const d = parseDate(val);
+  if (!d) return null;
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+};
+
 const parseDate = (val) => {
   if (!val) return null;
   if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
@@ -121,6 +129,13 @@ const createPfi = asyncHandler(async (req, res) => {
   const pfi_number = req.body.pfi_number || req.body.pfiNumber;
   const description = req.body.description || "";
   const pfi_date = req.body.pfi_date || req.body.pfiDate;
+  /**
+   * When this cargo starts taking money. Defaults to the PFI's own date,
+   * which is right for a new PFI — the historical ones are backfilled from
+   * the money that actually arrived. See migration 0052.
+   */
+  const collections_open_from =
+    req.body.collections_open_from || req.body.collectionsOpenFrom || pfi_date;
   const location_id = req.body.location_id || req.body.locationId;
   const product_id = req.body.product_id || req.body.productId;
   const starting_qty_litres = req.body.starting_qty_litres ?? req.body.startingQtyLitres;
@@ -217,6 +232,7 @@ const createPfi = asyncHandler(async (req, res) => {
     status: requestedStatus,
     description: description || "",
     pfiDate: parseDate(pfi_date),
+    collectionsOpenFrom: calendarDay(collections_open_from),
     locationId: location_id_val,
     lpgStationId: null,
     locationName: location_name,
@@ -301,7 +317,7 @@ const updatePfi = asyncHandler(async (req, res) => {
   }
 
   const allowedFields = [
-    "pfi_number", "description", "pfi_date", "status", "starting_qty_litres",
+    "pfi_number", "description", "pfi_date", "collections_open_from", "status", "starting_qty_litres",
     "bl_qty_litres", "bl_qty_mt", "ticket_count",
     "qty_volume_mt", "sold_qty_litres", "total_amount", "unit_price", "credit_balance", "product_unit",
     "vessel_broker", "vessel_name", "surveyor_name", "surveyor_phone",
@@ -316,6 +332,11 @@ const updatePfi = asyncHandler(async (req, res) => {
     if (value !== undefined) {
       if (field === "pfi_date") {
         updateData.pfiDate = parseDate(value);
+      } else if (field === "collections_open_from") {
+        // A plain calendar day, and blank clears the window back to "offer
+        // every credit" rather than setting an epoch nobody chose.
+        updateData.collectionsOpenFrom =
+          value === "" || value === null ? null : calendarDay(value);
       } else if (field === "closure_date") {
         updateData.closureDate = parseDate(value);
       } else if (field === "bl_qty_litres") {
