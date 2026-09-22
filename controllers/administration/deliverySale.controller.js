@@ -146,6 +146,11 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
   if (codes !== null && rows.some((r) => !codes.includes(code(r.allocationCode ?? r.allocation_code)))) {
     return forbidden(res, "One or more of those rows is on a batch that is not on your PFI.");
   }
+  // A station's hand-keyed deposit names an account, and the single-row route
+  // already refuses one outside this person's PFI. The same rule here.
+  for (const accountId of new Set(rows.map((r) => r.bankAccountId).filter(Boolean))) {
+    await pfiBankScope.assertAccountAllowed(req.user, accountId);
+  }
 
   const sales = await deliverySaleRepo.createMany(rows);
   res.status(201).json({
