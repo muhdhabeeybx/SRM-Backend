@@ -16,6 +16,8 @@ module.exports = {
   productRepo: require("./product.repository"),
   pfiRepo: require("./pfi.repository"),
   pfiExpenseRepo: require("./pfiExpense.repository"),
+  // Evacuation surplus entries, and the PFI total they keep. See migration 0053.
+  pfiSurplusRepo: require("./pfiSurplus.repository"),
   orderRepo: require("./order.repository"),
   ticketRepo: require("./ticket.repository"),
   depositRepo: require("./deposit.repository"),

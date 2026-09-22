@@ -8,6 +8,7 @@ const {
   staffRepo,
   orderRepo,
   orderPfiAllocationRepo,
+  pfiSurplusRepo,
 } = require("../../repositories");
 const { db } = require("../../config/db");
 const { eq } = require("drizzle-orm");
@@ -15,6 +16,7 @@ const { pfiMovements } = require("../../db/schema");
 const { computeFinancials, explainFinancials, BILLED_ON_OWN_QUANTITY } = require("../../lib/pfiFinance");
 const { resolveBooking, actorFor, vendorFor } = require("./expense.controller");
 const { isWithinScope } = require("../../lib/scopeFilter");
+const { scopedPfiIds } = require("../../lib/pfiBankScope");
 const smsService = require("../../services/sms.service");
 
 function httpErr(status, message) {
@@ -751,6 +753,8 @@ const getStockSummary = asyncHandler(async (req, res) => {
     locationName: p.locationName,
     productName: p.productName,
     tankQtyLitres: p.financials.tankQtyLitres,
+    // Beside the tank rather than inside it, so tank + surplus − sold = remaining.
+    evacuationSurplusLitres: p.financials.evacuationSurplusLitres,
     blQtyLitres: p.financials.blQtyLitres,
     surplusDeficitLitres: p.financials.surplusDeficitLitres,
     sold: p.financials.sold,
@@ -764,6 +768,7 @@ const getStockSummary = asyncHandler(async (req, res) => {
       stock: rows,
       totals: {
         tank: rows.reduce((s, r) => s + r.tankQtyLitres, 0),
+        evacuationSurplus: rows.reduce((s, r) => s + r.evacuationSurplusLitres, 0),
         sold: rows.reduce((s, r) => s + r.sold, 0),
         remaining: rows.reduce((s, r) => s + r.remaining, 0),
       },
@@ -998,7 +1003,76 @@ const setPfiTrucks = asyncHandler(async (req, res) => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Evacuation surplus
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * A PFI person reaches only their own PFI's surplus. Reading another answers
+ * "not found" and writing one answers 403 — the rule lib/pfiScope.js sets.
+ */
+const surplusPfiFor = async (req, { write }) => {
+  const pfi = await pfiRepo.findById(req.params.id);
+  const ids = scopedPfiIds(req.user);
+  const outside = pfi && ids !== null && !ids.includes(Number(pfi.id));
+  if (!pfi || (outside && !write)) throw httpErr(404, "PFI not found");
+  if (outside) throw httpErr(403, "That PFI is not yours to change.");
+  return pfi;
+};
+
+const getPfiSurpluses = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: false });
+  const entries = await pfiSurplusRepo.listFor(pfi.id);
+  res.json({
+    success: true,
+    data: { entries, totalLitres: Number(pfi.evacuationSurplusLitres) || 0 },
+  });
+});
+
+/**
+ * Record product found in the tank over what the books say is left.
+ *
+ * It adds to what the PFI can sell, and a finished PFI reopens so it can be
+ * sold. It does not touch the landed tank figure — see pfiSurplus.repository.
+ */
+const addPfiSurplus = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const { actorId, actorName } = await actorFor(req);
+  const { entry, pfi: updated, reopened } = await pfiSurplusRepo.record({
+    pfiId: pfi.id,
+    qtyLitres: req.body.qtyLitres,
+    recordedOn: req.body.recordedOn,
+    note: req.body.note,
+    staffId: actorId,
+    staffName: actorName,
+  });
+  res.status(201).json({
+    success: true,
+    message: reopened
+      ? `Surplus of ${entry.qtyLitres.toLocaleString()} recorded — the PFI is open for sale again`
+      : `Surplus of ${entry.qtyLitres.toLocaleString()} recorded`,
+    data: { entry, pfi: updated, reopened },
+  });
+});
+
+/** Take a surplus back. Refused once any of it has been sold. */
+const voidPfiSurplus = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const { actorId, actorName } = await actorFor(req);
+  const { entry, pfi: updated } = await pfiSurplusRepo.voidEntry({
+    pfiId: pfi.id,
+    entryId: req.params.entryId,
+    reason: req.body.reason,
+    staffId: actorId,
+    staffName: actorName,
+  });
+  res.json({ success: true, message: "Surplus taken back", data: { entry, pfi: updated } });
+});
+
 module.exports = {
+  getPfiSurpluses,
+  addPfiSurplus,
+  voidPfiSurplus,
   getPfiLocations,
   setPfiLocations,
   getPfiTrucks,

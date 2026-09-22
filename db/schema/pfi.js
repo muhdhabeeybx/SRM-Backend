@@ -76,6 +76,16 @@ const pfis = pgTable(
     // counted tickets for is not a batch with zero tickets.
     ticketCount: integer("ticket_count"),
     soldQtyLitres: integer("sold_qty_litres").default(0).notNull(),
+    /**
+     * Product found in the tank when the PFI was run down, over what the books
+     * said was left — the sum of the live pfi_evacuation_surpluses rows.
+     *
+     * Adds to what can be SOLD (starting + surplus - sold), never to
+     * startingQtyLitres: the cargo is costed against the landed tank figure,
+     * and a surplus found weeks later must not rewrite its deficit. Maintained
+     * by repositories/pfiSurplus.repository.js. See migration 0053.
+     */
+    evacuationSurplusLitres: integer("evacuation_surplus_litres").default(0).notNull(),
     totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).default("0"),
     unitPrice: decimal("unit_price", { precision: 15, scale: 2 }).default("0"),
     // Rebate, discount or claim credited back against this cargo. Subtracted
@@ -141,9 +151,35 @@ const pfis = pgTable(
     index("pfis_pfi_type_idx").on(table.pfiType),
     check("pfis_qty_check", sql`${table.startingQtyLitres} >= 0`),
     check("pfis_sold_qty_check", sql`${table.soldQtyLitres} >= 0`),
+    check("pfis_evacuation_surplus_check", sql`${table.evacuationSurplusLitres} >= 0`),
     check("pfis_pfi_type_check", sql`${table.pfiType} IN ('coastal', 'gantry')`),
     check("pfis_ticket_count_check", sql`${table.ticketCount} IS NULL OR ${table.ticketCount} >= 0`),
   ]
 );
 
-module.exports = { pfis };
+/**
+ * One evacuation surplus, as it was recorded. Voided rather than deleted, so a
+ * figure that was entered and taken back is still on record. See migration 0053.
+ */
+const pfiEvacuationSurpluses = pgTable(
+  "pfi_evacuation_surpluses",
+  {
+    id: serial("id").primaryKey(),
+    pfiId: integer("pfi_id").notNull().references(() => pfis.id, { onDelete: "cascade" }),
+    qtyLitres: integer("qty_litres").notNull(),
+    recordedOn: date("recorded_on").notNull(),
+    note: text("note").default("").notNull(),
+    recordedBy: integer("recorded_by").references(() => staff.id, { onDelete: "set null" }),
+    recordedByName: varchar("recorded_by_name", { length: 255 }).default("").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
+    voidedBy: integer("voided_by").references(() => staff.id, { onDelete: "set null" }),
+    voidedByName: varchar("voided_by_name", { length: 255 }).default("").notNull(),
+    voidReason: text("void_reason").default("").notNull(),
+  },
+  (table) => [
+    check("pfi_evacuation_surpluses_qty_litres_check", sql`${table.qtyLitres} > 0`),
+  ]
+);
+
+module.exports = { pfis, pfiEvacuationSurpluses };

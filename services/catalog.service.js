@@ -68,7 +68,7 @@ const loadCatalog = async () => {
       .select({
         depotId: pfis.locationId,
         productId: pfis.productId,
-        stock: sql`sum(${pfis.startingQtyLitres} - ${pfis.soldQtyLitres})`.mapWith(Number),
+        stock: sql`sum(${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.soldQtyLitres})`.mapWith(Number),
       })
       .from(pfis)
       .where(eq(pfis.status, "active"))

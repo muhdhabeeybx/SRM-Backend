@@ -36,6 +36,7 @@
  * written to cope with it: a station is now a row with an id.
  */
 const { client } = require("../db");
+const { stockQty } = require("../lib/pfiStock");
 const { dayBounds, REPORT_TZ } = require("./dailyCombinedReport.service");
 // The desks, in reading order, and the columns each one's form collects. Shared
 // with the combined report so the two cannot describe the same sheet
@@ -177,7 +178,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
            -- ('Litres', 'Liters', 'kg'). Carried through so the report prints
            -- what the batch is actually traded in rather than assuming.
            product_unit,
-           starting_qty_litres, sold_qty_litres, unit_price::numeric AS unit_price,
+           starting_qty_litres, evacuation_surplus_litres, sold_qty_litres, unit_price::numeric AS unit_price,
            ticket_count
       FROM pfis
      WHERE status = 'active'
@@ -401,7 +402,12 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     const e = expenses.get(Number(p.id)) || {};
     const cm = commissions.get(Number(p.id)) || {};
 
+    // `starting` stays the batch as landed — the email's Initial stock column,
+    // which never changes. Closing runs off landed plus any evacuation surplus
+    // found since, because that is what the batch has had to sell.
     const starting = num(p.starting_qty_litres);
+    const surplus = num(p.evacuation_surplus_litres);
+    const stock = stockQty(p);
     const sold = num(p.sold_qty_litres);
     const valueAll = num(o.value_all);
     const paidAll = num(o.paid_all);
@@ -416,7 +422,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
      * means the row reads straight across — opening − sold today = closing —
      * however the two halves were recorded.
      */
-    const closing = Math.max(0, starting - sold);
+    const closing = Math.max(0, stock - sold);
     const soldToday = num(o.litres_today);
 
     return {
@@ -431,11 +437,12 @@ const buildPfiDailyReportData = async (date = new Date()) => {
 
       stock: {
         starting,
+        surplus,
         sold,
         openingToday: closing + soldToday,
         soldToday,
         remaining: closing,
-        percentSold: starting > 0 ? (sold / starting) * 100 : 0,
+        percentSold: stock > 0 ? (sold / stock) * 100 : 0,
       },
 
       orders: {

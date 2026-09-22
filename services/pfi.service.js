@@ -1,13 +1,11 @@
 const { pfiRepo } = require("../repositories");
+const { sellableQty } = require("../lib/pfiStock");
 
 async function getAvailableCapacity(depotId, productId) {
   const activePfis = await pfiRepo.findActiveByDepotAndProduct(depotId, productId);
 
   return activePfis.reduce((total, pfi) => {
-    const available = Math.max(
-      0,
-      (pfi.startingQtyLitres || 0) - (pfi.soldQtyLitres || 0)
-    );
+    const available = sellableQty(pfi);
     return total + available;
   }, 0);
 }
@@ -44,6 +42,7 @@ async function getDepotCapacities(depotId) {
     .select({
       productId: pfis.productId,
       startingQtyLitres: pfis.startingQtyLitres,
+      evacuationSurplusLitres: pfis.evacuationSurplusLitres,
       soldQtyLitres: pfis.soldQtyLitres,
     })
     .from(pfis)
@@ -66,10 +65,7 @@ async function getDepotCapacities(depotId) {
   for (const pfi of activePfis) {
     const prodKey = pfi.productId;
     if (!prodKey) continue;
-    const available = Math.max(
-      0,
-      Number(pfi.startingQtyLitres || 0) - Number(pfi.soldQtyLitres || 0)
-    );
+    const available = sellableQty(pfi);
     capacityMap[prodKey] = (capacityMap[prodKey] || 0) + available;
     capacityMap[String(prodKey)] = capacityMap[prodKey];
   }
@@ -97,6 +93,7 @@ async function getMultiDepotCapacities(depotIds) {
     SELECT reach.depot_id     AS "locationId",
            p.product_id       AS "productId",
            p.starting_qty_litres AS "startingQtyLitres",
+           p.evacuation_surplus_litres AS "evacuationSurplusLitres",
            p.sold_qty_litres     AS "soldQtyLitres"
       FROM pfis p
       JOIN (
@@ -117,10 +114,7 @@ async function getMultiDepotCapacities(depotIds) {
     if (!prodKey) continue;
     if (!pfiCapacityMap[depotKey]) pfiCapacityMap[depotKey] = {};
     if (!pfiCapacityMap[String(depotKey)]) pfiCapacityMap[String(depotKey)] = pfiCapacityMap[depotKey];
-    const available = Math.max(
-      0,
-      Number(pfi.startingQtyLitres || 0) - Number(pfi.soldQtyLitres || 0)
-    );
+    const available = sellableQty(pfi);
     pfiCapacityMap[depotKey][prodKey] =
       (pfiCapacityMap[depotKey][prodKey] || 0) + available;
     pfiCapacityMap[depotKey][String(prodKey)] = pfiCapacityMap[depotKey][prodKey];
@@ -150,10 +144,7 @@ async function findPfiForOrder(depotId, productId, quantity) {
 
   for (const pfi of activePfis) {
     if (remaining <= 0) break;
-    const available = Math.max(
-      0,
-      (pfi.startingQtyLitres || 0) - (pfi.soldQtyLitres || 0)
-    );
+    const available = sellableQty(pfi);
     if (available <= 0) continue;
     totalAvailableStock += available;
 

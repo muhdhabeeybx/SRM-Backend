@@ -94,7 +94,9 @@ const pfiSummary = async () => {
       pfiCount: sql`count(*)::int`,
       startingLitres: sql`COALESCE(SUM(${pfis.startingQtyLitres}), 0)::bigint`,
       soldLitres: sql`COALESCE(SUM(${pfis.soldQtyLitres}), 0)::bigint`,
-      remainingLitres: sql`COALESCE(SUM(${pfis.startingQtyLitres} - ${pfis.soldQtyLitres}), 0)::bigint`,
+      // Remaining counts any evacuation surplus found since; starting stays the
+      // landed figure. See lib/pfiStock.js.
+      remainingLitres: sql`COALESCE(SUM(${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.soldQtyLitres}), 0)::bigint`,
       totalValue: sql`COALESCE(SUM(${pfis.totalAmount}), 0)`,
     })
     .from(pfis)

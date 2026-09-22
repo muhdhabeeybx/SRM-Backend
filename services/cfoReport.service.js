@@ -1,4 +1,4 @@
-const { cfoReportRepo } = require("../repositories");
+const { cfoReportRepo, pfiSurplusRepo } = require("../repositories");
 const { REPORT_TZ } = require("./dailyCombinedReport.service");
 
 /**
@@ -33,7 +33,13 @@ const { REPORT_TZ } = require("./dailyCombinedReport.service");
  *   Sales volume     The same, restricted to orders placed on this date.
  *   for the day
  *
- *   Stock balance    Initial qty − cumulative sales volume. Derived, always.
+ *   Evacuation       Product found in the tank when the PFI was run down, over
+ *   surplus          what the books said was left (migration 0053). Counted
+ *                    from the day it was recorded, so the days before it keep
+ *                    the balance they had. Initial qty stays the landed figure.
+ *
+ *   Stock balance    Initial qty + evacuation surplus − cumulative sales
+ *                    volume. Derived, always.
  *
  *   Sales value      Invoiced value of the same orders the cumulative volume
  *   to date          counts. Same cohort, so litres and naira can never tell
@@ -168,10 +174,11 @@ const addToTotals = (totals, row) => {
 
   const unit = row.productUnit;
   const q = totals.byUnit[unit] || (totals.byUnit[unit] = {
-    unit, initialQty: 0, cumulativeVolume: 0, dayVolume: 0, stockBalance: 0,
+    unit, initialQty: 0, evacuationSurplus: 0, cumulativeVolume: 0, dayVolume: 0, stockBalance: 0,
     awaitingPayment: 0, availableToSell: 0,
   });
   q.initialQty = round2(q.initialQty + row.initialQty);
+  q.evacuationSurplus = round2(q.evacuationSurplus + (row.evacuationSurplus || 0));
   q.cumulativeVolume = round2(q.cumulativeVolume + row.cumulativeVolume);
   q.dayVolume = round2(q.dayVolume + row.dayVolume);
   q.stockBalance = round2(q.stockBalance + row.stockBalance);
@@ -197,9 +204,10 @@ const emptyTotals = () => ({
  * reportActuals.service shows its numbers beside what is typed rather than
  * over it.
  */
-const buildRow = ({ pfi, day, running, dayBucket, entry, editorName }) => {
+const buildRow = ({ pfi, day, running, dayBucket, entry, editorName, surplus = 0 }) => {
   const computed = {
     initialQty: round2(pfi.startingQty),
+    evacuationSurplus: round2(surplus),
     cumulativeVolume: round2(running.qty),
     dayVolume: round2(dayBucket.qty),
     salesValue: round2(running.value),
@@ -222,7 +230,7 @@ const buildRow = ({ pfi, day, running, dayBucket, entry, editorName }) => {
     /** Negative: overpayment refunded to the customer off this PFI's orders. */
     refunded: round2(running.refunded),
   };
-  computed.stockBalance = round2(computed.initialQty - computed.cumulativeVolume);
+  computed.stockBalance = round2(computed.initialQty + computed.evacuationSurplus - computed.cumulativeVolume);
   computed.surplusDeficit = round2(computed.bankInflow - computed.salesValue);
   /**
    * The stock balance says what has not been SOLD. It is not the same as what
@@ -264,13 +272,16 @@ const buildRow = ({ pfi, day, running, dayBucket, entry, editorName }) => {
     bankInflow,
     // Derived from the EFFECTIVE values above, so the printed row adds up
     // whether or not anybody has corrected it. See the header.
-    stockBalance: round2(initialQty - cumulativeVolume),
+    // Not overridable: it is a recorded entry with its own audit trail, and
+    // a correction belongs there, not in a cell.
+    evacuationSurplus: computed.evacuationSurplus,
+    stockBalance: round2(initialQty + computed.evacuationSurplus - cumulativeVolume),
     surplusDeficit: round2(bankInflow - salesValue),
     // Off the EFFECTIVE stock balance, so correcting a quantity by hand moves
     // what can be sold with it rather than leaving the two disagreeing.
     awaitingPayment: computed.awaitingPayment,
     awaitingPaymentOrders: computed.awaitingPaymentOrders,
-    availableToSell: round2(initialQty - cumulativeVolume - computed.awaitingPayment),
+    availableToSell: round2(initialQty + computed.evacuationSurplus - cumulativeVolume - computed.awaitingPayment),
 
     orders: running.orders,
     dayOrders: dayBucket.orders,
@@ -419,6 +430,17 @@ const build = async ({
   const entryBy = new Map(entries.map((e) => [`${e.pfiId}|${dayKey(e.reportDate)}`, e]));
   const editors = await cfoReportRepo.editorsFor(entries.map((e) => e.updatedBy));
 
+  // Each PFI's evacuation surplus entries, so a day counts only those
+  // recorded on or before it.
+  const surplusesBy = new Map();
+  for (const s of await pfiSurplusRepo.liveEntriesFor(ids)) {
+    const list = surplusesBy.get(Number(s.pfiId)) || [];
+    list.push({ day: dayKey(s.recordedOn), qty: num(s.qtyLitres) });
+    surplusesBy.set(Number(s.pfiId), list);
+  }
+  const surplusAsOf = (pfiId, day) =>
+    (surplusesBy.get(pfiId) || []).reduce((sum, s) => (s.day <= day ? sum + s.qty : sum), 0);
+
   // ── walk the days forward, carrying the running totals ──
   const running = new Map(
     pfis.map((b) => [b.id, { ...emptyBucket(), ...(openingBy.get(b.id) || {}) }])
@@ -458,6 +480,7 @@ const build = async ({
 
       const row = buildRow({
         pfi, day, running: run, dayBucket: bucket, entry,
+        surplus: surplusAsOf(pfi.id, day),
         editorName: entry?.updatedBy ? editors.get(Number(entry.updatedBy)) : null,
       });
       rows.push(row);

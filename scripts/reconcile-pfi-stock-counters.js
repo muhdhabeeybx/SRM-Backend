@@ -96,7 +96,8 @@ const SQL = `
   SELECT p.id,
          p.pfi_number,
          p.status::text                          AS status,
-         p.starting_qty_litres::bigint           AS tank,
+         -- Landed plus any evacuation surplus: what the batch offers from.
+         (p.starting_qty_litres + p.evacuation_surplus_litres)::bigint AS tank,
          p.sold_qty_litres::bigint               AS counter,
          COALESCE(o.live_qty, 0)::bigint         AS expected,
          COALESCE(o.live_orders, 0)::int          AS live_orders,

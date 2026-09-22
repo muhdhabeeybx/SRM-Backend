@@ -855,6 +855,23 @@ const createPfi = z.object(pfiBase).refine(
 const updatePfi = z.object(pfiBase);
 
 /**
+ * An evacuation surplus: how much, the day it was found, and why. The note is
+ * required — stock appearing from nowhere is the figure somebody will ask
+ * about, and "why" is the answer. See migration 0053.
+ */
+const pfiSurplusParam = z.object({ id: id("PFI"), entryId: id("Surplus entry") });
+const recordPfiSurplus = z.object({
+  qtyLitres: numberLike("Surplus quantity").pipe(
+    z.number().int("Surplus quantity must be a whole number").positive("Surplus quantity must be greater than zero"),
+  ),
+  recordedOn: optCalendarDay("Date found").refine((v) => v != null, "Give the date the surplus was found"),
+  note: requiredString("Note", 1000),
+});
+const voidPfiSurplus = z.object({
+  reason: requiredString("Reason", 1000),
+});
+
+/**
  * Which accounts a PFI collects into — the whole list, not a change to it.
  * Empty is allowed: it is how a PFI is taken off every account.
  */
@@ -864,6 +881,9 @@ const setPfiAccounts = z.object({
 });
 
 module.exports = {
+  pfiSurplusParam,
+  recordPfiSurplus,
+  voidPfiSurplus,
   pfiAccountsParam,
   setPfiAccounts,
   setPfiTrucks,

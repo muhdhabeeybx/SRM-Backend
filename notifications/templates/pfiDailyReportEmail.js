@@ -259,7 +259,13 @@ const depotSales = (pfis) =>
         `<tr>` +
         idCell(p.pfiNumber) +
         cell(escapeHtml(up(p.location)) || "—") +
-        stockCell(qty(p.stock.starting, p.unit)) +
+        // An evacuation surplus is named under the initial figure rather
+        // than folded into it: initial is the batch as landed and never
+        // changes, and the surplus is why closing can exceed initial − sold.
+        stockCell(
+          qty(p.stock.starting, p.unit) +
+            (p.stock.surplus > 0 ? `<br><span style="font-size:11px">+ ${qty(p.stock.surplus, p.unit)} surplus</span>` : "")
+        ) +
         stockCell(qty(p.stock.openingToday, p.unit)) +
         cell(sold, credit(sold)) +
         cell(qty(p.stock.remaining, p.unit), { r: true, s: KEY_S + BALANCE_S, bg: TINT }) +

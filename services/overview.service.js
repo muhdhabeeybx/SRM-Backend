@@ -136,7 +136,7 @@ const inventorySummary = async () => {
         COUNT(*)::int AS "pfiCount",
         COALESCE(SUM(p.starting_qty_litres), 0)::bigint AS "startingLitres",
         COALESCE(SUM(p.sold_qty_litres), 0)::bigint AS "soldLitres",
-        COALESCE(SUM(p.starting_qty_litres - p.sold_qty_litres), 0)::bigint AS "remainingLitres"
+        COALESCE(SUM(p.starting_qty_litres + p.evacuation_surplus_litres - p.sold_qty_litres), 0)::bigint AS "remainingLitres"
       FROM pfis p
       WHERE p.status = 'active'
       GROUP BY 1
@@ -149,7 +149,7 @@ const inventorySummary = async () => {
       SELECT
         COUNT(*) FILTER (WHERE status = 'active')::int AS "openPfis",
         COUNT(*)::int AS "totalPfis",
-        COALESCE(SUM(starting_qty_litres - sold_qty_litres) FILTER (WHERE status = 'active'), 0)::bigint
+        COALESCE(SUM(starting_qty_litres + evacuation_surplus_litres - sold_qty_litres) FILTER (WHERE status = 'active'), 0)::bigint
           AS "remainingLitres",
         COALESCE(SUM(starting_qty_litres) FILTER (WHERE status = 'active'), 0)::bigint AS "startingLitres"
       FROM pfis

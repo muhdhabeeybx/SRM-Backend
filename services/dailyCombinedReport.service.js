@@ -1,4 +1,5 @@
 const { client } = require("../db");
+const { stockQty } = require("../lib/pfiStock");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { generateOrderReference } = require("../utils/helpers");
 
@@ -152,7 +153,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
       client`SELECT id, name, city, state FROM depots ORDER BY city ASC`,
       client`
         SELECT id, pfi_number, location_id, product_name, product_unit,
-               starting_qty_litres, sold_qty_litres, status
+               starting_qty_litres, evacuation_surplus_litres, sold_qty_litres, status
         FROM pfis WHERE status = 'active'
       `,
       // Every column the five report forms can fill in, not the nine the email
@@ -409,7 +410,9 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
            * own orders, so the row reads left to right without a subtraction
            * that fails to come out.
            */
-          const balanceNow = pfi ? num(pfi.starting_qty_litres) - num(pfi.sold_qty_litres) : 0;
+          // Starting plus any evacuation surplus: the dashboard's balance,
+          // which this figure is anchored to. See lib/pfiStock.js.
+          const balanceNow = pfi ? stockQty(pfi) - num(pfi.sold_qty_litres) : 0;
           const closingStock = balanceNow + t.qtyAfterDay;
           const openingStock = closingStock + t.orderedQty;
 

@@ -22,6 +22,9 @@ const {
   addPfiExpense,
   getStockSummary,
   assignOrdersToPfi,
+  getPfiSurpluses,
+  addPfiSurplus,
+  voidPfiSurplus,
 } = require("../../controllers/administration/pfi.controller");
 
 // Stock across every PFI. Declared before "/:id" so it is not swallowed by it.
@@ -61,5 +64,20 @@ router.get("/:id/outstanding", verifyStaff, validate({ params: misc.idParam }), 
 
 router.get("/:id/expenses", verifyStaff, validate({ params: misc.idParam }), getPfiExpenses);
 router.post("/:id/expenses", verifyStaff, validate({ params: misc.idParam }), addPfiExpense);
+
+// Evacuation surplus — product found when a PFI is run down. See migration 0053.
+router.get("/:id/surpluses", verifyStaff, validate({ params: misc.idParam }), getPfiSurpluses);
+router.post(
+  "/:id/surpluses",
+  verifyStaff,
+  validate({ params: misc.idParam, body: misc.recordPfiSurplus }),
+  addPfiSurplus
+);
+router.post(
+  "/:id/surpluses/:entryId/void",
+  verifyStaff,
+  validate({ params: misc.pfiSurplusParam, body: misc.voidPfiSurplus }),
+  voidPfiSurplus
+);
 
 module.exports = router;
