@@ -233,6 +233,25 @@ describe("staff assigned to a PFI see only that PFI", () => {
     assert.equal(res.status, 200, JSON.stringify(res.body));
   });
 
+  // ── What the screens are told ───────────────────────────────────────────
+
+  test("login tells the dashboard this session is confined", async (t) => {
+    if (skip(t)) return;
+    // The sidebar hides what a confined person would be refused, so the flag it
+    // reads has to be the server's own answer, not the client's guess at it.
+    const mineIn = await request(app)
+      .post("/api/auth/login")
+      .send({ email: `pfi-scope-${RUN}@soroman.test`, password: "TestPassw0rd!" });
+    assert.equal(mineIn.status, 200, JSON.stringify(mineIn.body));
+    assert.equal(mineIn.body.data.user.pfiScoped, true);
+
+    const anyoneIn = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "test-staff@soroman.test", password: "TestPassw0rd!" });
+    assert.equal(anyoneIn.status, 200, JSON.stringify(anyoneIn.body));
+    assert.equal(anyoneIn.body.data.user.pfiScoped, false, "and an unrestricted person is not");
+  });
+
   test("an unrestricted person is refused none of it", async (t) => {
     if (skip(t)) return;
     for (const url of ["/api/contacts", "/api/dashboard/overview", "/api/offline-sales"]) {

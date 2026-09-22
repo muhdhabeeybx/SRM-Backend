@@ -4,6 +4,7 @@ const { staffRepo, staffScopeRepo, sessionRepo } = require("../../repositories")
 const { notify, notifyAndWait } = require("../../notifications");
 const sessionService = require("../../services/session.service");
 const cookieService = require("../../services/cookie.service");
+const { isConfined } = require("../../lib/pfiScope");
 
 const REALM = "staff";
 
@@ -11,7 +12,8 @@ const REALM = "staff";
 // (not just in the admin-management screens) to decide what this session can
 // see — so this payload builder needs the extra lookup, hence async.
 const getAdminPayload = async (user) => {
-  const pageOverrides = await staffScopeRepo.getAuthContext(user.id).then((ctx) => ctx.pageOverrides);
+  const ctx = await staffScopeRepo.getAuthContext(user.id);
+  const { pageOverrides } = ctx;
   return {
     id: user.id,
     email: user.email,
@@ -19,6 +21,12 @@ const getAdminPayload = async (user) => {
     surname: user.surname,
     roles: user.roles,
     canViewAllLocations: user.canViewAllLocations,
+    // Whether this session is confined to its PFIs, decided here by the rule
+    // the server actually enforces (lib/pfiScope.js) rather than re-derived on
+    // the client. The sidebar hides what a confined person would be refused;
+    // the refusal itself is still the server's, this only spares them the
+    // dead ends.
+    pfiScoped: isConfined(ctx),
     pageOverrides: pageOverrides.map((o) => ({ routePath: o.routePath, allowed: o.allowed })),
     profilePicture: {
       url: user.profilePictureUrl,
