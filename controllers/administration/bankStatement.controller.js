@@ -300,15 +300,20 @@ async function accountLines(req, res) {
 async function deleteStatement(req, res) {
   const account = await accountOfStatement(req.params.id);
   if (account != null) await guard(req, account);
-  const result = await repo.deleteStatement(Number(req.params.id));
+  const result = await repo.deleteStatement(Number(req.params.id), { staffId: req.user?.id ?? null });
+  if (result.notFound) return fail(res, 404, "That upload no longer exists");
   if (!result.deleted) {
     return fail(
       res,
       409,
-      `Cannot delete: ${result.matched} line${result.matched === 1 ? " is" : "s are"} already matched to a payment`,
+      `This upload can't be deleted: ${result.matched} of its line${result.matched === 1 ? " has" : "s have"} already been used for a payment, and deleting ${result.matched === 1 ? "it" : "them"} would leave that payment with no bank evidence.`,
     );
   }
-  return ok(res, result, "Statement deleted");
+  return ok(
+    res,
+    result,
+    `Upload deleted — ${result.lines} line${result.lines === 1 ? "" : "s"} removed from the statement`,
+  );
 }
 
 /** GET /api/bank-statements/lines?bankAccountId=&q= */

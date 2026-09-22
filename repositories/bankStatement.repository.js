@@ -586,14 +586,93 @@ const bankStatementRepo = {
   },
 
   /** Refuses to delete once any line has been matched — that is audit trail. */
-  async deleteStatement(id) {
-    const [{ matched }] = await client`
-      SELECT count(*)::int AS matched FROM bank_statement_lines
-      WHERE statement_id = ${id} AND status = 'MATCHED'
-    `;
-    if (matched > 0) return { deleted: false, matched };
-    await client`DELETE FROM bank_statements WHERE id = ${id}`;
-    return { deleted: true, matched: 0 };
+  /**
+   * Take back an upload: the file and every line it brought in.
+   *
+   * For an upload made by mistake — the wrong account, the wrong file, a
+   * file imported twice. The lines go with it (the foreign key cascades), so
+   * they disappear from the account's statement, its days and every search.
+   *
+   * ── Refused when any of its money has been used ───────────────────────────
+   *
+   * A line that paid for an order, funded a deposit or was claimed by a truck
+   * sale is evidence behind a payment somebody confirmed. Deleting it would
+   * leave that payment pointing at nothing, so the upload is refused and the
+   * reply says how many lines are in the way.
+   *
+   * "Used" is checked every way a line can be used, not by its status alone:
+   * the status, the three matched_* columns, and the payment and truck-sale
+   * rows that point at it. A truck sale's link has no foreign key to stop a
+   * delete, so a status that had drifted would otherwise lose it silently.
+   *
+   * ── One transaction, lines locked ─────────────────────────────────────────
+   *
+   * This used to count matched lines and then delete. A line claimed in
+   * between — somebody confirming a payment at that moment — would be
+   * deleted out from under its new payment. Every line is now locked before
+   * the check, so a claim either finished first and is seen, or waits and
+   * finds the line gone.
+   *
+   * The deletion is written to the audit log in the same transaction: who
+   * removed which file, from which account, and what it held.
+   */
+  async deleteStatement(id, { staffId = null } = {}) {
+    return client.begin(async (tx) => {
+      const [statement] = await tx`
+        SELECT s.*, b.bank_name, b.account_number
+          FROM bank_statements s
+          JOIN bank_accounts b ON b.id = s.bank_account_id
+         WHERE s.id = ${id}
+         FOR UPDATE OF s`;
+      if (!statement) return { deleted: false, notFound: true, matched: 0 };
+
+      const lines = await tx`
+        SELECT id, amount, status, matched_order_id, matched_deposit_id, matched_delivery_sale_id
+          FROM bank_statement_lines
+         WHERE statement_id = ${id}
+         FOR UPDATE`;
+      const ids = lines.map((l) => Number(l.id));
+
+      const usedHere = new Set(
+        lines
+          .filter((l) => l.status === "MATCHED"
+            || l.matched_order_id != null
+            || l.matched_deposit_id != null
+            || l.matched_delivery_sale_id != null)
+          .map((l) => Number(l.id)),
+      );
+      if (ids.length) {
+        const paid = await tx`
+          SELECT DISTINCT statement_line_id AS id FROM order_payments
+           WHERE statement_line_id = ANY(${ids}::int[])`;
+        const sold = await tx`
+          SELECT DISTINCT statement_line_id AS id FROM delivery_sales
+           WHERE statement_line_id = ANY(${ids}::int[])`;
+        for (const r of [...paid, ...sold]) usedHere.add(Number(r.id));
+      }
+
+      if (usedHere.size > 0) return { deleted: false, matched: usedHere.size };
+
+      const total = lines.reduce((sum, l) => sum + Number(l.amount || 0), 0);
+      await tx`DELETE FROM bank_statements WHERE id = ${id}`;
+
+      await tx`
+        INSERT INTO audit_logs (entity_type, entity_id, action, actor_type, actor_staff_id, metadata)
+        VALUES ('bank_statement', ${id}, 'bank_statement.deleted',
+                ${staffId ? "staff" : "system"}, ${staffId ?? null},
+                ${JSON.stringify({
+                  filename: statement.filename,
+                  bankAccountId: Number(statement.bank_account_id),
+                  account: `${statement.bank_name} ${statement.account_number}`,
+                  lines: lines.length,
+                  total: Math.round(total * 100) / 100,
+                  periodStart: statement.period_start,
+                  periodEnd: statement.period_end,
+                  uploadedAt: statement.created_at,
+                })}::jsonb)`;
+
+      return { deleted: true, matched: 0, lines: lines.length, total: Math.round(total * 100) / 100 };
+    });
   },
 
   // ── The matching pool ─────────────────────────────────────────────────────
