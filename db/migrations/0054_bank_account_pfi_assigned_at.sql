@@ -1,0 +1,22 @@
+-- When a PFI was attached to a bank account.
+--
+-- `pfi_ids` says which cargoes collect into an account and has never said
+-- since when. The audit action for it (pfi.bank_accounts_set) exists in code
+-- but had never fired on production, so there was no record anywhere: the
+-- Bank Accounts page could show what an account collects for, and nothing
+-- about when that became true.
+--
+-- A map rather than a table on purpose. `pfi_ids` stays the single source of
+-- truth for membership — a second table would be a second answer to "does this
+-- account collect for that cargo", and the two would drift. This is an
+-- annotation beside it: { "<pfi id>": "<iso timestamp>" }, written by the same
+-- two paths that write pfi_ids, keeping the stamp of a PFI that is still
+-- assigned and dropping one that is removed.
+--
+-- Deliberately NOT backfilled. Every existing assignment predates this column
+-- and inventing a date for it — the PFI's own date, the account's created_at —
+-- would put a number in a column people will read as fact. The page shows when
+-- money first and last arrived for that cargo instead, which is derived from
+-- payments that really happened.
+ALTER TABLE bank_accounts
+  ADD COLUMN IF NOT EXISTS pfi_assigned_at jsonb NOT NULL DEFAULT '{}'::jsonb;

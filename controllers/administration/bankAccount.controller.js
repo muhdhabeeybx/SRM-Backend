@@ -68,6 +68,11 @@ const getBankAccountActivity = asyncHandler(async (req, res) => {
            p.id AS pfi_id, p.pfi_number, p.location_name, p.status,
            count(*)::int AS payments,
            coalesce(sum(op.amount), 0)::numeric AS total,
+           -- Both ends of the relationship, not just the latest. Assignment
+           -- dates were never recorded (see pfi_assigned_at), so until one
+           -- exists for an account "first paid in" is the honest answer to
+           -- when a cargo started collecting here.
+           min(op.created_at) AS first_paid_at,
            max(op.created_at) AS last_paid_at
       FROM order_payments op
       JOIN orders o ON o.id = op.order_id
@@ -87,6 +92,7 @@ const getBankAccountActivity = asyncHandler(async (req, res) => {
       pfiStatus: h.status,
       payments: Number(h.payments),
       total: Number(h.total),
+      firstPaidAt: h.first_paid_at,
       lastPaidAt: h.last_paid_at,
     });
   }
@@ -169,6 +175,26 @@ async function depotsForPfis(pfiIds) {
   return { pfiIds: ids, depotIds };
 }
 
+/**
+ * The assignment stamps for a new set of PFIs, given the old ones.
+ *
+ * A PFI already assigned keeps the date it was first attached — re-saving an
+ * account for an unrelated reason (a change of branch, another PFI added)
+ * must not make every cargo look freshly assigned today. A PFI removed loses
+ * its stamp with it, so the map never grows a tail of cargoes the account no
+ * longer collects for.
+ *
+ * Absent for anything assigned before migration 0054, which is why the page
+ * falls back to when money first arrived rather than printing a blank.
+ */
+function stampAssignments(previous, nextIds, now = new Date()) {
+  const was = previous && typeof previous === "object" && !Array.isArray(previous) ? previous : {};
+  const at = now.toISOString();
+  const out = {};
+  for (const id of nextIds) out[String(id)] = was[String(id)] || at;
+  return out;
+}
+
 const createBankAccount = asyncHandler(async (req, res) => {
   const { bankName, accountName, accountNumber, bankCode, branchName, currency, status, isDefault, pfiIds, lpgStationIds, usage, notes } = req.body;
 
@@ -191,6 +217,7 @@ const createBankAccount = asyncHandler(async (req, res) => {
     status: status || "Active",
     isDefault: Boolean(isDefault),
     pfiIds: scoped.pfiIds,
+    pfiAssignedAt: stampAssignments({}, scoped.pfiIds),
     depotIds: scoped.depotIds,
     lpgStationIds: Array.isArray(lpgStationIds) ? lpgStationIds : [],
     usage: Array.isArray(usage) ? usage : [],
@@ -221,6 +248,7 @@ const updateBankAccount = asyncHandler(async (req, res) => {
     const scoped = await depotsForPfis(patch.pfiIds);
     patch.pfiIds = scoped.pfiIds;
     patch.depotIds = scoped.depotIds;
+    patch.pfiAssignedAt = stampAssignments(account.pfiAssignedAt, scoped.pfiIds);
   }
 
   const updatedAccount = await bankAccountRepo.update(req.params.id, patch);
@@ -286,7 +314,8 @@ const setAccountsForPfi = asyncHandler(async (req, res) => {
 
   const accounts = await client`
     SELECT id, status, bank_name, account_number,
-           CASE WHEN jsonb_typeof(pfi_ids) = 'array' THEN pfi_ids ELSE '[]'::jsonb END AS pfi_ids
+           CASE WHEN jsonb_typeof(pfi_ids) = 'array' THEN pfi_ids ELSE '[]'::jsonb END AS pfi_ids,
+           CASE WHEN jsonb_typeof(pfi_assigned_at) = 'object' THEN pfi_assigned_at ELSE '{}'::jsonb END AS pfi_assigned_at
       FROM bank_accounts`;
   const byId = new Map(accounts.map((a) => [Number(a.id), a]));
 
@@ -311,7 +340,11 @@ const setAccountsForPfi = asyncHandler(async (req, res) => {
     if (has === want) continue;
     const next = want ? [...current, pfiId] : current.filter((x) => x !== pfiId);
     const derived = await depotsForPfis(next);
-    changes.push({ id, added: want, label: `${a.bank_name} ${a.account_number}`, ...derived });
+    // Stamped here as well as on the account form: assigning from the PFI side
+    // is the same act, and a date that appeared only when finance happened to
+    // use one of the two screens would be worse than none.
+    const assignedAt = stampAssignments(a.pfi_assigned_at, derived.pfiIds);
+    changes.push({ id, added: want, label: `${a.bank_name} ${a.account_number}`, assignedAt, ...derived });
   }
 
   await client.begin(async (tx) => {
@@ -319,6 +352,7 @@ const setAccountsForPfi = asyncHandler(async (req, res) => {
       await tx`
         UPDATE bank_accounts
            SET pfi_ids = ${JSON.stringify(c.pfiIds)}::jsonb,
+               pfi_assigned_at = ${JSON.stringify(c.assignedAt)}::jsonb,
                depot_ids = ${JSON.stringify(c.depotIds)}::jsonb,
                updated_at = now()
          WHERE id = ${c.id}`;

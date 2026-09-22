@@ -26,6 +26,15 @@ const bankAccounts = pgTable("bank_accounts", {
    */
   pfiIds: jsonb("pfi_ids").default([]).notNull(),
   /**
+   * When each of those PFIs was attached — { "<pfi id>": "<iso timestamp>" }.
+   *
+   * An annotation beside pfiIds, never a second answer to what is assigned:
+   * the same writes maintain it, keeping the stamp of a PFI still assigned and
+   * dropping one removed. Empty for every assignment made before migration
+   * 0054, which is deliberately not backfilled — see the migration.
+   */
+  pfiAssignedAt: jsonb("pfi_assigned_at").default({}).notNull(),
+  /**
    * Derived from the locations of `pfiIds` on every save, never picked by
    * hand. Kept so everything already reading it — the subaccount lookup,
    * staff scope, the accounts list — keeps working unchanged.

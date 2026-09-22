@@ -138,6 +138,24 @@ async function attachDepotsToAccount(account) {
     ? JSON.parse(account.usage)
     : account.usage || [];
 
+  // Read the same defensive way depot_ids is: 15 accounts once held a
+  // stringified array here (migration 0012), and nothing stops it recurring.
+  const rawPfiIds = Array.isArray(account.pfiIds)
+    ? account.pfiIds
+    : typeof account.pfi_ids === "string"
+    ? JSON.parse(account.pfi_ids)
+    : account.pfi_ids || [];
+  const numericPfiIds = rawPfiIds
+    .map((id) => Number(id))
+    .filter((id) => !isNaN(id) && id > 0);
+
+  const rawAssignedAt = typeof account.pfi_assigned_at === "string"
+    ? JSON.parse(account.pfi_assigned_at)
+    : account.pfi_assigned_at || account.pfiAssignedAt || {};
+  const assignedAt = rawAssignedAt && typeof rawAssignedAt === "object" && !Array.isArray(rawAssignedAt)
+    ? rawAssignedAt
+    : {};
+
   return {
     id: account.id,
     bankName: account.bank_name || account.bankName,
@@ -148,6 +166,18 @@ async function attachDepotsToAccount(account) {
     currency: account.currency || "NGN",
     status: account.status || "Active",
     isDefault: Boolean(account.is_default ?? account.isDefault),
+    /**
+     * The cargoes this account collects for, and when each was attached.
+     *
+     * Both were missing from this projection while four screens read
+     * `pfiIds` — the accounts list, the collection panel, the assignment
+     * table and the edit form — so every account arrived looking unassigned.
+     * The edit form was the dangerous one: it loaded the empty list into its
+     * selection and sent it straight back on save, which clears the real
+     * assignment in the database.
+     */
+    pfiIds: numericPfiIds,
+    pfiAssignedAt: assignedAt,
     depotIds: numericDepotIds,
     depots,
     lpgStationIds: numericStationIds,
