@@ -174,6 +174,47 @@ const salesByDay = async ({ tz, from, to, pfiIds }) => {
 };
 
 /**
+ * Stock spoken for but not paid for, per PFI per day. Same `from`/`to`
+ * contract as salesByDay.
+ *
+ * The counterpart to `salesByDay`, and the reason the stock balance beside it
+ * can be read at all. A sale here is a CONFIRMED-PAID order and nothing else,
+ * so an order that is placed — often already loaded onto a truck — but whose
+ * money has not landed leaves its quantity inside the stock balance looking
+ * like product nobody has asked for. On live data that overstated one batch
+ * by 1,444,558 litres against 488,315 genuinely free.
+ *
+ * Cancelled and expired orders are excluded: neither is waiting on anything,
+ * and an expired order has explicitly released its hold. Identical to the
+ * `unpaid` query the PFI page uses (pfiExpense.repository), so the two
+ * reconcile by construction rather than by coincidence.
+ *
+ * One honest caveat, and it only touches history: payment status is read as
+ * it stands TODAY, because the book keeps no history of it. Dating by
+ * placement the way every other column here does, a row from three weeks ago
+ * therefore shows today's unpaid position against that date. On the latest
+ * day — the one the grand total is taken from, and the one anybody asking
+ * "what can we sell" is reading — it is exact.
+ */
+const unpaidByDay = async ({ tz, from, to, pfiIds }) => {
+  const day = SALE_DAY(tz);
+  return client`
+    SELECT o.pfi_id                       AS pfi_id,
+           ${from ? day : client`NULL::date`} AS day,
+           SUM(o.quantity)::numeric       AS qty,
+           COUNT(*)::int                  AS orders
+      FROM orders o
+     WHERE o.pfi_id IS NOT NULL
+       AND o.payment_status <> 'Paid'
+       AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
+       ${from ? client`AND ${day} >= ${from}::date` : client``}
+       AND ${day} <= ${to}::date
+       ${pfiFilter(pfiIds)}
+     GROUP BY 1, 2
+  `;
+};
+
+/**
  * Money received per PFI per day, over a window. Same `from`/`to` contract
  * as salesByDay.
  *
@@ -416,6 +457,7 @@ const editorsFor = async (staffIds) => {
 };
 
 module.exports = {
+  unpaidByDay,
   salesByDay,
   inflowByDay,
   duplicatesExcluded,

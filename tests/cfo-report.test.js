@@ -218,6 +218,50 @@ describe("CFO report — a row, computed and corrected", () => {
     assert.equal(r.remarks, "cleared", "a remark survives clearing a figure");
   });
 
+  // ── The stock balance, split ────────────────────────────────────────────
+  // A sale is a confirmed-paid order, so stock on a placed-but-unpaid order
+  // sits inside the balance looking free. These pin the split that says so.
+
+  test("stock on unpaid orders is taken out of what can be sold", () => {
+    const r = buildRow({
+      pfi, day: "2026-09-17", running: { ...running, unpaidQty: 150000, unpaidOrders: 3 },
+      dayBucket, entry: null,
+    });
+    assert.equal(r.stockBalance, 600000, "the balance itself is unchanged");
+    assert.equal(r.awaitingPayment, 150000);
+    assert.equal(r.awaitingPaymentOrders, 3);
+    assert.equal(r.availableToSell, 450000);
+    assert.equal(r.awaitingPayment + r.availableToSell, r.stockBalance, "the parts add back exactly");
+  });
+
+  test("with nothing unpaid, all of the balance is available", () => {
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: null });
+    assert.equal(r.awaitingPayment, 0, "a missing figure is zero, never NaN");
+    assert.equal(r.availableToSell, r.stockBalance);
+  });
+
+  test("a corrected quantity moves what can be sold with it", () => {
+    // Off the EFFECTIVE balance: a hand-corrected cumulative volume must not
+    // leave "available" computed against the figure it replaced.
+    const r = buildRow({
+      pfi, day: "2026-09-17", running: { ...running, unpaidQty: 100000, unpaidOrders: 1 },
+      dayBucket, entry: { cumulativeVolume: "450000" },
+    });
+    assert.equal(r.stockBalance, 550000);
+    assert.equal(r.availableToSell, 450000);
+    assert.equal(r.awaitingPayment + r.availableToSell, r.stockBalance);
+  });
+
+  test("the unit totals carry the split, and it still reconciles", () => {
+    const a = buildRow({ pfi, day: "2026-09-17", running: { ...running, unpaidQty: 100000 }, dayBucket, entry: null });
+    const b = buildRow({ pfi: { ...pfi, id: 8 }, day: "2026-09-17", running, dayBucket, entry: null });
+    const t = [a, b].reduce(addToTotals, { rows: 0, salesValue: 0, bankInflow: 0, surplusDeficit: 0, orders: 0, dayOrders: 0, byUnit: {} });
+    const q = t.byUnit.Litres;
+    assert.equal(q.awaitingPayment, 100000);
+    assert.equal(q.availableToSell, 1100000);
+    assert.equal(q.awaitingPayment + q.availableToSell, q.stockBalance);
+  });
+
   test("what the system said is always kept beside what was typed", () => {
     const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: { bankInflow: "1" } });
     assert.equal(r.computed.bankInflow, 500000000);

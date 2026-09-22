@@ -117,6 +117,8 @@ const daysBetween = (from, to) => {
 const emptyBucket = () => ({
   qty: 0, value: 0, orders: 0,
   inflow: 0, statementInflow: 0, legacyInflow: 0, transferIn: 0, transferOut: 0, refunded: 0,
+  /** Quantity placed against the PFI whose payment has not cleared. */
+  unpaidQty: 0, unpaidOrders: 0,
 });
 
 /**
@@ -167,11 +169,16 @@ const addToTotals = (totals, row) => {
   const unit = row.productUnit;
   const q = totals.byUnit[unit] || (totals.byUnit[unit] = {
     unit, initialQty: 0, cumulativeVolume: 0, dayVolume: 0, stockBalance: 0,
+    awaitingPayment: 0, availableToSell: 0,
   });
   q.initialQty = round2(q.initialQty + row.initialQty);
   q.cumulativeVolume = round2(q.cumulativeVolume + row.cumulativeVolume);
   q.dayVolume = round2(q.dayVolume + row.dayVolume);
   q.stockBalance = round2(q.stockBalance + row.stockBalance);
+  q.awaitingPayment = round2(q.awaitingPayment + (row.awaitingPayment || 0));
+  // A row from before the split existed has no availableToSell; its whole
+  // balance was available, so that is what it contributes.
+  q.availableToSell = round2(q.availableToSell + (row.availableToSell ?? row.stockBalance));
   return totals;
 };
 
@@ -217,6 +224,16 @@ const buildRow = ({ pfi, day, running, dayBucket, entry, editorName }) => {
   };
   computed.stockBalance = round2(computed.initialQty - computed.cumulativeVolume);
   computed.surplusDeficit = round2(computed.bankInflow - computed.salesValue);
+  /**
+   * The stock balance says what has not been SOLD. It is not the same as what
+   * can be sold, because a sale is a confirmed-paid order — so stock sitting
+   * on orders that are placed, and often already loaded, counts as free here
+   * until the money lands. These two split it into the part already spoken
+   * for and the part genuinely available, and still add back to it exactly.
+   */
+  computed.awaitingPayment = round2(running.unpaidQty || 0);
+  computed.awaitingPaymentOrders = running.unpaidOrders || 0;
+  computed.availableToSell = round2(computed.stockBalance - computed.awaitingPayment);
 
   // `!= null`, so an override of 0 is honoured and a missing one is not.
   const pick = (field) => (entry && entry[field] != null ? round2(Number(entry[field])) : computed[field]);
@@ -249,6 +266,11 @@ const buildRow = ({ pfi, day, running, dayBucket, entry, editorName }) => {
     // whether or not anybody has corrected it. See the header.
     stockBalance: round2(initialQty - cumulativeVolume),
     surplusDeficit: round2(bankInflow - salesValue),
+    // Off the EFFECTIVE stock balance, so correcting a quantity by hand moves
+    // what can be sold with it rather than leaving the two disagreeing.
+    awaitingPayment: computed.awaitingPayment,
+    awaitingPaymentOrders: computed.awaitingPaymentOrders,
+    availableToSell: round2(initialQty - cumulativeVolume - computed.awaitingPayment),
 
     orders: running.orders,
     dayOrders: dayBucket.orders,
@@ -324,11 +346,13 @@ const build = async ({
     };
   }
 
-  const [opening, inWindow, openInflow, inflowWindow, spans, entries, dupRows, partPaidRows] =
+  const [opening, inWindow, openUnpaid, unpaidWindow, openInflow, inflowWindow, spans, entries, dupRows, partPaidRows] =
     await Promise.all([
       // Everything before the window, one row per PFI — the opening position.
       cfoReportRepo.salesByDay({ tz, from: null, to: previousDay(from), pfiIds: ids }),
       cfoReportRepo.salesByDay({ tz, from, to, pfiIds: ids }),
+      cfoReportRepo.unpaidByDay({ tz, from: null, to: previousDay(from), pfiIds: ids }),
+      cfoReportRepo.unpaidByDay({ tz, from, to, pfiIds: ids }),
       cfoReportRepo.inflowByDay({ tz, from: null, to: previousDay(from), pfiIds: ids }),
       cfoReportRepo.inflowByDay({ tz, from, to, pfiIds: ids }),
       cfoReportRepo.tradingSpan({ tz, pfiIds: ids }),
@@ -344,6 +368,12 @@ const build = async ({
       qty: num(r.qty), value: num(r.value), orders: Number(r.orders) || 0,
       inflow: 0, statementInflow: 0,
     });
+  }
+  for (const r of openUnpaid) {
+    const b = openingBy.get(Number(r.pfi_id)) || emptyBucket();
+    b.unpaidQty = num(r.qty);
+    b.unpaidOrders = Number(r.orders) || 0;
+    openingBy.set(Number(r.pfi_id), b);
   }
   for (const r of openInflow) {
     const b = openingBy.get(Number(r.pfi_id)) || emptyBucket();
@@ -367,6 +397,11 @@ const build = async ({
   for (const r of inWindow) {
     const b = bucketFor(Number(r.pfi_id), dayKey(r.day));
     b.qty = num(r.qty); b.value = num(r.value); b.orders = Number(r.orders) || 0;
+  }
+  for (const r of unpaidWindow) {
+    const b = bucketFor(Number(r.pfi_id), dayKey(r.day));
+    b.unpaidQty = num(r.qty);
+    b.unpaidOrders = Number(r.orders) || 0;
   }
   for (const r of inflowWindow) {
     const b = bucketFor(Number(r.pfi_id), dayKey(r.day));
@@ -412,6 +447,8 @@ const build = async ({
       run.transferIn = round2(run.transferIn + bucket.transferIn);
       run.transferOut = round2(run.transferOut + bucket.transferOut);
       run.refunded = round2(run.refunded + bucket.refunded);
+      run.unpaidQty = round2(run.unpaidQty + bucket.unpaidQty);
+      run.unpaidOrders += bucket.unpaidOrders;
 
       const entry = entryBy.get(`${pfi.id}|${day}`);
       const listed =
