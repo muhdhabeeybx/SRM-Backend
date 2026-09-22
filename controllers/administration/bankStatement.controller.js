@@ -152,18 +152,29 @@ async function uploadStatement(req, res) {
     ? `, ${result.repeatedReferences} already on record under the same reference`
     : "";
 
+  /**
+   * Reversals and bank fees are named separately from duplicates.
+   *
+   * They are not a repeat of anything — they are rows that were never a
+   * payment, and the desk needs to read "3 reversals left out" rather than
+   * count the rows in the file, count the rows that landed, and be left with
+   * an unexplained difference. See bankOwnEntry in the repository.
+   */
+  const left = result.excluded
+    ? `, ${result.excluded} reversal/charge row${result.excluded === 1 ? "" : "s"} left out`
+    : "";
+
   if (result.added === 0) {
-    return fail(
-      res,
-      409,
-      `Every row in that file is already on record (${result.duplicates} duplicates${repeats})`,
-    );
+    const why = result.excluded && !result.duplicates
+      ? `Every row in that file is a reversal or a bank charge (${result.excluded} left out) — there is no payment in it to import`
+      : `Every row in that file is already on record or is not a payment (${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"}${repeats}${left})`;
+    return fail(res, 409, why);
   }
 
   return ok(
     res,
     result,
-    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped${repeats}`,
+    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped${repeats}${left}`,
   );
 }
 
@@ -208,6 +219,9 @@ async function previewStatement(req, res) {
       importing: result.fresh.length,
       duplicates: result.duplicates,
       repeatedReferences: result.repeatedReferences,
+      // Reversals and bank fees, counted apart from duplicates: the two are
+      // dropped for entirely different reasons and the screen says so.
+      excluded: result.excluded,
     },
     total: result.fresh.reduce((sum, r) => sum + Number(r.amount || 0), 0),
   });

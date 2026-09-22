@@ -100,6 +100,51 @@ const paymentReference = (ref) => {
  * account's reference column is mapped onto its narration. "in this file"
  * means the file repeats itself, which is worth seeing on its own.
  */
+/**
+ * The bank's own bookkeeping, which is not a payment.
+ *
+ * A statement carries rows that are the bank talking to itself: a reversal it
+ * posted against its own earlier entry, and the fees it charges for moving
+ * money. They arrive in the credit column like anything else, so the parser
+ * takes them, and then they sit in the pool looking exactly like money a
+ * customer sent. Matching one to an order invents a payment.
+ *
+ * ── Whole words, and a narrow list, for one very concrete reason ───────────
+ *
+ * The obvious rule — does the text contain "vat" — silently drops
+ * 3LCINOVATE ENERGY LIMITED, because their name has VAT inside it
+ * (3LCINO·VAT·E). That is ten real payments and over ₦2.2bn already on the
+ * book. So every term is matched as a WHOLE WORD, and the list stays short:
+ * a term earns its place by appearing in a bank's own fee wording, not by
+ * sounding financial.
+ *
+ * Bare "vat" is deliberately NOT here even as a whole word. "STERNOM CONSULT/
+ * Refund of VAT" is a genuine ₦1,376,250 credit; VAT only means a fee when it
+ * arrives attached to a charge, and the charge terms below already catch that
+ * ("***RSVL NIP CHARGE + VAT").
+ *
+ * `RSVL` is how the bank actually writes a reversal — not `RVSL`, which is the
+ * transposition everyone reaches for first. Both are matched, and so is the
+ * spelt-out word, because the marker is worth being generous about: every
+ * reversal seen on this account so far is prefixed `***RSVL`.
+ */
+const REVERSAL = /\b(rsvl|rvsl|reversal|reversed)\b/i;
+const BANK_FEE = /\b(charge|charges|chrg|commission|levy)\b|\bstamp duty\b|\bsms alert\b|\bmaintenance fee\b|\baccount maintenance\b/i;
+
+/**
+ * Why this row is the bank's own entry rather than a payment, or null.
+ *
+ * Reads the three text fields the bank fills in. bankRef is included because
+ * at least one account maps its reference column onto the same column it reads
+ * narration from, so the wording can land there instead.
+ */
+const bankOwnEntry = (r) => {
+  const text = `${r.depositor || ""} ${r.narration || ""} ${r.bankRef || ""}`;
+  if (REVERSAL.test(text)) return "reversal";
+  if (BANK_FEE.test(text)) return "bank charge";
+  return null;
+};
+
 async function partitionRows({ bankAccountId, rows }) {
   const prepared = rows.map((r) => ({
     ...r,
@@ -124,8 +169,20 @@ async function partitionRows({ bankAccountId, rows }) {
   const skipped = [];
   let duplicates = 0;
   let repeatedReferences = 0;
+  let excluded = 0;
 
   for (const r of prepared) {
+    /**
+     * Checked before the dedup rules on purpose: a reversal is not a payment
+     * at all, so whether it is also a repeat of one already on file is beside
+     * the point, and "duplicate" would be the wrong thing to tell the desk.
+     */
+    const own = bankOwnEntry(r);
+    if (own) {
+      excluded++;
+      skipped.push({ ...r, reason: own });
+      continue;
+    }
     if (seenKeys.has(r.dedup)) {
       duplicates++;
       skipped.push({
@@ -149,7 +206,7 @@ async function partitionRows({ bankAccountId, rows }) {
     fresh.push(r);
   }
 
-  return { fresh, skipped, duplicates, repeatedReferences };
+  return { fresh, skipped, duplicates, repeatedReferences, excluded };
 }
 
 const bankStatementRepo = {
@@ -222,12 +279,18 @@ const bankStatementRepo = {
    * rejected by the caller rather than stored empty.
    */
   async ingest({ bankAccountId, filename, uploadedBy, rows }) {
-    const { fresh, duplicates, repeatedReferences } = await partitionRows({
+    const { fresh, skipped, duplicates, repeatedReferences, excluded } = await partitionRows({
       bankAccountId,
       rows,
     });
 
-    if (!fresh.length) return { added: 0, duplicates, repeatedReferences, statement: null };
+    // The rows the bank wrote for itself, returned so the caller can name them
+    // rather than report a row count that quietly does not add up.
+    const excludedRows = skipped.filter((r) => r.reason === "reversal" || r.reason === "bank charge");
+
+    if (!fresh.length) {
+      return { added: 0, duplicates, repeatedReferences, excluded, excludedRows, statement: null };
+    }
 
     /**
      * The date as it was printed, and nothing else.
@@ -266,7 +329,7 @@ const bankStatementRepo = {
       `;
     }
 
-    return { added: fresh.length, duplicates, repeatedReferences, statement };
+    return { added: fresh.length, duplicates, repeatedReferences, excluded, excludedRows, statement };
   },
 
   async listStatements(bankAccountId) {
