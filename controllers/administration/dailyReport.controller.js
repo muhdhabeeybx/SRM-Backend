@@ -1,3 +1,30 @@
+const { client } = require("../../config/db");
+const { scopedPfiIds } = require("../../lib/pfiScope");
+
+/*
+  Staff assigned to a PFI see its reports and the ones they filed themselves
+  — the same rule the list applies. A report outside that reads as not found.
+*/
+const pfiNumbersFor = async (user) => {
+  const ids = scopedPfiIds(user);
+  if (!ids) return null;
+  const rows = await client`SELECT pfi_number FROM pfis WHERE id = ANY(${ids}::int[])`;
+  // Trimmed, the way dailyReport.service resolves a report's PFI.
+  return rows.map((r) => String(r.pfi_number || "").trim());
+};
+const samePfi = (numbers, value) => numbers.includes(String(value ?? "").trim());
+const reportVisible = async (user, report) => {
+  const numbers = await pfiNumbersFor(user);
+  if (numbers === null) return true;
+  if (Number(report.submittedBy) === Number(user?.id)) return true;
+  return samePfi(numbers, report.pfiNumber);
+};
+const reportNotFound = (res) => res.status(404).json({ success: false, message: "Report not found" });
+const visibleOr404 = async (req, res) => {
+  const report = await dailyReportRepo.findById(req.params.id);
+  if (report && !(await reportVisible(req.user, report))) { reportNotFound(res); return false; }
+  return true;
+};
 const asyncHandler = require("express-async-handler");
 const { dailyReportRepo } = require("../../repositories");
 const dailyReportService = require("../../services/dailyReport.service");
@@ -39,9 +66,7 @@ const getDailyReports = asyncHandler(async (req, res) => {
 
 const getDailyReportById = asyncHandler(async (req, res) => {
   const report = await dailyReportRepo.findById(req.params.id);
-  if (!report) {
-    return res.status(404).json({ success: false, message: "Report not found" });
-  }
+  if (!report || !(await reportVisible(req.user, report))) return reportNotFound(res);
   res.json({ success: true, data: { report } });
 });
 
@@ -94,16 +119,32 @@ const getReportActuals = asyncHandler(async (req, res) => {
     }
   }
 
+  // The system's figures for a PFI are that PFI's business only.
+  const scoped = scopedPfiIds(req.user);
+  if (scoped && (!id || !scoped.includes(Number(id)))) {
+    return res.status(403).json({ success: false, message: "That PFI is not yours." });
+  }
+
   const actuals = await reportActuals.forReport({ date: String(date), pfiId: id });
   res.json({ success: true, data: { actuals } });
 });
 
 const submitDailyReport = asyncHandler(async (req, res) => {
+  const numbers = await pfiNumbersFor(req.user);
+  if (numbers !== null && !samePfi(numbers, req.body?.pfiNumber ?? req.body?.pfi_number)) {
+    return res.status(403).json({ success: false, message: "You can only file reports for your PFI." });
+  }
   const result = await dailyReportService.submitReport(req.body, { actor: staffActor(req) });
   sendServiceResult(res, result, { successStatus: 201, message: "Report submitted" });
 });
 
 const amendDailyReport = asyncHandler(async (req, res) => {
+  if (!(await visibleOr404(req, res))) return;
+  // Nor may an amendment move it onto another PFI.
+  const numbers = await pfiNumbersFor(req.user);
+  if (numbers !== null && req.body?.pfiNumber !== undefined && !samePfi(numbers, req.body.pfiNumber)) {
+    return res.status(403).json({ success: false, message: "You can only file reports for your PFI." });
+  }
   const result = await dailyReportService.amendReport(req.params.id, req.body, {
     actor: staffActor(req),
   });
@@ -111,6 +152,7 @@ const amendDailyReport = asyncHandler(async (req, res) => {
 });
 
 const reviewDailyReport = asyncHandler(async (req, res) => {
+  if (!(await visibleOr404(req, res))) return;
   const result = await dailyReportService.reviewReport(req.params.id, req.body, {
     actor: staffActor(req),
   });
@@ -127,6 +169,7 @@ const reviewDailyReport = asyncHandler(async (req, res) => {
  * remove any report type by hand.
  */
 const deleteDailyReport = asyncHandler(async (req, res) => {
+  if (!(await visibleOr404(req, res))) return;
   const existing = await dailyReportRepo.findById(req.params.id);
   if (!existing) return res.status(404).json({ success: false, message: "Report not found" });
 

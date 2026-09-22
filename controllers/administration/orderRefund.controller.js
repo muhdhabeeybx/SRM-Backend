@@ -1,5 +1,17 @@
 const asyncHandler = require("express-async-handler");
 const refundService = require("../../services/orderRefund.service");
+const { client } = require("../../config/db");
+const { assertOrderVisible } = require("../../lib/pfiScope");
+
+/**
+ * A refund row's order, checked against the person's PFIs before anything is
+ * done with it. A refund outside their PFI reads as not found.
+ */
+const assertRefundVisible = async (user, refundId) => {
+  const [row] = await client`SELECT order_id FROM order_refunds WHERE id = ${Number(refundId)}`;
+  if (!row) return; // the service answers 404 itself
+  await assertOrderVisible(user, row.order_id);
+};
 
 /**
  * Overpayment refunds — the replacement for moving surplus between orders.
@@ -14,6 +26,7 @@ const getRefundable = asyncHandler(async (req, res) => {
   const orders = await refundService.listRefundable({
     search: req.query.search,
     limit: req.query.limit,
+    scopeUser: req.user,
   });
   res.json({ success: true, data: { orders } });
 });
@@ -22,11 +35,13 @@ const getRefunds = asyncHandler(async (req, res) => {
   const refunds = await refundService.listRefunds({
     status: req.query.status || null,
     limit: req.query.limit,
+    scopeUser: req.user,
   });
   res.json({ success: true, data: { refunds } });
 });
 
 const createRefund = asyncHandler(async (req, res) => {
+  await assertOrderVisible(req.user, req.body.orderId);
   const refund = await refundService.requestRefund({ ...req.body, staffId: req.user?.id ?? null });
   res.status(201).json({
     success: true,
@@ -36,6 +51,7 @@ const createRefund = asyncHandler(async (req, res) => {
 });
 
 const payRefund = asyncHandler(async (req, res) => {
+  await assertRefundVisible(req.user, req.params.id);
   const result = await refundService.markRefunded({
     refundId: Number(req.params.id),
     ...req.body,
@@ -49,6 +65,7 @@ const payRefund = asyncHandler(async (req, res) => {
 });
 
 const cancelRefund = asyncHandler(async (req, res) => {
+  await assertRefundVisible(req.user, req.params.id);
   const refund = await refundService.cancelRefund({
     refundId: Number(req.params.id),
     reason: req.body.reason,
@@ -58,6 +75,7 @@ const cancelRefund = asyncHandler(async (req, res) => {
 });
 
 const undoRefund = asyncHandler(async (req, res) => {
+  await assertRefundVisible(req.user, req.params.id);
   const result = await refundService.undoRefund({
     refundId: Number(req.params.id),
     reason: req.body.reason,
@@ -72,6 +90,7 @@ const undoRefund = asyncHandler(async (req, res) => {
 
 /** Not refunding this one, and why. Nothing about the order changes. */
 const skipRefund = asyncHandler(async (req, res) => {
+  await assertOrderVisible(req.user, req.body.orderId);
   const refund = await refundService.skipOrder({
     orderId: Number(req.body.orderId),
     reason: req.body.reason,
@@ -85,6 +104,7 @@ const skipRefund = asyncHandler(async (req, res) => {
 });
 
 const restoreSkipped = asyncHandler(async (req, res) => {
+  await assertRefundVisible(req.user, req.params.id);
   const refund = await refundService.restoreSkipped({
     refundId: Number(req.params.id),
     reason: req.body?.reason,

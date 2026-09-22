@@ -1,5 +1,40 @@
 const asyncHandler = require("express-async-handler");
 const { deliverySaleRepo, deliveryCustomerRepo } = require("../../repositories");
+const { client } = require("../../config/db");
+const { allocationCodesFor } = require("../../lib/pfiScope");
+const pfiBankScope = require("../../lib/pfiBankScope");
+
+/*
+  ── Staff assigned to a PFI see its truck sales and no others ─────────────
+
+  A truck sale reaches its PFI through its allocation code (lib/pfiScope.js,
+  allocationCodesFor). Every list below is filtered by the codes the person
+  may see; every single sale is checked before it is read or changed, and one
+  outside their PFI reads as not found.
+*/
+const code = (v) => String(v || "").trim().toUpperCase();
+const notFound = (res) => res.status(404).json({ success: false, message: "Sale record not found" });
+const forbidden = (res, message) => res.status(403).json({ success: false, message });
+
+const saleVisible = (codes, sale) => codes === null || (!!sale && codes.includes(code(sale.allocationCode)));
+
+/**
+ * A truck cycle — truck, load date, customer — is visible when every sale in
+ * it carries a code this person may see. Matched the way cycleStanding
+ * matches: plates without spaces, the date's first ten characters.
+ */
+const cycleVisible = async (codes, cycle) => {
+  if (codes === null) return true;
+  const customerId = cycle?.customerId ?? null;
+  const rows = await client`
+    SELECT DISTINCT upper(trim(allocation_code)) AS code
+      FROM delivery_sales
+     WHERE regexp_replace(upper(coalesce(truck_number, '')), '\s', '', 'g')
+         = regexp_replace(upper(${String(cycle?.truckNumber || "")}), '\s', '', 'g')
+       AND coalesce(left(date_loaded, 10), '') = ${String(cycle?.dateLoaded || "").slice(0, 10)}
+       AND ${customerId == null ? client`customer_id IS NULL` : client`customer_id = ${Number(customerId)}`}`;
+  return rows.length > 0 && rows.every((r) => codes.includes(r.code));
+};
 // Paystack DVA auto-generation is disabled — see createDeliverySale below.
 // Re-add this import if reinstating:
 // const { generateDeliveryCustomerDva } = require("../../services/deliveryCustomerDva.service");
@@ -15,6 +50,7 @@ const getDeliverySales = asyncHandler(async (req, res) => {
     date_to,
     page,
     limit,
+    allowedCodes: await allocationCodesFor(req.user),
   });
 
   res.json({ success: true, data: result });
@@ -22,9 +58,7 @@ const getDeliverySales = asyncHandler(async (req, res) => {
 
 const getDeliverySaleById = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
-  if (!sale) {
-    return res.status(404).json({ success: false, message: "Sale record not found" });
-  }
+  if (!sale || !saleVisible(await allocationCodesFor(req.user), sale)) return notFound(res);
   res.json({ success: true, data: { sale } });
 });
 
@@ -64,6 +98,13 @@ const createDeliverySale = asyncHandler(async (req, res) => {
    */
   const { lineIds, bankAccountId, ...base } = req.body;
 
+  // Only onto a batch of this person's PFI, and only from its accounts.
+  const codes = await allocationCodesFor(req.user);
+  if (codes !== null && !codes.includes(code(base.allocationCode ?? base.allocation_code))) {
+    return forbidden(res, "That batch is not on your PFI.");
+  }
+  if (bankAccountId) await pfiBankScope.assertAccountAllowed(req.user, bankAccountId);
+
   if (Array.isArray(lineIds) && lineIds.length) {
     const sales = await deliverySaleRepo.createFromStatementLines({
       lineIds,
@@ -101,6 +142,11 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
     : "";
   const rows = req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" }));
 
+  const codes = await allocationCodesFor(req.user);
+  if (codes !== null && rows.some((r) => !codes.includes(code(r.allocationCode ?? r.allocation_code)))) {
+    return forbidden(res, "One or more of those rows is on a batch that is not on your PFI.");
+  }
+
   const sales = await deliverySaleRepo.createMany(rows);
   res.status(201).json({
     success: true,
@@ -119,6 +165,16 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
  * caller's word.
  */
 const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
+  // Money may only move between trucks this person can see, both ends.
+  const codes = await allocationCodesFor(req.user);
+  if (codes !== null) {
+    const ends = [req.body.from, ...(Array.isArray(req.body.to) ? req.body.to : [])];
+    for (const end of ends) {
+      if (!(await cycleVisible(codes, end))) {
+        return forbidden(res, "Both ends of a transfer must be on your PFI.");
+      }
+    }
+  }
   const actor = req.user?.name || req.user?.email || "";
   const result = await deliverySaleRepo.transferOverpayment({
     from: req.body.from,
@@ -138,6 +194,12 @@ const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
 
 /** What one truck-cycle is owed and has taken, so the dialog can offer a cap. */
 const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
+  const cycle = {
+    truckNumber: req.query.truckNumber,
+    dateLoaded: req.query.dateLoaded,
+    customerId: req.query.customerId || null,
+  };
+  if (!(await cycleVisible(await allocationCodesFor(req.user), cycle))) return notFound(res);
   const standing = await deliverySaleRepo.cycleStanding({
     truckNumber: req.query.truckNumber,
     dateLoaded: req.query.dateLoaded,
@@ -148,6 +210,13 @@ const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
 
 const updateDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
+  const codes = await allocationCodesFor(req.user);
+  if (sale && !saleVisible(codes, sale)) return notFound(res);
+  // Nor may it be moved onto a batch outside their PFI.
+  const nextCode = req.body.allocationCode ?? req.body.allocation_code;
+  if (codes !== null && nextCode !== undefined && !codes.includes(code(nextCode))) {
+    return forbidden(res, "That batch is not on your PFI.");
+  }
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });
   }
@@ -171,6 +240,7 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
  */
 const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
+  if (sale && !saleVisible(await allocationCodesFor(req.user), sale)) return notFound(res);
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });
   }
@@ -187,6 +257,11 @@ const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
 });
 
 const deleteDeliverySale = asyncHandler(async (req, res) => {
+  const codes = await allocationCodesFor(req.user);
+  if (codes !== null) {
+    const existing = await deliverySaleRepo.findById(req.params.id);
+    if (!existing || !saleVisible(codes, existing)) return notFound(res);
+  }
   const sale = await deliverySaleRepo.deleteById(req.params.id);
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });

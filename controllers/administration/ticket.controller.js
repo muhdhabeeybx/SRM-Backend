@@ -1,10 +1,11 @@
+const { assertOrderVisible } = require("../../lib/pfiScope");
 const asyncHandler = require("express-async-handler");
 const { ticketRepo } = require("../../repositories");
 
 const getTickets = asyncHandler(async (req, res) => {
   const { page = 1, limit = 50, search, status } = req.query;
 
-  const result = await ticketRepo.findAll({ search, status, page, limit });
+  const result = await ticketRepo.findAll({ search, status, page, limit, scopeUser: req.user });
 
   res.json({ success: true, data: result });
 });
@@ -13,6 +14,15 @@ const getTicketByIdOrCode = asyncHandler(async (req, res) => {
   const { idOrCode } = req.params;
 
   const ticket = await ticketRepo.findByIdOrCodeFull(idOrCode);
+
+  // A ticket on another PFI's order reads as not found.
+  if (ticket) {
+    try {
+      await assertOrderVisible(req.user, ticket.orderId ?? ticket.order?.id ?? ticket.order);
+    } catch {
+      return res.status(404).json({ success: false, message: "Ticket not found" });
+    }
+  }
 
   if (!ticket) {
     return res
@@ -34,6 +44,13 @@ const redeemTicket = asyncHandler(async (req, res) => {
   }
 
   const ticket = await ticketRepo.findByIdOrCode(idOrCode);
+  if (ticket) {
+    try {
+      await assertOrderVisible(req.user, ticket.orderId ?? ticket.order?.id ?? ticket.order);
+    } catch {
+      return res.status(404).json({ success: false, message: "Ticket not found" });
+    }
+  }
 
   if (!ticket) {
     return res

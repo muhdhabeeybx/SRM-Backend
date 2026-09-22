@@ -1,3 +1,4 @@
+const { assertCustomerVisible } = require("../../lib/pfiScope");
 const asyncHandler = require("express-async-handler");
 const { customerRepo, customerPhoneRepo } = require("../../repositories");
 const { emitEvent } = require("../../services/events");
@@ -20,6 +21,8 @@ const { toE164, classifyPhone } = require("../../utils/phone");
 
 /** GET /api/customers/:id/phones — primary first, then the alternates. */
 const listPhones = asyncHandler(async (req, res) => {
+  // Staff assigned to a PFI reach only its customers. See lib/pfiScope.js.
+  await assertCustomerVisible(req.user, req.params.id);
   const phones = await customerPhoneRepo.listAll(req.params.id);
   if (!phones) {
     return res.status(404).json({ success: false, message: "Customer not found" });
@@ -46,6 +49,8 @@ const listPhones = asyncHandler(async (req, res) => {
  * SMS, so it can never be a sign-in number and the response says so.
  */
 const addPhone = asyncHandler(async (req, res) => {
+  // Staff assigned to a PFI reach only its customers. See lib/pfiScope.js.
+  await assertCustomerVisible(req.user, req.params.id);
   const customer = await customerRepo.findById(req.params.id);
   if (!customer) {
     return res.status(404).json({ success: false, message: "Customer not found" });
@@ -115,6 +120,8 @@ const addPhone = asyncHandler(async (req, res) => {
  * Making a different number primary first is the way to retire the old one.
  */
 const deletePhone = asyncHandler(async (req, res) => {
+  // Staff assigned to a PFI reach only its customers. See lib/pfiScope.js.
+  await assertCustomerVisible(req.user, req.params.id);
   const phone = await customerPhoneRepo.findById(req.params.phoneId);
   if (!phone || phone.customerId !== Number(req.params.id)) {
     return res.status(404).json({ success: false, message: "Number not found on this customer" });
@@ -146,6 +153,8 @@ const deletePhone = asyncHandler(async (req, res) => {
  * number half the order history was confirmed on.
  */
 const makePrimary = asyncHandler(async (req, res) => {
+  // Staff assigned to a PFI reach only its customers. See lib/pfiScope.js.
+  await assertCustomerVisible(req.user, req.params.id);
   const phone = await customerPhoneRepo.findById(req.params.phoneId);
   if (!phone || phone.customerId !== Number(req.params.id)) {
     return res.status(404).json({ success: false, message: "Number not found on this customer" });

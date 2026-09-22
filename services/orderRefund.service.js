@@ -6,6 +6,7 @@ const { recomputeOrder, httpError } = require("./orderPayment.service");
 const auditLogRepo = require("../repositories/auditLog.repository");
 const { DUPLICATE_LEGACY_IDS, DUPLICATE_LEGACY_IDS_SQL } = require("../repositories/cfoReport.repository");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
+const { pfiFilter } = require("../lib/pfiScope");
 
 /**
  * Payments a person deleted that the 0021 backfill put back.
@@ -139,7 +140,7 @@ const realSurplus = async (orderId, trx = db) => {
  * phantom part stated beside it, so nobody wonders why it is smaller than the
  * finance report's.
  */
-const listRefundable = async ({ search = "", limit = 500 } = {}) => {
+const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {}) => {
   const term = `%${String(search || "").trim()}%`;
   const rows = await client`
     WITH p AS (
@@ -174,6 +175,8 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
       LEFT JOIN order_refunds r ON r.order_id = o.id AND r.status = 'requested'
       LEFT JOIN order_refunds sk ON sk.order_id = o.id AND sk.status = 'skipped'
      WHERE COALESCE(p.received, 0) > o.total_amount::numeric + 0.005
+       -- Staff assigned to a PFI see only that PFI's orders. See lib/pfiScope.js.
+       ${pfiFilter(scopeUser, "o.pfi_id")}
        /*
          An order set aside stays off the list only while the decision still
          describes it. If more money has landed since, the surplus no longer
@@ -214,7 +217,7 @@ const listRefundable = async ({ search = "", limit = 500 } = {}) => {
 };
 
 /** Every refund, newest first, with who asked and who paid. */
-const listRefunds = async ({ status = null, limit = 500 } = {}) => {
+const listRefunds = async ({ status = null, limit = 500, scopeUser = null } = {}) => {
   const rows = await client`
     SELECT r.*, ${orderReferenceClient(client, "o", "c")} AS reference,
            o.company_name, c.name AS customer_name, c.phone AS customer_phone,
@@ -229,7 +232,9 @@ const listRefunds = async ({ status = null, limit = 500 } = {}) => {
       LEFT JOIN staff rq ON rq.id = r.requested_by
       LEFT JOIN staff pd ON pd.id = r.paid_by
       LEFT JOIN staff cx ON cx.id = r.cancelled_by
-     ${status ? client`WHERE r.status = ${status}` : client``}
+     WHERE true
+     ${status ? client`AND r.status = ${status}` : client``}
+     ${pfiFilter(scopeUser, "o.pfi_id")}
      ORDER BY COALESCE(r.paid_at, r.cancelled_at, r.requested_at) DESC, r.id DESC
      LIMIT ${Math.min(1000, Number(limit) || 500)}`;
   return rows.map((r) => ({

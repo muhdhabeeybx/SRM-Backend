@@ -1,3 +1,4 @@
+const { denyPfiScoped } = require("../../lib/pfiScope");
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
@@ -29,6 +30,7 @@ router.get("/", verifyStaff, validate({ query: dailyReportQuerySchema }), getDai
 router.post(
   "/email",
   verifyStaff,
+  denyPfiScoped,
   requireRole(...CAN_VIEW_ALL_REPORTS, { message: "Reports Hub access required" }),
   validate({ body: emailReportsHubSchema }),
   emailDailyReports
@@ -37,6 +39,7 @@ router.post(
 router.post(
   "/whatsapp",
   verifyStaff,
+  denyPfiScoped,
   requireRole(...CAN_VIEW_ALL_REPORTS, { message: "Reports Hub access required" }),
   validate({ body: whatsappReportSchema }),
   whatsappDailyReports

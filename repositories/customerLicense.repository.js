@@ -1,4 +1,4 @@
-const { eq, and, ilike, desc, count } = require("drizzle-orm");
+const { eq, and, ilike, desc, count, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { customerLicenses, customers } = require("../db/schema");
 
@@ -53,12 +53,22 @@ const findAll = async ({
   customerId,
   page = 1,
   limit = 50,
+  /** Only customers with an order on these PFIs. Null for everyone. */
+  onlyPfiIds = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+  if (Array.isArray(onlyPfiIds)) {
+    conditions.push(
+      onlyPfiIds.length
+        ? sql`EXISTS (SELECT 1 FROM orders op WHERE op.customer_id = ${customerLicenses.customerId}
+                        AND op.pfi_id IN (${sql.join(onlyPfiIds.map((id) => sql`${Number(id)}`), sql`, `)}))`
+        : sql`false`,
+    );
+  }
   if (customerId) conditions.push(eq(customerLicenses.customerId, customerId));
   if (status) conditions.push(eq(customerLicenses.status, status));
   if (search) conditions.push(ilike(customerLicenses.companyName, `%${search}%`));

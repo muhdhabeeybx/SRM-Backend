@@ -1,3 +1,4 @@
+const { denyPfiScoped } = require("../../lib/pfiScope");
 const express = require("express");
 const router = express.Router();
 const { authenticateStaff, requireRole } = require("../../middleware/verifyStaff");
@@ -11,6 +12,7 @@ const { runExpiry } = require("../../controllers/administration/orderExpiry.cont
 router.post(
   "/run",
   authenticateStaff,
+  denyPfiScoped,
   requireRole("super_admin", "finance", { message: "Finance access required" }),
   runExpiry
 );

@@ -43,12 +43,26 @@ const findAll = async ({
   date_to,
   page = 1,
   limit = 500,
+  /**
+   * The allocation codes this person may see, or null for everyone. Staff
+   * assigned to a PFI see only its batches' sales — lib/pfiScope.js.
+   */
+  allowedCodes = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const conditions = [];
+
+  if (Array.isArray(allowedCodes)) {
+    // A sale with no code cannot be tied to a PFI, so it is outside every one.
+    conditions.push(
+      allowedCodes.length
+        ? inArray(sql`upper(trim(${deliverySales.allocationCode}))`, allowedCodes)
+        : sql`false`,
+    );
+  }
 
   if (customer) {
     conditions.push(eq(deliverySales.customerId, customer));

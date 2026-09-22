@@ -113,8 +113,11 @@ const findAll = async ({
   if (scopeUser && !scopeUser.canViewAllLocations) {
     const { locationNames, pfiNumbers } = await scopedNames(scopeUser.scope);
     const clauses = [];
-    if (locationNames.length) clauses.push(inArray(dailyReports.location, locationNames));
+    // A PFI assignment is the whole answer (lib/scopeFilter): somebody on a
+    // PFI and a location sees that PFI's reports, not every PFI's reports at
+    // the location. Location scope applies only to somebody with no PFI.
     if (pfiNumbers.length) clauses.push(inArray(dailyReports.pfiNumber, pfiNumbers));
+    else if (locationNames.length) clauses.push(inArray(dailyReports.location, locationNames));
     // Whatever the scope says, a person always sees the reports they filed
     // themselves. Without this, someone scoped to a location that has since
     // been renamed — or assigned nothing at all, which fell through to the

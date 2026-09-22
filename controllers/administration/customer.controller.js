@@ -1,3 +1,25 @@
+const { scopedPfiIds, customerIdsFor, assertCustomerVisible } = require("../../lib/pfiScope");
+
+/**
+ * What a PFI's staff see of a customer outside their PFI, when they search.
+ *
+ * Raising an order needs the customer found first, and a customer buying from
+ * this PFI for the first time — or created a minute ago — has no order on it
+ * yet. So a SEARCH finds any customer, but one outside the person's PFI comes
+ * back as a name to pick and nothing else: no balance, no history, no email,
+ * and opening them answers 404. Browsing without a search shows only the
+ * PFI's own customers.
+ */
+const lookupOnly = (c) => ({
+  id: c.id,
+  _id: c._id ?? c.id,
+  name: c.name,
+  phone: c.phone,
+  companyName: c.companyName ?? c.company_name ?? "",
+  status: c.status,
+  balance: null,
+  outsideYourPfi: true,
+});
 const asyncHandler = require("express-async-handler");
 const { customerRepo, customerPhoneRepo, orderRepo, depositRepo } = require("../../repositories");
 const { toE164 } = require("../../utils/phone");
@@ -8,6 +30,24 @@ const getCustomers = asyncHandler(async (req, res) => {
     depotId, activity, hasBalance, optedOut, sort,
     page = 1, limit = 50,
   } = req.query;
+
+  const pfiIds = scopedPfiIds(req.user);
+
+  // A search from staff assigned to a PFI: find anyone, see only a name for
+  // those outside the PFI. See lookupOnly above.
+  if (pfiIds && search && String(search).trim().length >= 2) {
+    const found = await customerRepo.findAll({
+      search, searchType, status, page, limit: Math.min(Number(limit) || 20, 20),
+    });
+    const mine = new Set(await customerIdsFor(req.user));
+    return res.json({
+      success: true,
+      data: {
+        ...found,
+        customers: (found.customers || []).map((c) => (mine.has(Number(c.id ?? c._id)) ? c : lookupOnly(c))),
+      },
+    });
+  }
 
   const result = await customerRepo.findAll({
     search,
@@ -20,12 +60,14 @@ const getCustomers = asyncHandler(async (req, res) => {
     sort,
     page,
     limit,
+    onlyPfiIds: pfiIds,
   });
 
   res.json({ success: true, data: result });
 });
 
 const getCustomerById = asyncHandler(async (req, res) => {
+  await assertCustomerVisible(req.user, req.params.id);
   const customer = await customerRepo.findById(req.params.id);
 
   if (!customer) {
@@ -125,6 +167,7 @@ const createCustomer = asyncHandler(async (req, res) => {
 });
 
 const updateCustomer = asyncHandler(async (req, res) => {
+  await assertCustomerVisible(req.user, req.params.id);
   const customer = await customerRepo.findById(req.params.id);
 
   if (!customer) {
@@ -198,10 +241,21 @@ const getCustomerSegment = asyncHandler(async (req, res) => {
     limit,
   });
 
+  // A segment is who a message goes to. Staff assigned to a PFI reach only
+  // that PFI's customers, and the count says how many that is, not how many
+  // the whole book has.
+  const mine = await customerIdsFor(req.user);
+  if (mine !== null) {
+    const allowed = new Set(mine);
+    const customers = (result.customers || []).filter((c) => allowed.has(Number(c.id ?? c._id)));
+    return res.json({ success: true, data: { ...result, customers, count: customers.length } });
+  }
+
   res.json({ success: true, data: result });
 });
 
 const deleteCustomer = asyncHandler(async (req, res) => {
+  await assertCustomerVisible(req.user, req.params.id);
   const customer = await customerRepo.findById(req.params.id);
 
   if (!customer) {

@@ -1,4 +1,4 @@
-const { and, eq, inArray, notInArray, count, or, sql } = require("drizzle-orm");
+const { and, eq, inArray, notInArray, count, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
 const { outstandingTrucks } = require("./truckProgress.service");
@@ -55,11 +55,15 @@ const where = (...conditions) => and(...conditions.filter(Boolean));
  */
 const mine = (user, { depotColumn, pfiColumn } = {}) => {
   const { depotIds = [], pfiIds = [] } = user?.scope || {};
-  const clauses = [];
-  if (depotColumn && depotIds.length) clauses.push(inArray(depotColumn, depotIds));
-  if (pfiColumn && pfiIds.length) clauses.push(inArray(pfiColumn, pfiIds));
-  if (!clauses.length) return null;
-  return clauses.length === 1 ? clauses[0] : or(...clauses);
+  /*
+    A PFI assignment is the whole answer, as lib/scopeFilter has it. This used
+    to OR it with depot scope, so somebody assigned to one PFI and a depot had
+    every PFI's work at that depot counted on their badges. Every queue here
+    carries a PFI column, so the PFI rule always has something to hold to.
+  */
+  if (pfiColumn && pfiIds.length) return inArray(pfiColumn, pfiIds);
+  if (depotColumn && depotIds.length) return inArray(depotColumn, depotIds);
+  return null;
 };
 
 /**

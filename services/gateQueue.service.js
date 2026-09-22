@@ -130,11 +130,16 @@ const buildWhere = (stage, { from, to, pfiId, depotId, search, scope, includeClo
   if (scope && !scope.all) {
     const depots = scope.depotIds || [];
     const pfis = scope.pfiIds || [];
-    if (depots.length || pfis.length) {
-      const clauses = [];
-      if (depots.length) clauses.push(sql`o.depot_id IN (${sql.join(depots.map((d) => sql`${d}`), sql`, `)})`);
-      if (pfis.length) clauses.push(sql`o.pfi_id IN (${sql.join(pfis.map((p) => sql`${p}`), sql`, `)})`);
-      parts.push(sql`(${sql.join(clauses, sql` OR `)})`);
+    /*
+      A PFI assignment is the whole answer, as lib/scopeFilter has it: it
+      narrows, it is not one option among several. This used to OR it with
+      depot scope, so somebody assigned to one PFI and to a depot saw every
+      PFI's trucks at that depot — the opposite of what the assignment says.
+    */
+    if (pfis.length) {
+      parts.push(sql`o.pfi_id IN (${sql.join(pfis.map((p) => sql`${p}`), sql`, `)})`);
+    } else if (depots.length) {
+      parts.push(sql`o.depot_id IN (${sql.join(depots.map((d) => sql`${d}`), sql`, `)})`);
     }
     // No assignments at all and not full-access: fail open rather than closed,
     // matching lib/scopeFilter. A gate officer shown nothing would assume the

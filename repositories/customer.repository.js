@@ -169,12 +169,26 @@ const findAll = async ({
   sort = "active",
   page = 1,
   limit = 50,
+  /**
+   * Only customers with at least one order on these PFIs — what staff
+   * assigned to a PFI may browse. Null for everyone. See lib/pfiScope.js.
+   */
+  onlyPfiIds = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(5000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   const where = [];
+
+  if (Array.isArray(onlyPfiIds)) {
+    where.push(
+      onlyPfiIds.length
+        ? sql`EXISTS (SELECT 1 FROM orders op WHERE op.customer_id = c.id
+                        AND op.pfi_id IN (${sql.join(onlyPfiIds.map((id) => sql`${Number(id)}`), sql`, `)}))`
+        : sql`false`,
+    );
+  }
 
   if (search) {
     const pattern = `%${search}%`;

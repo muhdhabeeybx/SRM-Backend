@@ -1,3 +1,4 @@
+const { allocationCodesFor } = require("../../lib/pfiScope");
 const asyncHandler = require("express-async-handler");
 const { deliveryBatchRepo } = require("../../repositories");
 
@@ -13,7 +14,12 @@ const STATUSES = ["active", "completed"];
 
 /** Every batch that has a status row. Codes with none are active. */
 const getDeliveryBatchStatuses = asyncHandler(async (req, res) => {
-  const batches = await deliveryBatchRepo.findStatuses();
+  const all = await deliveryBatchRepo.findStatuses();
+  // Staff assigned to a PFI see its batches' statuses and no others.
+  const codes = await allocationCodesFor(req.user);
+  const batches = codes === null
+    ? all
+    : Object.fromEntries(Object.entries(all || {}).filter(([k]) => codes.includes(String(k).trim().toUpperCase())));
   res.json({ success: true, data: { batches } });
 });
 
@@ -21,6 +27,10 @@ const setDeliveryBatchStatus = asyncHandler(async (req, res) => {
   const code = deliveryBatchRepo.normalise(req.params.code);
   if (!code) {
     return res.status(400).json({ success: false, message: "A batch code is required" });
+  }
+  const codes = await allocationCodesFor(req.user);
+  if (codes !== null && !codes.includes(String(code).trim().toUpperCase())) {
+    return res.status(403).json({ success: false, message: "That batch is not on your PFI." });
   }
 
   const status = String(req.body?.status || "").trim();
