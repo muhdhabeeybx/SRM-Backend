@@ -164,7 +164,6 @@ exports[`every copy string, pinned 1`] = `
   },
   "orderPending": "One moment, your order is being created.",
   "orderCreated": "Order *SOR-1042* created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay by *Wed, 12 Aug, 16:42*. After that the price is no longer held.\\n\\nTransfer to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO",
-  "orderCreatedHoursOnly": "Order *SOR-1042* created.\\n\\n*Total: ₦25,500,000*\\n\\nPlease pay within *24 hours*. After that the price is no longer held.\\n\\nTransfer to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO",
   "orderCreatedNoWindow": "Order *SOR-1042* created.\\n\\n*Total: ₦25,500,000*\\n\\nTransfer to the account for this order:\\nBank: Wema Bank\\nAccount Number: *9930001111*\\nAccount Name: SOROMANNIGERI/ AO",
   "expectedPaymentPrompt": "One more thing, and it is optional.\\n\\nWho is sending the money? If more than one person or company is paying for this order, list each one. That is how we match your transfer when it lands.\\n\\nSend them one at a time, amount first:\\n*5,000,000 Rure Oil and Gas*\\n\\nTap *Done* when you have listed everyone, or *Skip*.",
   "expectedPaymentButtons": {

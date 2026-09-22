@@ -39,9 +39,15 @@
  *
  * ── Read this before running it on a delivered order ──────────────────────
  *
- * `findStalePending` sweeps orders that are Pending AND Unpaid AND older than
- * ORDER_EXPIRY_HOURS, expires them, and hands their reserved stock back to the
- * PFI. That is correct for an order nobody has loaded. It is NOT correct for
+ * `findStalePending` sweeps orders that are Pending AND Unpaid AND past their
+ * deadline (23:59 Lagos on the day they were placed), expires them, and hands
+ * their reserved stock back to the PFI. Note what that means here: an order
+ * you return to Pending today but which was PLACED on an earlier day is
+ * already past its deadline, so the next sweep or portal read will expire it
+ * straight back. If you need it to stay Pending, pay it or set
+ * ORDER_EXPIRY_DISABLED=true for the duration.
+ *
+ * That sweep is correct for an order nobody has loaded. It is NOT correct for
  * one whose trucks have gated out: the stock is physically gone, and returning
  * it to the batch invents inventory. The script refuses those unless you pass
  * --gated-out-anyway, so the decision is explicit.

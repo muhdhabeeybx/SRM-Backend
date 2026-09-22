@@ -3,12 +3,15 @@ const { expireStaleOrders } = require("../../services/order.service");
 const { expireStaleRequests } = require("../../services/requestExpiry.service");
 
 /**
- * Expire every stale order and request:
- * - Depot orders: Pending + unpaid older than ORDER_EXPIRY_HOURS
- * - Dangote requests: Approved + unpaid older than ORDER_EXPIRY_HOURS since review
- * - LPG requests: Approved + unpaid older than ORDER_EXPIRY_HOURS since review
+ * Expire everything whose day has ended (23:59 Africa/Lagos):
+ * - Depot orders: Pending + wholly unpaid, placed on an earlier day
+ * - Dangote requests: Approved + unpaid, reviewed on an earlier day
+ * - LPG requests: Approved + unpaid, reviewed on an earlier day
  *
- * Idempotent and safe behind a cron.
+ * The nightly cron in jobs/scheduler.js does this at 23:59; this endpoint is
+ * the manual lever for when the scheduler is off or a run was missed. Run at
+ * any hour it only lapses what is genuinely past its deadline — orders placed
+ * today survive a midday run — so it is idempotent and safe to call twice.
  */
 const runExpiry = asyncHandler(async (req, res) => {
   const startedAt = Date.now();

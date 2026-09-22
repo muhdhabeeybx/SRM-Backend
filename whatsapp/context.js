@@ -4,7 +4,6 @@ const { orders } = require("../db/schema");
 const { orderRepo, waMessageRepo } = require("../repositories");
 const { loadCatalog } = require("../services/catalog.service");
 const { computeExpiresAt } = require("../services/order.service");
-const { orderExpiryHours, orderExpiryDisabled } = require("../config/orderExpiry");
 
 /**
  * Builds the `context` the pure engine consumes. The engine never fetches —
@@ -58,9 +57,10 @@ const loadLastOrder = async (customerId, lastOrderId) => {
     // For "Finish payment" on an unpaid last order.
     virtualAccountBank: full.virtualAccountBank,
     virtualAccountNumber: full.virtualAccountNumber,
-    // Payment window — same deadline the portal countdown uses.
+    // Payment window — same deadline the portal countdown uses. Null once the
+    // order is funded or expiry is switched off, and the copy then says nothing
+    // about a deadline rather than inventing one.
     expiresAt: computeExpiresAt(full),
-    expiryHours: orderExpiryDisabled() ? null : orderExpiryHours(),
   };
 };
 

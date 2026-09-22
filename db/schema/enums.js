@@ -94,8 +94,8 @@ const orderStatusEnum = pgEnum("order_status", [
   "Loading",
   "Completed",
   "Cancelled",
-  // A Pending, unpaid order the customer never funded within the expiry window
-  // (ORDER_EXPIRY_HOURS). Distinct from Cancelled — nobody cancelled it, it
+  // A Pending, unpaid order the customer never funded by the end of the day it
+  // was placed (23:59 Lagos). Distinct from Cancelled — nobody cancelled it, it
   // lapsed — so the two are told apart in history and copy.
   "Expired",
 ]);

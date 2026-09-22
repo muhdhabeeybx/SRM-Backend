@@ -41,18 +41,18 @@ const formatPayBy = (iso) => {
   });
 };
 
-/** One line telling the customer how long the price is held. */
-const paymentDeadlineLine = ({ expiresAt, expiryHours } = {}) => {
+/**
+ * One line telling the customer how long the price is held.
+ *
+ * Always an absolute instant, never a duration. Orders lapse at the end of the
+ * day they were placed, so "pay within 24 hours" would be wrong for every
+ * order but one placed at midnight — and wrong in the customer's favour, which
+ * is the expensive direction. No deadline means no line rather than a vague
+ * one; a deadline nobody can act on is worse than silence.
+ */
+const paymentDeadlineLine = ({ expiresAt } = {}) => {
   const until = formatPayBy(expiresAt);
-  if (until) {
-    return `Please pay by *${until}*. After that the price is no longer held.`;
-  }
-  const hours = Number(expiryHours);
-  if (Number.isFinite(hours) && hours > 0) {
-    const unit = hours === 1 ? "hour" : "hours";
-    return `Please pay within *${hours} ${unit}*. After that the price is no longer held.`;
-  }
-  return null;
+  return until ? `Please pay by *${until}*. After that the price is no longer held.` : null;
 };
 
 // ---------------------------------------------------------------- identify

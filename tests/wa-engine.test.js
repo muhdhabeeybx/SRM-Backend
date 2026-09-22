@@ -1048,7 +1048,6 @@ describe("order outcomes", () => {
     virtualAccountName: "SOROMANNIGERI/ AO",
     invoiceUrl: "https://files.example/invoice.pdf",
     expiresAt: "2026-08-12T15:42:00.000Z",
-    expiryHours: 24,
   };
 
   it("ORDER_CREATED: invoice, the transfer details with Cancel, the who's-paying ask, then portal hint", () => {

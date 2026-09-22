@@ -63,7 +63,10 @@ async function productFixture() {
 
 let seq = 0;
 const RUN = Date.now();
-async function makeOrder(customerId, depotId, productId, { status, paymentStatus } = {}) {
+// `rest` carries any other column the case needs — amountPaid, creditQty —
+// straight through to the insert, so a test can build the exact money state it
+// is about without a helper argument per column.
+async function makeOrder(customerId, depotId, productId, { status, paymentStatus, ...rest } = {}) {
   const [row] = await db
     .insert(orders)
     .values({
@@ -78,6 +81,7 @@ async function makeOrder(customerId, depotId, productId, { status, paymentStatus
       deliveryType: "pickup",
       status: status || "Pending",
       paymentStatus: paymentStatus || "Unpaid",
+      ...rest,
     })
     .returning();
   return row;
@@ -166,7 +170,16 @@ describe("order lifecycle endpoints — role gates + state machine", () => {
     assert.equal(after.status, "Paid", "status unchanged by a refused caller");
   });
 
-  test("releasing an order that is not Paid is refused by the state machine (409)", async () => {
+  /**
+   * Nothing loads on an outstanding.
+   *
+   * Pending → Released IS a legal move in the state machine — the credit path
+   * needs it — so the state machine alone never refused this. The gate is the
+   * money: a full payment releases the order by itself, so an order sitting at
+   * Pending here is one still owing, and releasing it from this screen would be
+   * the part-payment release taken out through a side entrance.
+   */
+  test("releasing an order nobody has paid for is refused (409)", async () => {
     const order = await makeOrder(customerId, depotId, productId, {
       status: "Pending",
       paymentStatus: "Unpaid",
@@ -176,6 +189,55 @@ describe("order lifecycle endpoints — role gates + state machine", () => {
       .set("Authorization", `Bearer ${releaseStaff.accessToken}`)
       .send({});
     assert.equal(res.status, 409);
+    assert.match(res.body.message, /outstanding/i, "the desk is told what is missing");
+  });
+
+  test("a part-paid order is refused too — a balance is a balance", async () => {
+    const order = await makeOrder(customerId, depotId, productId, {
+      status: "Pending",
+      paymentStatus: "Part Paid",
+      amountPaid: "1000",
+    });
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/release`)
+      .set("Authorization", `Bearer ${releaseStaff.accessToken}`)
+      .send({});
+    assert.equal(res.status, 409);
+  });
+
+  test("an order paid in full may be released", async () => {
+    const order = await makeOrder(customerId, depotId, productId, {
+      status: "Paid",
+      paymentStatus: "Paid",
+    });
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/release`)
+      .set("Authorization", `Bearer ${releaseStaff.accessToken}`)
+      .send({});
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+  });
+
+  test("an authorised credit allowance opens the same gate on a balance", async () => {
+    // Credit is the one way to load against an outstanding, and it is a
+    // decision with an authoriser's name on it — see the credit allowance in
+    // order.controller.js. It must keep working, or the exception the business
+    // actually relies on disappears with the part-payment release.
+    // The authoriser, the timestamp and the reason are not decoration: the
+    // orders_credit_authorised_check constraint refuses credit without them,
+    // which is the database insisting the exception has a name on it.
+    const order = await makeOrder(customerId, depotId, productId, {
+      status: "Pending",
+      paymentStatus: "Unpaid",
+      creditQty: "10",
+      creditReason: "Trusted customer — cleared by finance",
+      creditAuthorisedBy: superStaff.staff.id,
+      creditAuthorisedAt: new Date(),
+    });
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/release`)
+      .set("Authorization", `Bearer ${releaseStaff.accessToken}`)
+      .send({});
+    assert.equal(res.status, 200, JSON.stringify(res.body));
   });
 
   // ── cancel ───────────────────────────────────────────────────────────────

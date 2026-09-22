@@ -40,7 +40,12 @@ const notifyWhatsAppPaymentConfirmed = (orderId) => {
   );
 };
 
-const { orderExpiryHours, orderExpiryMs, orderExpiryDisabled } = require("../config/orderExpiry");
+const {
+  orderExpiryDisabled,
+  expiryDeadline,
+  hasLapsed,
+  sweepCutoff,
+} = require("../config/orderExpiry");
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
@@ -76,6 +81,28 @@ const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
  * re-placed at current prices rather than paid at a stale one.
  */
 const PAYABLE_STATUSES = new Set(["Pending", "Paid", "Released", "Loading", "Completed"]);
+
+/**
+ * May this order be cleared for loading at all?
+ *
+ * The gate the desk asked for: nothing loads on an outstanding. Either the
+ * money covers the order, or somebody has explicitly authorised credit on it
+ * and put their name to that decision.
+ *
+ * Two sources of permission, and they are not interchangeable. Payment is
+ * arithmetic; credit is a judgement, carries an authoriser and a reason, and
+ * shows on the receivables exposure report. What is NOT permission any more is
+ * a part payment on its own — paying a tenth used to release the order and let
+ * the desk ticket a tenth, which turned an unpaid balance into a decision
+ * nobody had made.
+ *
+ * `paymentStatus` rather than arithmetic on amount_paid, for the same reason
+ * releasableQuantity trusts it: it is the authoritative statement that an
+ * order is settled, and it is decided at kobo scale.
+ */
+function canReleaseForLoading(order) {
+  return order?.paymentStatus === "Paid" || Number(order?.creditQty ?? 0) > 0;
+}
 
 /**
  * How much of an order may be ticketed, given what has been paid for it.
@@ -180,7 +207,8 @@ function isOrderExpired(order, now = Date.now()) {
     // held against it and it may already have been ticketed — and lapsing it
     // would strand that payment on an expired order.
     order.paymentStatus === "Unpaid" &&
-    now - new Date(order.createdAt).getTime() >= orderExpiryMs()
+    // End of the Lagos day it was placed on — not 24 hours after placement.
+    hasLapsed(order.createdAt, now)
   );
 }
 
@@ -196,14 +224,14 @@ function computeExpiresAt(order) {
   // Part Paid counts as funded here, same as Paid: money is held against the
   // order, so there is no countdown left to show.
   if (order.status !== "Pending" || order.paymentStatus !== "Unpaid") return null;
-  const created = new Date(order.createdAt).getTime();
-  return new Date(created + orderExpiryMs()).toISOString();
+  return expiryDeadline(order.createdAt)?.toISOString() ?? null;
 }
 
 /**
  * Enrich an order (or array of orders) with a computed `expiresAt` field — the
- * deadline before which the customer must pay. The frontend uses this directly
- * for the countdown badge instead of knowing ORDER_EXPIRY_HOURS.
+ * deadline before which the customer must pay — 23:59 Lagos on the day it was
+ * placed. The frontend uses this directly for the countdown badge instead of
+ * knowing the policy.
  *
  * For single orders, also checks if the deadline has passed and immediately
  * expires the order before returning it. This ensures the frontend never sees
@@ -227,8 +255,7 @@ async function expireAndAttach(order) {
   // If pending and wholly unfunded, check if deadline has passed. A Part Paid
   // order is funded and must not lapse — see isOrderExpired.
   if (!orderExpiryDisabled() && order.status === "Pending" && order.paymentStatus === "Unpaid") {
-    const deadline = new Date(order.createdAt).getTime() + orderExpiryMs();
-    if (Date.now() >= deadline) {
+    if (hasLapsed(order.createdAt)) {
       try {
         const expired = await expireOrder(order.id);
         return { ...expired, expiresAt: null };
@@ -1334,12 +1361,21 @@ async function cancelOrder({
  */
 async function expireOrder(orderId, { tx } = {}) {
   const run = async (tx) => {
+    // Read the row before transitioning, for the deadline the audit line
+    // records — the transition's own return value is not available yet, and
+    // taking the row lock first also serialises this against a concurrent
+    // payment rather than racing it.
+    const before = await orderRepo.lockById(orderId, tx);
+
     const order = await orderStatus.transition(orderId, "Expired", {
       tx,
       actor: { type: "system" },
       action: "order.expired",
       set: { expiredAt: new Date() },
-      metadata: { reason: "unpaid past expiry window", expiryHours: orderExpiryHours() },
+      metadata: {
+        reason: "unpaid at end of day",
+        deadline: before ? (expiryDeadline(before.createdAt)?.toISOString() ?? null) : null,
+      },
     });
 
     await releaseOrderResources(order, tx);
@@ -1350,17 +1386,27 @@ async function expireOrder(orderId, { tx } = {}) {
 }
 
 /**
- * The expiry sweep: lapse every Pending, unpaid order older than the window
- * (ORDER_EXPIRY_HOURS). Run on a schedule (POST /api/order-expiry/run). A row
- * that a concurrent pay/cancel already moved throws inside expireOrder and is
- * skipped — one stale order never fails the whole sweep.
+ * The expiry sweep: lapse every Pending, unpaid order whose day has ended.
+ *
+ * Runs nightly at 23:59 Lagos (jobs/scheduler.js) and on demand via
+ * POST /api/order-expiry/run. A row that a concurrent pay/cancel already moved
+ * throws inside expireOrder and is skipped — one stale order never fails the
+ * whole sweep.
+ *
+ * Safe to run at any hour, and safe to miss: sweepCutoff asks "whose deadline
+ * has already passed", so a run at noon lapses yesterday's stragglers without
+ * touching today's live orders, and a night the job never fired is cleaned up
+ * by the next run (or by withExpiresAt, whichever reaches the order first).
  *
  * @returns {number} how many orders were expired
  */
 async function expireStaleOrders() {
   if (orderExpiryDisabled()) return 0;
-  const cutoff = new Date(Date.now() - orderExpiryMs());
-  const stale = await orderRepo.findStalePending(cutoff);
+  // The cutoff narrows the scan; hasLapsed decides. See sweepCutoff — an order
+  // placed in the minute after last night's deadline is inside the range but
+  // is not due until tonight, and must survive this run.
+  const cutoff = sweepCutoff();
+  const stale = (await orderRepo.findStalePending(cutoff)).filter((row) => hasLapsed(row.createdAt));
 
   let expired = 0;
   for (const row of stale) {
@@ -1809,7 +1855,21 @@ async function confirmOrderPayment({
       tx,
     );
 
-    if (shouldTransition) {
+    /**
+     * Release only when the money COVERS the order.
+     *
+     * `shouldTransition` says the status is movable; this says the payment has
+     * earned the move. Both are required. A short payment is still recorded —
+     * the rows are written above, the order shows Part Paid with its balance,
+     * and the bank statement reconciles — but the order stays at Pending and
+     * off the ticketing desk, because nothing loads on an outstanding.
+     *
+     * A later instalment that closes the balance arrives here again with the
+     * order still Pending, so it is this call that finally releases it. That
+     * is the path that must keep working: the gate is "is it covered NOW",
+     * never "is this the first payment".
+     */
+    if (shouldTransition && orderPaymentService.releasesOnPayment(summary)) {
       await orderStatus.transition(order.id, "Paid", {
         tx,
         actor,
@@ -1825,14 +1885,14 @@ async function confirmOrderPayment({
           received: String(summary.received),
           orderTotal: String(summary.orderTotal),
           surplus: String(summary.surplus),
-          partial: summary.shortfall > 0,
         },
       });
 
-      // Payment IS the release: the order goes straight onto the ticketing desk
-      // rather than waiting for someone to click a button that has no other
-      // condition attached to it. A part payment releases it too — capped at
-      // the quantity paid for, which generate-tickets enforces.
+      // Payment IS the release: a covered order goes straight onto the
+      // ticketing desk rather than waiting for someone to click a button that
+      // has no other condition attached to it. Loading against a balance is
+      // reachable only by an authorised credit allowance, which releases the
+      // order on its own.
       await orderStatus.releaseOnPayment(order.id, {
         tx,
         actor,
@@ -1843,23 +1903,28 @@ async function confirmOrderPayment({
        * A gantry or delivery order has no desk after this point, so it does
        * not wait at one. See completeDesklessOrder — it writes the stock
        * movement ticketing would have written, then steps the order through
-       * to Completed. Only when nothing is still owed.
+       * to Completed.
+       *
+       * This used to re-test `shortfall <= 0` here. That is now guaranteed by
+       * the gate above, and re-testing it in floating point would have undone
+       * the point of deciding it at kobo scale: an order settled to the last
+       * kobo but a fraction of one short in float would have been released and
+       * then silently refused completion.
        */
-      if (summary.shortfall <= 0) {
-        const [batch] = await tx
-          .select({ pfiType: pfis.pfiType })
-          .from(pfis)
-          .where(eq(pfis.id, order.pfiId ?? 0))
-          .limit(1);
-        if (batch?.pfiType) {
-          await completeDesklessOrder(order, { tx, actor, pfiType: batch.pfiType });
-        }
+      const [batch] = await tx
+        .select({ pfiType: pfis.pfiType })
+        .from(pfis)
+        .where(eq(pfis.id, order.pfiId ?? 0))
+        .limit(1);
+      if (batch?.pfiType) {
+        await completeDesklessOrder(order, { tx, actor, pfiType: batch.pfiType });
       }
     }
-    // A later instalment has no status to move — the order was released by its
-    // first one. recordFromStatementLines has already written its own
-    // 'order.payment_recorded' audit row, which carries the amount, the lines
-    // and the resulting status, so there is nothing further to log here.
+    // Nothing further to log when the order does not move. That covers a short
+    // payment (recorded, still Pending, still owing) and a later instalment on
+    // an order already past Pending. recordFromStatementLines has written its
+    // own 'order.payment_recorded' audit row, carrying the amount, the lines
+    // and the resulting status.
 
     return { orderId: order.id, summary };
   });
@@ -1882,6 +1947,7 @@ module.exports = {
   completeDesklessOrder,
   DESKLESS_PFI_TYPES,
   releasableQuantity,
+  canReleaseForLoading,
   runPostPaymentEffects,
   expireOrder,
   expireIfStale,
@@ -1889,6 +1955,5 @@ module.exports = {
   isOrderExpired,
   computeExpiresAt,
   withExpiresAt,
-  orderExpiryHours,
   httpError,
 };

@@ -305,6 +305,31 @@ describe("order payments", () => {
     const toRow = await orderRow(to.id);
     assert.equal(toRow.paymentStatus, "Part Paid");
     assert.equal(money(toRow.amountPaid), 3000000);
+    // Funded, but not cleared. A transfer is money arriving and is treated
+    // exactly like a bank payment — which means money that does not COVER the
+    // order opens nothing. It stays Pending and off the ticketing desk.
+    assert.equal(toRow.status, "Pending", "a short transfer does not release the order");
+  });
+
+  test("a transfer that covers the destination releases it, as a payment would", async () => {
+    const line = await makeLine(9000000, "FULL COVER");
+    const from = await makeOrder(5000000);
+    const to = await makeOrder(4000000);
+    await confirm(from, [line.id]);
+
+    const result = await orderPaymentService.transferSurplus({
+      fromOrderId: from.id,
+      toOrderId: to.id,
+      amount: 4000000,
+      reason: "Whole balance moved to the next load",
+      staffId: null,
+    });
+
+    assert.equal(result.to.shortfall, 0, "nothing left owing");
+
+    const toRow = await orderRow(to.id);
+    assert.equal(toRow.paymentStatus, "Paid");
+    assert.equal(toRow.status, "Released", "covered by the transfer, so it is cleared for loading");
   });
 
   test("an order cannot give away money it needs for its own value", async () => {

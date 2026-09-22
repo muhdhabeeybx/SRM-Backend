@@ -12,6 +12,8 @@ const { depots, products, depotProductPrices, pfis, orders } = require("../db/sc
 const { customerRepo, orderRepo, pfiRepo, bankAccountRepo } = require("../repositories");
 const orderService = require("../services/order.service");
 const { NATIVE_TRANSPORT, closeDb, payOrderWithStatementLine } = require("./helpers");
+const { dayBounds } = require("../lib/zonedDay");
+const { expiryDeadline } = require("../config/orderExpiry");
 
 const PORTAL_AUTH = "/api/customer/auth";
 const ORDERS = "/api/customer/orders";
@@ -40,12 +42,19 @@ async function registerActiveCustomer(tag) {
   return { customer, accessToken: ver.body.data.accessToken };
 }
 
-describe("order expiry — unpaid orders lapse after the window, distinct from cancellation", () => {
+describe("order expiry — unpaid orders lapse at the end of their day, distinct from cancellation", () => {
   let depotId;
   let productId;
   let pfiId;
+  let expiryDisabledBefore;
 
   before(async () => {
+    // This suite tests the expiry MECHANISM, so it must run whatever the
+    // deployment has chosen. ORDER_EXPIRY_DISABLED is a live business switch
+    // and is currently "true" in some .env files — left alone, every
+    // assertion below silently passes on a no-op sweep.
+    expiryDisabledBefore = process.env.ORDER_EXPIRY_DISABLED;
+    process.env.ORDER_EXPIRY_DISABLED = "false";
     const [depot] = await db
       .insert(depots)
       .values({
@@ -95,6 +104,8 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
   });
 
   after(async () => {
+    if (expiryDisabledBefore === undefined) delete process.env.ORDER_EXPIRY_DISABLED;
+    else process.env.ORDER_EXPIRY_DISABLED = expiryDisabledBefore;
     await closeDb();
   });
 
@@ -106,12 +117,20 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
 
   /** Move an order's creation time into the past so the sweep sees it as stale. */
   const backdate = (orderId, hoursAgo) =>
-    db
-      .update(orders)
-      .set({ createdAt: new Date(Date.now() - hoursAgo * 60 * 60 * 1000) })
-      .where(eq(orders.id, orderId));
+    setCreatedAt(orderId, new Date(Date.now() - hoursAgo * 60 * 60 * 1000));
 
-  test("a Pending order older than the window is Expired and its reserved stock returned", async () => {
+  /** Pin an order's creation time to an exact instant. */
+  const setCreatedAt = (orderId, at) =>
+    db.update(orders).set({ createdAt: at }).where(eq(orders.id, orderId));
+
+  /**
+   * True in the minute between tonight's deadline and midnight, when today's
+   * orders have already lapsed. A test asserting that a fresh order survives
+   * cannot hold in that window, and skipping is honest where fudging is not.
+   */
+  const insideTonightsExpiry = () => Date.now() >= expiryDeadline(new Date()).getTime();
+
+  test("a Pending order from an earlier day is Expired and its reserved stock returned", async () => {
     const { customer, accessToken } = await registerActiveCustomer("1");
     const placed = await placeOrder(accessToken);
     assert.equal(placed.status, 201, JSON.stringify(placed.body));
@@ -121,7 +140,7 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
     const beforeSold = Number((await pfiRepo.findById(pfiId)).soldQtyLitres);
     assert.equal(beforeSold >= QTY, true, "stock was reserved at placement");
 
-    await backdate(orderId, 25); // default window is 24h
+    await backdate(orderId, 25); // 25h ago is always a previous Lagos day
     const expired = await orderService.expireStaleOrders();
     assert.equal(expired >= 1, true, "the sweep expired at least this order");
 
@@ -137,7 +156,8 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
     assert.equal(Number((await customerRepo.findById(customer.id)).balance), 0, "wallet untouched");
   });
 
-  test("a fresh order (within the window) is left alone", async () => {
+  test("an order placed today is left alone", async (t) => {
+    if (insideTonightsExpiry()) return t.skip("running inside tonight's expiry window");
     const { accessToken } = await registerActiveCustomer("2");
     const placed = await placeOrder(accessToken);
     const orderId = placed.body.data.order.id;
@@ -162,27 +182,44 @@ describe("order expiry — unpaid orders lapse after the window, distinct from c
     assert.equal((await orderRepo.findById(orderId)).status, "Released", "a funded order never lapses");
   });
 
-  test("the window is set by ORDER_EXPIRY_HOURS", async () => {
-    const original = process.env.ORDER_EXPIRY_HOURS;
-    try {
-      process.env.ORDER_EXPIRY_HOURS = "48";
-      const { accessToken } = await registerActiveCustomer("4");
-      const placed = await placeOrder(accessToken);
-      const orderId = placed.body.data.order.id;
+  /**
+   * The point of the end-of-day rule, in one test: two creation times ninety
+   * minutes apart, on opposite sides of a Lagos midnight, get opposite
+   * outcomes — and the OLDER of the two is the one that survives. Nothing
+   * about elapsed hours can explain that, which is exactly the property a
+   * rolling window did not have.
+   */
+  test("the calendar day decides, not the age", async (t) => {
+    if (insideTonightsExpiry()) return t.skip("running inside tonight's expiry window");
+    const { accessToken } = await registerActiveCustomer("4");
+    const placed = await placeOrder(accessToken);
+    const orderId = placed.body.data.order.id;
 
-      // 30h old, under the 48h window — untouched.
-      await backdate(orderId, 30);
-      await orderService.expireStaleOrders();
-      assert.equal((await orderRepo.findById(orderId)).status, "Pending", "under the window: Pending");
+    const todayStart = dayBounds(new Date()).start;
 
-      // 50h old, past the 48h window — expired.
-      await backdate(orderId, 50);
-      await orderService.expireStaleOrders();
-      assert.equal((await orderRepo.findById(orderId)).status, "Expired", "past the window: Expired");
-    } finally {
-      if (original === undefined) delete process.env.ORDER_EXPIRY_HOURS;
-      else process.env.ORDER_EXPIRY_HOURS = original;
-    }
+    // 00:30 Lagos today: by late evening this is nearly 24h old, and still live.
+    await setCreatedAt(orderId, new Date(todayStart.getTime() + 30 * 60 * 1000));
+    await orderService.expireStaleOrders();
+    assert.equal((await orderRepo.findById(orderId)).status, "Pending", "placed today: still Pending");
+
+    // 23:00 Lagos yesterday: ninety minutes earlier, and already lapsed.
+    await setCreatedAt(orderId, new Date(todayStart.getTime() - 60 * 60 * 1000));
+    await orderService.expireStaleOrders();
+    assert.equal((await orderRepo.findById(orderId)).status, "Expired", "placed yesterday: Expired");
+  });
+
+  test("the countdown shown to the customer is tonight's deadline", async (t) => {
+    if (insideTonightsExpiry()) return t.skip("running inside tonight's expiry window");
+    const { accessToken } = await registerActiveCustomer("6");
+    const placed = await placeOrder(accessToken);
+    const order = await orderRepo.findById(placed.body.data.order.id);
+
+    const [withExpiry] = await orderService.withExpiresAt([order]);
+    assert.equal(
+      withExpiry.expiresAt,
+      expiryDeadline(order.createdAt).toISOString(),
+      "expiresAt is the end of the order's own day"
+    );
   });
 
   test("paying a lapsed order expires it and refuses (409), without debiting the wallet", async () => {

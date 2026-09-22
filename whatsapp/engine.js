@@ -725,7 +725,6 @@ const reduceInner = (session, inbound, ctx, expired) => {
               virtualAccountBank: order.virtualAccountBank,
               virtualAccountNumber: order.virtualAccountNumber,
               expiresAt: order.expiresAt,
-              expiryHours: order.expiryHours,
             },
           },
       };
@@ -1108,7 +1107,6 @@ const handleMenu = (session, ctx, value) => {
           virtualAccountBank: last.virtualAccountBank,
           virtualAccountNumber: last.virtualAccountNumber,
           expiresAt: last.expiresAt,
-          expiryHours: last.expiryHours,
         },
       },
     };

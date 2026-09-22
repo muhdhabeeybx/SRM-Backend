@@ -31,10 +31,16 @@ const { closeDb } = require("./helpers");
  * Paying for part of an order.
  *
  * The desk's case: 100,000 litres ordered, the customer pays for 50,000 now.
- * That payment has to be confirmable, the order has to become ticketable for
- * 50,000 litres and no more, the balance has to read as still expected, and
- * paying the rest later has to unlock the remainder — with the money never
- * once double-counted along the way.
+ * That payment has to be confirmable and reconcilable against the bank
+ * statement, the balance has to read as still expected, and paying the rest
+ * later has to settle the order — with the money never once double-counted
+ * along the way.
+ *
+ * What a part payment does NOT do is open the loading gate. It used to: the
+ * first instalment released the order and the desk could ticket the litres it
+ * covered. That turned an unpaid balance into a decision nobody had made, so
+ * nothing loads on an outstanding now — see canReleaseForLoading. Credit is
+ * the one way to load against a balance, and it has an authoriser's name on it.
  */
 describe("part payment", () => {
   const suffix = Date.now().toString(36);
@@ -264,9 +270,11 @@ describe("part payment", () => {
     const row = await reload(order.id);
     assert.equal(row.paymentStatus, "Part Paid");
     assert.equal(Number(row.amountPaid), HALF);
-    // The pipeline opens on the first instalment, exactly as a full payment
-    // does — otherwise the order could never reach the ticketing desk.
-    assert.equal(row.status, "Released");
+    // The money is recorded and reconciled; the gate stays shut. The order is
+    // still Pending, so it is not on any ticketing desk and no truck load can
+    // be cut against it.
+    assert.equal(row.status, "Pending", "a part payment does not release the order");
+    assert.equal(orderService.canReleaseForLoading(row), false, "nothing loads on an outstanding");
     assert.ok(row.paymentConfirmedAt, "payment confirmed timestamp is stamped");
 
     // One payment row, carrying the bank line that paid it.
@@ -279,6 +287,9 @@ describe("part payment", () => {
     assert.equal(summary.shortfall, TOTAL - HALF, "the balance is reported, not covered");
     assert.equal(summary.surplus, 0);
 
+    // The ticketing CAP is still the litres the money bought — that arithmetic
+    // is unchanged and is what a credit-released order is measured against.
+    // It is a ceiling, not a permission: this order cannot be ticketed at all.
     assert.equal(orderService.releasableQuantity(row), 50000);
   });
 
@@ -316,6 +327,11 @@ describe("part payment", () => {
     assert.equal(row.paymentStatus, "Paid");
     assert.equal(Number(row.amountPaid), TOTAL);
     assert.equal(orderService.releasableQuantity(row), QUANTITY);
+    // The instalment that CLOSES the balance is the one that opens the gate.
+    // The order sat at Pending through the first half; this is the path that
+    // has to keep working, or a part-paid order could never be loaded at all.
+    assert.equal(row.status, "Released", "the closing instalment releases the order");
+    assert.equal(orderService.canReleaseForLoading(row), true);
 
     // Two instalments, two rows, each traceable to its own bank line. The old
     // model grew a single wallet hold instead, which is why an instalment left
@@ -382,6 +398,13 @@ describe("part payment", () => {
   // ── Consequences ────────────────────────────────────────────────────────
 
   test("a part-paid order cannot lapse", async () => {
+    // Pinned, not inherited: ORDER_EXPIRY_DISABLED is a live business switch
+    // and is "true" in some .env files. Left alone, isOrderExpired returns
+    // false for everything and both halves of this test pass vacuously — which
+    // is how the control half ("an Unpaid one still lapses") was failing.
+    const expiryFlag = process.env.ORDER_EXPIRY_DISABLED;
+    process.env.ORDER_EXPIRY_DISABLED = "false";
+    try {
     const order = await makeOrder();
     await pay(order, HALF);
 
@@ -397,6 +420,10 @@ describe("part payment", () => {
 
     const stillUnpaid = { ...ancient, paymentStatus: "Unpaid" };
     assert.equal(orderService.isOrderExpired(stillUnpaid), true, "an Unpaid one still lapses");
+    } finally {
+      if (expiryFlag === undefined) delete process.env.ORDER_EXPIRY_DISABLED;
+      else process.env.ORDER_EXPIRY_DISABLED = expiryFlag;
+    }
   });
 
   test("commission is pro-rata, and grows as the balance is paid", async () => {

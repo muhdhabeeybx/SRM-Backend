@@ -105,6 +105,28 @@ const summarize = (orderTotal, rows) => {
 };
 
 /**
+ * May this order go onto the ticketing desk, given the money on it?
+ *
+ * The rule, as the desk states it: nothing loads on an outstanding. An order
+ * is released by payment only when the payment COVERS it — a part payment is
+ * recorded, shows on the order, and reconciles against the bank statement, but
+ * it does not open the gate.
+ *
+ * This replaced "any money at all releases it, capped at the litres paid for".
+ * That cap was real and generate-tickets enforced it, but it made a part
+ * payment a self-service release: pay a tenth, load a tenth, and the balance
+ * became a debt nobody had agreed to carry. Credit is now the ONLY way to load
+ * against a balance, and credit is a decision somebody makes, signs and
+ * appears on the exposure report for — see the credit allowance in
+ * order.controller.js, which releases the order itself.
+ *
+ * Asked of `paymentStatus` rather than `shortfall <= 0` on purpose: recompute
+ * decides "Paid" by comparing at kobo scale, so a total that does not divide
+ * cleanly cannot leave an order a fraction of a kobo short of the gate.
+ */
+const releasesOnPayment = (summary) => summary?.paymentStatus === "Paid";
+
+/**
  * Re-derive the order's money columns from its payment rows.
  *
  * Called inside the transaction of every write that touches them, so the cache
@@ -555,14 +577,15 @@ const transferSurplus = async (
      * already-released or delivered order moves money and nothing else, and a
      * second transfer cannot re-release.
      *
-     * Part payments release too — capped at the quantity paid for, which
-     * generate-tickets enforces — so this asks whether any money is now on the
-     * order, not whether it is fully covered.
+     * A part payment does NOT release. This asks whether the transfer has left
+     * the order fully covered, not merely whether money arrived — see
+     * releasesOnPayment. Surplus moved onto an order that is still short is
+     * money recorded and nothing more.
      *
      * The source order is deliberately NOT de-released. transferSurplus can
      * only move genuine surplus, so `from` never drops below its own value.
      */
-    if (toAfter.received > 0 && orderStatus().isLegal(to.status, "Paid")) {
+    if (releasesOnPayment(toAfter) && orderStatus().isLegal(to.status, "Paid")) {
       const shared = { tx: trx, actor: actorFor(staffId), metadata: { via: "transfer", transferId: transfer.id } };
       await orderStatus().transition(to.id, "Paid", { ...shared, action: "order.paid", set: {} });
       await orderStatus().releaseOnPayment(to.id, shared);
@@ -935,6 +958,7 @@ const findOrdersWithSurplus = async ({ limit = 100, customerId = null } = {}) =>
 };
 
 module.exports = {
+  releasesOnPayment,
   PAYMENT_SOURCE,
   recordFromStatementLines,
   removePayment,

@@ -48,59 +48,10 @@ const ROLE_TAGS = [
  */
 const REPORT_TZ = process.env.REPORT_TIMEZONE || "Africa/Lagos";
 
-/** "2026-09-04" — the calendar date at this instant, in the reporting zone. */
-const localDateStr = (date, tz = REPORT_TZ) =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
-
-/** How far the reporting zone is ahead of UTC at a given instant, in ms. */
-const zoneOffsetMs = (date, tz = REPORT_TZ) => {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      hour12: false,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    })
-      .formatToParts(date)
-      .filter((p) => p.type !== "literal")
-      .map((p) => [p.type, Number(p.value)])
-  );
-  // `hour` comes back as 24 at midnight under hour12:false in some ICU builds.
-  const asIfUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour % 24, parts.minute, parts.second);
-  return asIfUtc - Math.floor(date.getTime() / 1000) * 1000;
-};
-
-/**
- * The UTC instant at which a given local calendar day begins.
- *
- * Two passes: the first guess uses the offset at UTC midnight, the second
- * re-reads the offset at that guess. Lagos has no DST so one pass would do,
- * but a zone that does would land an hour out on two days a year.
- */
-const zonedDayStart = (dayStr, tz = REPORT_TZ) => {
-  const guess = new Date(`${dayStr}T00:00:00Z`);
-  let instant = new Date(guess.getTime() - zoneOffsetMs(guess, tz));
-  instant = new Date(guess.getTime() - zoneOffsetMs(instant, tz));
-  return instant;
-};
-
-const dayBounds = (date, tz = REPORT_TZ) => {
-  const dayStr = localDateStr(date, tz);
-  const start = zonedDayStart(dayStr, tz);
-  const next = new Date(`${dayStr}T00:00:00Z`);
-  next.setUTCDate(next.getUTCDate() + 1);
-  const end = zonedDayStart(localDateStr(next, "UTC"), tz);
-  return { start, end, dayStr };
-};
+// The zone-aware day arithmetic itself lives in lib/zonedDay.js, shared with
+// order expiry so the day the report covers and the day an unpaid order lapses
+// on are the same day, resolved by the same code.
+const { localDateStr, zonedDayStart, dayBounds } = require("../lib/zonedDay");
 
 const num = (v) => Number(v || 0);
 

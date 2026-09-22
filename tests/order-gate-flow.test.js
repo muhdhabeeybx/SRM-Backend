@@ -499,4 +499,47 @@ describe("truck gate flow — Released → Loading → Completed", () => {
       .send({ truckNumber: "OWN-2", quantity: 50000 });
     assert.equal(res.status, 409);
   });
+
+  /**
+   * The end of the chain, stated where the truck actually turns up.
+   *
+   * A part payment does not release the order, and GATEABLE is Released or
+   * Loading — so an order still owing money is refused at the gate as well as
+   * at ticketing. This is the check worth having at this level rather than
+   * trusting the one upstream: the pickup branch of gate-in CREATES a load
+   * when none was declared, so it is the one door into loading that does not
+   * need a ticket to have been cut first.
+   */
+  test("a part-paid order is refused at the gate — nothing loads on an outstanding", async () => {
+    const [order] = await db
+      .insert(orders)
+      .values({
+        orderNumber: `ORD-GATE-${RUN}-${seq++}`,
+        customerId,
+        state: "Lagos",
+        depotId,
+        productId,
+        quantity: 50000,
+        price: "100.00",
+        totalAmount: "5000000.00",
+        amountPaid: "2000000.00",
+        deliveryType: "pickup",
+        status: "Pending",
+        paymentStatus: "Part Paid",
+      })
+      .returning();
+
+    const res = await request(app)
+      .post(`/api/orders/${order.id}/gate-in`)
+      .set("Authorization", `Bearer ${superStaff.accessToken}`)
+      .send({ truckNumber: "OWN-3", quantity: 50000 });
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.match(res.body.message, /not open for gating/i);
+
+    // And nothing was created on the way to being refused — a pickup gate-in
+    // writes the load itself, so a refusal that still left a row behind would
+    // put the truck on the yard in every report that counts loads.
+    const loads = await orderTruckRepo.findByOrder(order.id);
+    assert.equal(loads.length, 0, "no load was written for a refused gate-in");
+  });
 });

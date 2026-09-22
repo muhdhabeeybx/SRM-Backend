@@ -166,6 +166,22 @@ const releaseOrder = asyncHandler(async (req, res) => {
     // so this desk action almost always arrives at an order that is already
     // Released. That is a no-op, not a conflict — the caller came here to
     // allocate trucks, which still runs below.
+    //
+    // When it is NOT already released, this is the other door into the same
+    // room, and it takes the same lock. A full payment releases the order by
+    // itself, so an order sitting at Pending here is one that is still owing —
+    // releasing it from this screen would be the part-payment release taken
+    // out through a side entrance. Credit is the way to clear a balance for
+    // loading, and it is a decision with a name on it.
+    if (current.status !== "Released" && !orderService.canReleaseForLoading(current)) {
+      const owing = Number(current.totalAmount) - Number(current.amountPaid ?? 0);
+      throw httpErr(
+        409,
+        `${current.orderNumber} cannot be released for loading: ₦${owing.toLocaleString()} is still outstanding. ` +
+          `Record the balance against it, or have finance authorise credit on the order.`,
+      );
+    }
+
     const updated =
       current.status === "Released"
         ? current
@@ -814,11 +830,16 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
 
   const summary = await orderPaymentService.summarizeOrder(order.id);
   const partPaid = order.paymentStatus === "Part Paid";
+  // Whether this payment actually opened the gate. A short payment is recorded
+  // and reconciled but leaves the order at Pending — see the release gate in
+  // order.service.js — so the desk is told that plainly rather than being left
+  // to infer it from a status field on the next screen.
+  const released = TICKETABLE.has(order.status);
 
   res.json({
     success: true,
     message: partPaid
-      ? `Part payment confirmed for ${order.orderNumber}: ₦${summary.received.toLocaleString()} received, ₦${summary.shortfall.toLocaleString()} still expected. ${orderService.releasableQuantity(order).toLocaleString()} litres may be ticketed.`
+      ? `Part payment recorded for ${order.orderNumber}: ₦${summary.received.toLocaleString()} received, ₦${summary.shortfall.toLocaleString()} still outstanding. It stays Pending and cannot be loaded until it is paid in full, or finance authorises credit on it.`
       : summary.surplus > 0
         ? `${order.orderNumber} paid. ₦${summary.surplus.toLocaleString()} was received beyond the order value and is held against this order — transfer it to another order if it was meant for one.`
         : `${order.orderNumber} paid — ₦${summary.received.toLocaleString()} matched to the bank statement.`,
@@ -827,8 +848,12 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
       // What the desk needs next, without a second round trip to work it out.
       payment: {
         ...summary,
+        // The ticketing cap if the order is open at all. It can be positive on
+        // an order that is NOT released — a part-paid order buys litres it may
+        // not load — so read it with `released`, never on its own.
         releasableQuantity: orderService.releasableQuantity(order),
         fullyPaid: !partPaid,
+        released,
       },
     },
   });

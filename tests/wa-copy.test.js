@@ -22,7 +22,6 @@ const ORDER = {
   virtualAccountNumber: "9930001111",
   virtualAccountName: "SOROMANNIGERI/ AO",
   expiresAt: "2026-08-12T15:42:00.000Z",
-  expiryHours: 24,
 };
 
 test("every copy string, pinned", (t) => {
@@ -165,8 +164,10 @@ test("every copy string, pinned", (t) => {
     orderPending: copy.orderPending(),
 
     orderCreated: copy.orderCreated(ORDER),
-    orderCreatedHoursOnly: copy.orderCreated({ ...ORDER, expiresAt: undefined }),
-    orderCreatedNoWindow: copy.orderCreated({ ...ORDER, expiresAt: undefined, expiryHours: null }),
+    // No deadline to state (funded order, or expiry switched off) — the line is
+    // omitted rather than falling back to a duration. Orders lapse at the end
+    // of their day, so there is no number of hours that would be true.
+    orderCreatedNoWindow: copy.orderCreated({ ...ORDER, expiresAt: undefined }),
     expectedPaymentPrompt: copy.expectedPaymentPrompt(),
     expectedPaymentButtons: copy.expectedPaymentButtons(),
     expectedPaymentAdded: copy.expectedPaymentAdded(5000000, "Rure Oil and Gas", 9),

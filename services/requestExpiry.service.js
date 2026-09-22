@@ -9,7 +9,12 @@ const dangoteOrderStatus = require("./dangoteOrderStatus.service");
 const lpgOrderStatus = require("./lpgOrderStatus.service");
 const { sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS } = require("./sms.service");
 const { notify } = require("../notifications");
-const { orderExpiryHours, orderExpiryMs, orderExpiryDisabled } = require("../config/orderExpiry");
+const {
+  orderExpiryDisabled,
+  expiryDeadline,
+  hasLapsed,
+  sweepCutoff,
+} = require("../config/orderExpiry");
 
 /**
  * Has this request lapsed? Only an Approved, unpaid request can — once payment
@@ -22,7 +27,9 @@ function isRequestExpired(request, now = Date.now()) {
     request.status === "Approved" &&
     request.paymentStatus !== "Paid" &&
     request.reviewedAt &&
-    now - new Date(request.reviewedAt).getTime() >= orderExpiryMs()
+    // End of the Lagos day it was approved on — the same end-of-day rule the
+    // depot orders use, anchored on review rather than creation.
+    hasLapsed(request.reviewedAt, now)
   );
 }
 
@@ -34,8 +41,7 @@ function isRequestExpired(request, now = Date.now()) {
 function computeRequestExpiresAt(request) {
   if (orderExpiryDisabled()) return null;
   if (request.status !== "Approved" || request.paymentStatus === "Paid" || !request.reviewedAt) return null;
-  const reviewed = new Date(request.reviewedAt).getTime();
-  return new Date(reviewed + orderExpiryMs()).toISOString();
+  return expiryDeadline(request.reviewedAt)?.toISOString() ?? null;
 }
 
 /**
@@ -59,8 +65,7 @@ async function withRequestExpiresAt(requestOrRequests) {
  */
 async function expireAndAttach(request) {
   if (!orderExpiryDisabled() && request.status === "Approved" && request.paymentStatus !== "Paid" && request.reviewedAt) {
-    const deadline = new Date(request.reviewedAt).getTime() + orderExpiryMs();
-    if (Date.now() >= deadline) {
+    if (hasLapsed(request.reviewedAt)) {
       try {
         const expired = await expireRequest(request.id, request._type || detectType(request));
         return { ...expired, expiresAt: null };
@@ -102,7 +107,9 @@ async function expireDangoteRequest(requestId, { tx } = {}) {
       actor: { type: "system" },
       action: "dangote_order.expired",
       set: { expiredAt: new Date() },
-      metadata: { reason: "unpaid past expiry window", expiryHours: orderExpiryHours() },
+      // The deadline itself is not repeated here: it is 23:59 on the request's
+      // own reviewedAt day, and reviewedAt is on the row this line annotates.
+      metadata: { reason: "unpaid at end of day" },
     });
     return order;
   };
@@ -119,7 +126,9 @@ async function expireLpgRequest(requestId, { tx } = {}) {
       actor: { type: "system" },
       action: "lpg_order.expired",
       set: { expiredAt: new Date() },
-      metadata: { reason: "unpaid past expiry window", expiryHours: orderExpiryHours() },
+      // The deadline itself is not repeated here: it is 23:59 on the request's
+      // own reviewedAt day, and reviewedAt is on the row this line annotates.
+      metadata: { reason: "unpaid at end of day" },
     });
 
     // Return reserved cylinders to station stock (mirrors cancel logic)
@@ -138,19 +147,23 @@ async function expireLpgRequest(requestId, { tx } = {}) {
 
 /**
  * The expiry sweep for Dangote and LPG requests: lapse every Approved, unpaid
- * request older than the window (ORDER_EXPIRY_HOURS) since review.
+ * request whose review day has ended (23:59 Lagos). Same policy and same
+ * nightly run as the depot-order sweep.
  *
  * @returns {{ dangote: number, lpg: number }} how many requests were expired
  */
 async function expireStaleRequests() {
   if (orderExpiryDisabled()) return { dangote: 0, lpg: 0 };
-  const cutoff = new Date(Date.now() - orderExpiryMs());
+  const cutoff = sweepCutoff();
 
   let dangoteExpired = 0;
   let lpgExpired = 0;
 
   // Dangote sweep
-  const staleDangote = await dangoteOrderRequestRepo.findStaleApproved(cutoff);
+  // As in expireStaleOrders: the cutoff narrows, hasLapsed decides.
+  const staleDangote = (await dangoteOrderRequestRepo.findStaleApproved(cutoff)).filter((row) =>
+    hasLapsed(row.reviewedAt)
+  );
   for (const row of staleDangote) {
     try {
       const order = await expireDangoteRequest(row.id);
@@ -162,7 +175,9 @@ async function expireStaleRequests() {
   }
 
   // LPG sweep
-  const staleLpg = await lpgOrderRequestRepo.findStaleApproved(cutoff);
+  const staleLpg = (await lpgOrderRequestRepo.findStaleApproved(cutoff)).filter((row) =>
+    hasLapsed(row.reviewedAt)
+  );
   for (const row of staleLpg) {
     try {
       const order = await expireLpgRequest(row.id);
@@ -277,8 +292,6 @@ async function expireIfStale({ requestId, type, customerId = null }) {
 }
 
 module.exports = {
-  orderExpiryHours,
-  orderExpiryMs,
   isRequestExpired,
   computeRequestExpiresAt,
   withRequestExpiresAt,

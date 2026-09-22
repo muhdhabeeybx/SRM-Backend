@@ -5,7 +5,6 @@ const { EFFECTS, INBOUND, REPLY } = require("./constants");
 const { customerRepo, orderRepo, waMessageRepo, waSessionRepo } = require("../repositories");
 const { toE164 } = require("../utils/phone");
 const { placeOrder, cancelOrder, computeExpiresAt } = require("../services/order.service");
-const { orderExpiryHours, orderExpiryDisabled } = require("../config/orderExpiry");
 const { noteExpectedPayments } = require("../services/expectedPayment.service");
 const { sendReply, sendTypingIndicator } = require("./client");
 const { QUEUES, enqueue } = require("../config/queue");
@@ -87,7 +86,6 @@ const performEffect = async (effect, { wamid, waPhone, inboundMessageId = null }
         const order = {
           ...result.order,
           expiresAt: computeExpiresAt(result.order),
-          expiryHours: orderExpiryDisabled() ? null : orderExpiryHours(),
         };
         return { type: INBOUND.ORDER_CREATED, order };
       } catch (err) {

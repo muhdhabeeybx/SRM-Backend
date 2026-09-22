@@ -1,4 +1,5 @@
 const { registerWorker, scheduleCron } = require("../config/queue");
+const { expiryTimeOfDay, EXPIRY_TZ } = require("../config/orderExpiry");
 const { expireStaleOrders } = require("../services/order.service");
 const { expireStaleRequests } = require("../services/requestExpiry.service");
 const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
@@ -45,10 +46,22 @@ const start = async () => {
     return { expired, requests };
   });
 
-  // Hourly by default; override with a standard cron expression.
-  const cron = process.env.ORDER_EXPIRY_CRON || "* * * * *";
-  await scheduleCron(EXPIRY_QUEUE, cron);
-  console.log(`[scheduler] order-expiry sweep scheduled (${cron})`);
+  // ── The nightly expiry sweep ──────────────────────────────────────────────
+  //
+  // 23:59 Africa/Lagos, every day: unpaid orders lapse at the end of the day
+  // they were placed, handing their stock reservation back before the next
+  // trading day opens. See config/orderExpiry.js for why it is a day boundary
+  // rather than a rolling window.
+  //
+  // The expression is DERIVED from the same ORDER_EXPIRY_AT that computes the
+  // deadline customers are shown, so the countdown on the dashboard and the
+  // job that enforces it cannot drift apart. Local time with an explicit tz,
+  // for the reason spelled out on the daily report below.
+  const [expiryHour, expiryMinute] = expiryTimeOfDay();
+  const cron = process.env.ORDER_EXPIRY_CRON || `${expiryMinute} ${expiryHour} * * *`;
+  const expiryTz = EXPIRY_TZ();
+  await scheduleCron(EXPIRY_QUEUE, cron, {}, { tz: expiryTz });
+  console.log(`[scheduler] order-expiry sweep scheduled (${cron} ${expiryTz})`);
 
   // ── The daily report ──────────────────────────────────────────────────────
   //
