@@ -6,6 +6,7 @@ const misc = require("../../schemas/misc.schema");
 const {
   setAccountsForPfi,
   getBankAccounts,
+  getBankAccountActivity,
   getBankAccountById,
   createBankAccount,
   updateBankAccount,
@@ -13,6 +14,8 @@ const {
 } = require("../../controllers/administration/bankAccount.controller");
 
 router.get("/", verifyStaff, getBankAccounts);
+// Above "/:id", or the literal segment is swallowed by the parameter route.
+router.get("/activity", verifyStaff, getBankAccountActivity);
 router.get("/:id", verifyStaff, getBankAccountById);
 router.post("/", verifyStaff, validate({ body: misc.createBankAccount }), createBankAccount);
 router.patch("/:id", verifyStaff, validate({ params: misc.idParam, body: misc.updateBankAccount }), updateBankAccount);

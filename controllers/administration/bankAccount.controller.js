@@ -23,6 +23,92 @@ const getBankAccounts = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * How every account is actually doing, in one query per concern.
+ *
+ * The account list says which PFIs an account is assigned to. It does not say
+ * whether any money ever arrived through it, when it last did, or how much of
+ * its statement is still unmatched — so an account assigned to twenty-six
+ * PFIs and one that has never taken a naira read identically.
+ *
+ * ── Assigned, and actually used, are different facts ─────────────────────
+ *
+ * `pfiIds` is the current assignment and it is overwritten when somebody
+ * changes it, so there is no record of what an account used to collect for.
+ * The payments are that record: a PFI whose orders have been paid into this
+ * account has used it, whatever the assignment says today. That answers both
+ * "which PFIs is this on" and "which was it on before" without inventing an
+ * assignment log, and it cannot drift from the money.
+ *
+ * Scoped like the list it accompanies: somebody confined to a PFI sees their
+ * own accounts' figures and no others.
+ */
+const getBankAccountActivity = asyncHandler(async (req, res) => {
+  const allowed = await pfiBankScope.allowedBankAccountIds(req.user);
+
+  const rollup = await client`
+    SELECT b.id,
+           (SELECT count(*)::int FROM bank_statements s WHERE s.bank_account_id = b.id) AS uploads,
+           (SELECT max(l.txn_date) FROM bank_statement_lines l WHERE l.bank_account_id = b.id) AS last_credit,
+           (SELECT count(*)::int FROM bank_statement_lines l
+             WHERE l.bank_account_id = b.id AND l.status = 'UNMATCHED') AS unmatched,
+           (SELECT coalesce(sum(l.amount), 0)::numeric FROM bank_statement_lines l
+             WHERE l.bank_account_id = b.id AND l.status = 'UNMATCHED') AS unmatched_value,
+           (SELECT coalesce(sum(op.amount), 0)::numeric FROM order_payments op
+             WHERE op.bank_account_id = b.id) AS orders_taken,
+           (SELECT count(*)::int FROM order_payments op WHERE op.bank_account_id = b.id) AS order_payments,
+           (SELECT coalesce(sum(ds.payment_amount), 0)::numeric FROM delivery_sales ds
+             WHERE ds.bank_account_id = b.id) AS truck_taken
+      FROM bank_accounts b`;
+
+  // Every PFI that has ever been paid into each account, newest first. One
+  // query for all of them rather than one per account.
+  const history = await client`
+    SELECT op.bank_account_id AS account_id,
+           p.id AS pfi_id, p.pfi_number, p.location_name, p.status,
+           count(*)::int AS payments,
+           coalesce(sum(op.amount), 0)::numeric AS total,
+           max(op.created_at) AS last_paid_at
+      FROM order_payments op
+      JOIN orders o ON o.id = op.order_id
+      JOIN pfis p ON p.id = o.pfi_id
+     WHERE op.bank_account_id IS NOT NULL
+     GROUP BY 1, 2, 3, 4, 5
+     ORDER BY max(op.created_at) DESC`;
+
+  const byAccount = new Map();
+  for (const h of history) {
+    const key = Number(h.account_id);
+    if (!byAccount.has(key)) byAccount.set(key, []);
+    byAccount.get(key).push({
+      pfiId: Number(h.pfi_id),
+      pfiNumber: h.pfi_number,
+      locationName: h.location_name || "",
+      pfiStatus: h.status,
+      payments: Number(h.payments),
+      total: Number(h.total),
+      lastPaidAt: h.last_paid_at,
+    });
+  }
+
+  const rows = rollup
+    .filter((r) => allowed === null || allowed.includes(Number(r.id)))
+    .map((r) => ({
+      id: Number(r.id),
+      uploads: Number(r.uploads),
+      lastCredit: r.last_credit ? String(r.last_credit).slice(0, 10) : null,
+      unmatched: Number(r.unmatched),
+      unmatchedValue: Number(r.unmatched_value),
+      ordersTaken: Number(r.orders_taken),
+      orderPayments: Number(r.order_payments),
+      truckTaken: Number(r.truck_taken),
+      /** Every PFI whose orders have been paid into it, whatever it is assigned to now. */
+      pfisPaidIn: byAccount.get(Number(r.id)) || [],
+    }));
+
+  res.json({ success: true, data: { activity: rows, count: rows.length } });
+});
+
 const getBankAccountById = asyncHandler(async (req, res) => {
   const account = await bankAccountRepo.findById(req.params.id);
 
@@ -264,6 +350,7 @@ const setAccountsForPfi = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  getBankAccountActivity,
   setAccountsForPfi,
   getBankAccounts,
   getBankAccountById,
