@@ -1861,11 +1861,14 @@ async function confirmOrderPayment({
      */
     let paymentNote = note;
     if (order.pfiId && Array.isArray(lineIds) && lineIds.length) {
+      // One placeholder per id. Drizzle's sql expands an array into a list of
+      // placeholders, so ANY(<array>::int[]) became a record cast to int[] and
+      // failed every confirmation on an order with a PFI.
       const early = await tx.execute(sql`
         SELECT l.txn_date, p.collections_open_from, p.pfi_number
           FROM bank_statement_lines l
           JOIN pfis p ON p.id = ${order.pfiId}
-         WHERE l.id = ANY(${lineIds.map(Number)}::int[])
+         WHERE l.id IN (${sql.join(lineIds.map((id) => sql`${Number(id)}`), sql`, `)})
            AND p.collections_open_from IS NOT NULL
            AND l.txn_date < p.collections_open_from`);
       const rows = early?.rows ?? early ?? [];
