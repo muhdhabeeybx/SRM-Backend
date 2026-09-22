@@ -319,6 +319,8 @@ const bankAccountRepo = {
       lpgStationIds = [],
       usage = [],
       notes = "",
+      pfiIds = [],
+      pfiAssignedAt = {},
     } = data;
 
     const cleanUsage = Array.isArray(usage)
@@ -336,6 +338,26 @@ const bankAccountRepo = {
       : [];
     const jsonStationIds = JSON.stringify(numericStationIds);
 
+    /*
+      The cargoes this account collects for, and when each was attached.
+
+      Both were missing from this INSERT and from the UPDATE below, while the
+      controller had been deriving and passing them since PFIs were introduced.
+      So assigning a PFI answered 200 with nothing written — the request was
+      valid, the controller did its work, and the statement it ended in simply
+      did not mention the column. See the same shape of bug on `usage` in
+      schemas/misc.schema.js.
+    */
+    const numericPfiIds = Array.isArray(pfiIds)
+      ? [...new Set(pfiIds.map((i) => Number(i)).filter((i) => !isNaN(i) && i > 0))]
+      : [];
+    const jsonPfiIds = JSON.stringify(numericPfiIds);
+    const jsonAssignedAt = JSON.stringify(
+      pfiAssignedAt && typeof pfiAssignedAt === "object" && !Array.isArray(pfiAssignedAt)
+        ? pfiAssignedAt
+        : {}
+    );
+
     const finalBankCode = resolveBankCode(bankName, bankCode);
 
     if (isDefault) {
@@ -352,6 +374,8 @@ const bankAccountRepo = {
         currency,
         status,
         is_default,
+        pfi_ids,
+        pfi_assigned_at,
         depot_ids,
         lpg_station_ids,
         usage,
@@ -367,6 +391,8 @@ const bankAccountRepo = {
         ${currency},
         ${status},
         ${isDefault},
+        ${jsonPfiIds}::jsonb,
+        ${jsonAssignedAt}::jsonb,
         ${jsonDepotIds}::jsonb,
         ${jsonStationIds}::jsonb,
         ${jsonUsage}::jsonb,
@@ -416,6 +442,8 @@ const bankAccountRepo = {
     const currency = data.currency !== undefined ? data.currency : existing.currency;
     const status = data.status !== undefined ? data.status : existing.status;
     const isDefault = data.isDefault !== undefined ? Boolean(data.isDefault) : existing.isDefault;
+    const pfiIds = data.pfiIds !== undefined ? data.pfiIds : existing.pfiIds;
+    const pfiAssignedAt = data.pfiAssignedAt !== undefined ? data.pfiAssignedAt : existing.pfiAssignedAt;
     const depotIds = data.depotIds !== undefined ? data.depotIds : existing.depotIds;
     const lpgStationIds = data.lpgStationIds !== undefined ? data.lpgStationIds : existing.lpgStationIds;
     const usage = data.usage !== undefined ? data.usage : existing.usage;
@@ -425,6 +453,16 @@ const bankAccountRepo = {
       ? [...new Set(usage.map((u) => String(u).trim()).filter(Boolean))]
       : [];
     const jsonUsage = JSON.stringify(cleanUsage);
+
+    const numericPfiIds = Array.isArray(pfiIds)
+      ? [...new Set(pfiIds.map((i) => Number(i)).filter((i) => !isNaN(i) && i > 0))]
+      : [];
+    const jsonPfiIds = JSON.stringify(numericPfiIds);
+    const jsonAssignedAt = JSON.stringify(
+      pfiAssignedAt && typeof pfiAssignedAt === "object" && !Array.isArray(pfiAssignedAt)
+        ? pfiAssignedAt
+        : {}
+    );
 
     const numericDepotIds = Array.isArray(depotIds)
       ? depotIds.map((i) => Number(i)).filter((i) => !isNaN(i))
@@ -454,6 +492,8 @@ const bankAccountRepo = {
         currency = ${currency},
         status = ${status},
         is_default = ${isDefault},
+        pfi_ids = ${jsonPfiIds}::jsonb,
+        pfi_assigned_at = ${jsonAssignedAt}::jsonb,
         depot_ids = ${jsonDepotIds}::jsonb,
         lpg_station_ids = ${jsonStationIds}::jsonb,
         usage = ${jsonUsage}::jsonb,
