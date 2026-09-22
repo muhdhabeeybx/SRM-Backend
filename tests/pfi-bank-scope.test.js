@@ -247,9 +247,22 @@ describe("PFI bank scope", () => {
     await scope.assertAccountServesOrder({ pfiId: pfiA }, accountA2);
   });
 
-  test("a PFI with no account, or an order with no PFI, is not held to one", async (t) => {
+  /**
+   * The two cases look alike and are not: an order with no PFI has no cargo to
+   * be held to, while a PFI with no account is a cargo somebody has not
+   * finished setting up. The second used to accept any account in the company,
+   * which is failing open on exactly the PFIs least ready to take money.
+   */
+  test("a PFI with no account refuses outright, and says what to fix", async (t) => {
     if (!ready) return t.skip("fixtures unavailable");
-    await scope.assertAccountServesOrder({ pfiId: pfiBare }, accountB);
+    await assert.rejects(
+      () => scope.assertAccountServesOrder({ pfiId: pfiBare }, accountB),
+      (e) => e.status === 409 && /No bank account is assigned/.test(e.message),
+    );
+  });
+
+  test("an order with no PFI is not held to one", async (t) => {
+    if (!ready) return t.skip("fixtures unavailable");
     await scope.assertAccountServesOrder({ pfiId: null }, accountB);
   });
 
