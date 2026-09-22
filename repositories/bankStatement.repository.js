@@ -123,12 +123,12 @@ const paymentReference = (ref) => {
  * arrives attached to a charge, and the charge terms below already catch that
  * ("***RSVL NIP CHARGE + VAT").
  *
- * `RSVL` is how the bank actually writes a reversal — not `RVSL`, which is the
- * transposition everyone reaches for first. Both are matched, and so is the
- * spelt-out word, because the marker is worth being generous about: every
- * reversal seen on this account so far is prefixed `***RSVL`.
+ * `RSVL` is how the bank usually writes a reversal — not `RVSL`, which is the
+ * transposition everyone reaches for first — and a maintenance-fee reversal on
+ * 5 Aug 2026 came through as `REVSL:`. All three are matched, and so is the
+ * spelt-out word, because the marker is worth being generous about.
  */
-const REVERSAL = /\b(rsvl|rvsl|reversal|reversed)\b/i;
+const REVERSAL = /\b(rsvl|rvsl|revsl|reversal|reversed)\b/i;
 const BANK_FEE = /\b(charge|charges|chrg|commission|levy)\b|\bstamp duty\b|\bsms alert\b|\bmaintenance fee\b|\baccount maintenance\b/i;
 
 /**
@@ -810,5 +810,9 @@ const bankStatementRepo = {
     return { matched: rows.length, ids: rows.map((r) => r.id) };
   },
 };
+
+// The upload's own rule, exported so a cleanup of rows that predate it asks
+// exactly the same question rather than a copy that could drift.
+bankStatementRepo.bankOwnEntry = bankOwnEntry;
 
 module.exports = bankStatementRepo;

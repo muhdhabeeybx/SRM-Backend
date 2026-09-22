@@ -51,6 +51,7 @@ describe("bank statement upload — the bank's own entries are left out", () => 
     row("***RSVL NIP CHARGE + VAT", 53.75),
     row("***RSVL FGN Stamp Duty//NIP CR/MOB/PAYSTACK CHECKOUT", 50),
     row("RVSL NIP TRANSFER", 18131380),
+    row("REVSL:TRANSFER RETURNED 05-08-2026", 14609068.4),
     row("NIP CHARGE + VAT", 53.75),
     row("FGN Stamp Duty", 50),
     row("SMS ALERT CHARGE", 400),
