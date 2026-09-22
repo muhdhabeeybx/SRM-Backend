@@ -402,12 +402,39 @@ const transferOverpayment = async ({ from, to, actor = "" }) => {
   };
 };
 
+/**
+ * Delete a sale, and give back the bank credit it claimed.
+ *
+ * A payment matched off a statement marks that line MATCHED and points it at
+ * the sale. Deleting the sale left the line MATCHED and pointing at a row
+ * that no longer exists, so the credit could never be claimed again: the only
+ * way to fix a payment matched to the wrong truck — delete it and re-match —
+ * quietly destroyed the credit instead.
+ *
+ * Releasing it is the whole reason this is a transaction. A line freed
+ * without its sale being deleted would be claimable twice.
+ */
 const deleteById = async (id) => {
-  const [row] = await db
-    .delete(deliverySales)
-    .where(eq(deliverySales.id, id))
-    .returning();
-  return row || null;
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .delete(deliverySales)
+      .where(eq(deliverySales.id, id))
+      .returning();
+    if (!row) return null;
+
+    if (row.statementLineId != null) {
+      await tx
+        .update(bankStatementLines)
+        .set({
+          status: "UNMATCHED",
+          matchedDeliverySaleId: null,
+          matchedBy: null,
+          matchedAt: null,
+        })
+        .where(eq(bankStatementLines.id, row.statementLineId));
+    }
+    return row;
+  });
 };
 
 module.exports = {
