@@ -495,22 +495,6 @@ async function placeOrder({
    * }
    * --------------------------------------------------------------------- */
 
-  // The account the customer pays into is the depot's own bank account, set
-  // up by an admin on the dashboard (Bank Accounts, linked to this depot) —
-  // not a per-customer virtual account. Every order at this depot shows the
-  // same account; the default one wins when more than one is linked.
-  const depotBankAccounts = await bankAccountRepo.findAll({ depotId: depot.id, status: "Active" });
-  const depotBankAccount = depotBankAccounts.find((a) => a.isDefault) || depotBankAccounts[0];
-  if (!depotBankAccount) {
-    throw httpError(
-      400,
-      "No payment account has been set up for this depot yet. Please contact support."
-    );
-  }
-  const virtualAccountNumber = depotBankAccount.accountNumber;
-  const virtualAccountBank = depotBankAccount.bankName;
-  const virtualAccountName = depotBankAccount.accountName;
-
   const product = await productRepo.findById(productId);
   if (!product) {
     throw httpError(404, "Product not found");
@@ -553,6 +537,44 @@ async function placeOrder({
   // "Insufficient stock in depot", which made a freshly priced depot
   // unorderable even though the site offered it.
   const { allocations } = await findPfiForOrder(depotId, productId, quantity);
+
+  /**
+   * The account the customer is told to pay into.
+   *
+   * It is the PFI's account where the order has a PFI and that PFI has one
+   * assigned, and the depot's otherwise. It used to be the depot's always —
+   * "the default one wins when more than one is linked" — which is why an
+   * order on PFI/47/26 at Calabar quoted Signature Bank while the cargo
+   * collects into Soroman Calabar's Zenith account.
+   *
+   * That was not only untidy, it was unworkable: a payment on a PFI's order
+   * can only be MATCHED from one of that PFI's own accounts (see
+   * lib/pfiBankScope, rule 1). So the order named an account the money could
+   * arrive in and then never be reconciled from — the screen and the matcher
+   * disagreeing about the same order, which is the state those two layers
+   * exist to prevent.
+   *
+   * Chosen from the depot's own list rather than by querying afresh, so an
+   * account assigned to the PFI but not serving this depot cannot be quoted
+   * here. Within the candidates the default still wins.
+   */
+  const depotBankAccounts = await bankAccountRepo.findAll({ depotId: depot.id, status: "Active" });
+  const orderPfiId = allocations[0]?.pfi?.id ?? null;
+  const pfiBankAccounts = orderPfiId == null
+    ? []
+    : depotBankAccounts.filter((a) =>
+        (Array.isArray(a.pfiIds) ? a.pfiIds : []).map(Number).includes(Number(orderPfiId)));
+  const candidates = pfiBankAccounts.length > 0 ? pfiBankAccounts : depotBankAccounts;
+  const depotBankAccount = candidates.find((a) => a.isDefault) || candidates[0];
+  if (!depotBankAccount) {
+    throw httpError(
+      400,
+      "No payment account has been set up for this depot yet. Please contact support."
+    );
+  }
+  const virtualAccountNumber = depotBankAccount.accountNumber;
+  const virtualAccountBank = depotBankAccount.bankName;
+  const virtualAccountName = depotBankAccount.accountName;
 
   // --- Pickup truck declaration ---------------------------------------------
   // A pickup customer brings their own trucks and may split the order across
