@@ -224,6 +224,38 @@ const depotLeaderboard = async ({ from, to }) => {
 };
 
 /**
+ * The one member of staff whose actions are kept off this feed: staff #1,
+ * the owner's own superadmin account. Asked for directly, and keyed on the id
+ * rather than on the super_admin role — there are four superadmins and the
+ * other three stay on the feed.
+ *
+ * Two things this is NOT:
+ *
+ *   It is not un-recording. Every row is still written to audit_logs exactly
+ *   as before, and anything reading that table directly — an export, a query,
+ *   a per-record history — still sees all of it. This hides them from the feed
+ *   the dashboard and the activity page render, and deleting the line below
+ *   brings them straight back.
+ *
+ *   It is not total. A price change of his still shows, per the exception
+ *   below, because that is the one act on this account worth everyone seeing.
+ *
+ * Worth knowing when reading the page: of his 23,600 rows, 22,913 are the same
+ * delivery_ledger_settings update repeating, which is most of what this takes
+ * off the screen.
+ */
+const FEED_HIDDEN_STAFF_ID = 1;
+
+/**
+ * What still shows from that account: anything whose action names a price.
+ *
+ * Matched on the name rather than listed out, so a price action added later
+ * is visible by default rather than hidden by an allowlist nobody remembers
+ * to update. Today it catches depot.prices_zeroed_all and order.priced.
+ */
+const PRICE_ACTION = sql`a.action ILIKE '%pric%'`;
+
+/**
  * What people have been doing.
  *
  * The overview read `audit_events`, which holds 182 rows. Every business
@@ -236,6 +268,12 @@ const depotLeaderboard = async ({ from, to }) => {
  */
 const activityFeed = async ({ limit = 10, offset = 0, entityType, action, from, to } = {}) => {
   const conditions = [sql`TRUE`];
+  // IS DISTINCT FROM, not <>: a row with no staff actor at all has a NULL
+  // here, and `NULL <> 1` is NULL, which would quietly drop every customer
+  // and system action from the feed along with his.
+  conditions.push(
+    sql`(a.actor_staff_id IS DISTINCT FROM ${FEED_HIDDEN_STAFF_ID} OR ${PRICE_ACTION})`,
+  );
   if (entityType) conditions.push(sql`a.entity_type = ${entityType}`);
   if (action) conditions.push(sql`a.action ILIKE ${`%${action}%`}`);
   if (from) conditions.push(sql`a.created_at >= ${from}`);
