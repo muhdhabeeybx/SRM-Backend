@@ -34,3 +34,8 @@ daily-report-*.html
 # Rollback snapshots written beside the repair script that took them. Same
 # reason as scripts/backups/ above: production rows, including staff names.
 scripts/rollback-*.json
+
+# Pre-delete backups, written by the clear/fix scripts before they remove
+# anything. Whole rows — customer names, naira, bank references — so they are
+# the one copy that must never leave the machine that made it.
+scripts/backup-*.json
