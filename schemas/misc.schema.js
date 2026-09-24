@@ -474,6 +474,28 @@ const expenseBase = {
   // to slip an overhead into a batch's landed cost.
   pfi_id: id("PFI").optional().nullable(),
   pfiId: id("PFI").optional().nullable(),
+  /**
+   * Who the cost was incurred FOR, when it was not the company at large: a
+   * filling station or an LPG plant, never both. The controller checks the id
+   * exists and that a station really is one; this only lets the field through.
+   *
+   * Beside a subject, `pfi_id` above stops meaning "this is a cargo cost" and
+   * starts meaning "which of that station's loads it sits under". See
+   * migration 0055.
+   *
+   * Accepted under four spellings because the front end and the register do
+   * not agree on one, and a name this layer does not know is dropped before
+   * the controller ever sees it — which is exactly how the first cut of this
+   * silently stored nothing.
+   */
+  delivery_customer_id: id("Station").optional().nullable(),
+  deliveryCustomerId: id("Station").optional().nullable(),
+  station_id: id("Station").optional().nullable(),
+  stationId: id("Station").optional().nullable(),
+  lpg_station_id: id("Plant").optional().nullable(),
+  lpgStationId: id("Plant").optional().nullable(),
+  plant_id: id("Plant").optional().nullable(),
+  plantId: id("Plant").optional().nullable(),
   vendor: optionalString("Vendor", 255),
   // Set when the requester picked (or saved) an entry from the vendor list;
   // `vendor` above still carries the name — see expense.controller.js.

@@ -416,6 +416,10 @@ const listExpenses = async ({
    */
   glSubgroup,
   pfiId,
+  /** One filling station — a delivery_customers id. */
+  stationId,
+  /** One LPG plant — an lpg_stations id. */
+  plantId,
   vendorId,
   bank,
   type,
@@ -467,11 +471,15 @@ const listExpenses = async ({
   if (onlySubmitterId == null && scopeUser && !scopeUser.canViewAllLocations) {
     const { depotIds = [], lpgStationIds = [], pfiIds = [] } = scopeUser.scope || {};
     base.push(client`(
-      e.pfi_id IS NULL
+      (e.pfi_id IS NULL AND e.lpg_station_id IS NULL)
       OR e.pfi_id = ANY(${pfiIds})
       OR e.pfi_id IN (
         SELECT id FROM pfis WHERE location_id = ANY(${depotIds}) OR lpg_station_id = ANY(${lpgStationIds})
       )
+      -- A plant expense belongs to a plant the caller may or may not hold, so
+      -- it is narrowed the same way a cargo is. A station expense has no
+      -- location to test and passes like a general overhead does.
+      OR e.lpg_station_id = ANY(${lpgStationIds})
     )`);
   }
 
@@ -491,8 +499,21 @@ const listExpenses = async ({
   if (pfiId && pfiId !== "all") base.push(client`e.pfi_id = ${Number(pfiId)}`);
   if (vendorId && vendorId !== "all") base.push(client`e.vendor_id = ${Number(vendorId)}`);
   if (bank) base.push(client`LOWER(e.bank_paid_from) = LOWER(${bank})`);
-  if (type === "pfi") base.push(client`e.pfi_id IS NOT NULL`);
-  if (type === "general") base.push(client`e.pfi_id IS NULL`);
+  /*
+   * What an expense is AGAINST, which is derived from its links and never
+   * stored — see migration 0055. A station or plant expense may also carry a
+   * pfi_id saying which of that subject's loads it sits under, so "cargo"
+   * cannot simply be "has a pfi_id" any more: it is a pfi_id and no subject.
+   */
+  const noSubject = client`e.delivery_customer_id IS NULL AND e.lpg_station_id IS NULL`;
+  if (type === "pfi") base.push(client`e.pfi_id IS NOT NULL AND ${noSubject}`);
+  if (type === "general") base.push(client`e.pfi_id IS NULL AND ${noSubject}`);
+  if (type === "station") base.push(client`e.delivery_customer_id IS NOT NULL`);
+  if (type === "plant") base.push(client`e.lpg_station_id IS NOT NULL`);
+  if (stationId && stationId !== "all") {
+    base.push(client`e.delivery_customer_id = ${Number(stationId)}`);
+  }
+  if (plantId && plantId !== "all") base.push(client`e.lpg_station_id = ${Number(plantId)}`);
   if (dateFrom) base.push(client`e.expense_date >= ${dateFrom}`);
   if (dateTo) base.push(client`e.expense_date <= ${dateTo}`);
   // A malformed month is ignored rather than erroring — it arrives from a URL.
@@ -526,6 +547,7 @@ const listExpenses = async ({
   const [rows, [totals], [counts], banks, submitters] = await Promise.all([
     client`
       SELECT e.*, ${GL_COLS}, c.is_system_category, p.pfi_number,
+             dc.name AS station_name, ls.name AS plant_name,
              sub.first_name || ' ' || sub.surname AS submitted_by_name,
              rev.first_name || ' ' || rev.surname AS reviewed_by_name,
              (SELECT COUNT(*)::int FROM pfi_expense_attachments a WHERE a.expense_id = e.id)
@@ -533,6 +555,8 @@ const listExpenses = async ({
       FROM pfi_expenses e
       JOIN expense_categories c ON c.id = e.category_id
       LEFT JOIN pfis p ON p.id = e.pfi_id
+      LEFT JOIN delivery_customers dc ON dc.id = e.delivery_customer_id
+      LEFT JOIN lpg_stations ls ON ls.id = e.lpg_station_id
       LEFT JOIN staff sub ON sub.id = COALESCE(e.added_by, e.recorded_by)
       LEFT JOIN staff rev ON rev.id = e.reviewed_by
       WHERE ${rowClause}

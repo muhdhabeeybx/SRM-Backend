@@ -17,6 +17,8 @@ const { pfis } = require("./pfi");
 const { orders } = require("./order");
 const { staff } = require("./staff");
 const { vendors } = require("./vendor");
+const { deliveryCustomers } = require("./deliveryCustomer");
+const { lpgStations } = require("./lpgStation");
 
 /**
  * The chart of accounts. A category is a GL account: it carries the code and
@@ -81,6 +83,23 @@ const pfiExpenses = pgTable(
     // total groups by, and it must not move afterwards. Only a `pfi_direct`
     // account may set it — see the controller.
     pfiId: integer("pfi_id").references(() => pfis.id, { onDelete: "set null" }),
+    /**
+     * The station or plant this cost was incurred for — at most one of them.
+     *
+     * A filling station is a delivery_customers row; an LPG plant has its own
+     * table, hence two columns. Either set makes this a station or plant
+     * expense, and `pfiId` beside it then says which of that subject's loads
+     * it sits under rather than making it a cargo expense.
+     *
+     * This is money SOROMAN pays a vendor for that station. What the station
+     * itself spends out of pump takings is delivery_sales.expenses_amount,
+     * which is a debit against the station — the opposite direction, and
+     * deliberately a different store. See migration 0055.
+     */
+    deliveryCustomerId: integer("delivery_customer_id")
+      .references(() => deliveryCustomers.id, { onDelete: "set null" }),
+    lpgStationId: integer("lpg_station_id")
+      .references(() => lpgStations.id, { onDelete: "set null" }),
     categoryId: integer("category_id")
       .references(() => expenseCategories.id, { onDelete: "restrict" })
       .notNull(),
@@ -219,6 +238,15 @@ const pfiExpenses = pgTable(
   },
   (table) => [
     index("pfi_expenses_pfi_idx").on(table.pfiId),
+    index("pfi_expenses_delivery_customer_idx").on(table.deliveryCustomerId),
+    index("pfi_expenses_lpg_station_idx").on(table.lpgStationId),
+    // A row cannot be two subjects at once: a station expense and a plant
+    // expense are different registers, and a row claiming both is counted in
+    // each. See migration 0055.
+    check(
+      "pfi_expenses_one_subject",
+      sql`${table.deliveryCustomerId} IS NULL OR ${table.lpgStationId} IS NULL`,
+    ),
     index("pfi_expenses_category_idx").on(table.categoryId),
     index("pfi_expenses_date_idx").on(table.expenseDate),
     index("pfi_expenses_status_idx").on(table.status),

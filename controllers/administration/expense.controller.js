@@ -69,6 +69,58 @@ const resolveBooking = async (categoryId, rawPfiId) => {
 };
 
 /**
+ * What this cost was incurred FOR, when it was not the company at large.
+ *
+ * A filling station is a delivery_customers row and an LPG plant is an
+ * lpg_stations row, so the caller names at most one of them. Both at once is
+ * refused rather than silently preferring one: the two are different
+ * registers with different owners, and a row claiming both would be counted
+ * in each. The database carries the same rule as a CHECK — see migration 0055.
+ *
+ * Nothing here touches `pfi_id`. A station expense may also name a PFI, and
+ * that says which of the station's loads the cost sits under; resolveBooking
+ * above is what decides whether a PFI is required at all, and it asks the
+ * chart of accounts, not the subject.
+ */
+const resolveSubject = async (body) => {
+  const raw = (...names) => {
+    for (const n of names) {
+      const v = body[n];
+      if (v !== undefined && v !== null && v !== "") return v;
+    }
+    return null;
+  };
+  const stationRaw = raw("delivery_customer_id", "deliveryCustomerId", "station_id", "stationId");
+  const plantRaw = raw("lpg_station_id", "lpgStationId", "plant_id", "plantId");
+
+  if (stationRaw !== null && plantRaw !== null) {
+    throw httpErr(400, "An expense is for a station or a plant, not both");
+  }
+
+  if (stationRaw !== null) {
+    const id = Number(stationRaw);
+    if (!Number.isFinite(id) || id <= 0) throw httpErr(400, "Station not found");
+    const [station] = await client`
+      SELECT id, customer_type FROM delivery_customers WHERE id = ${id} LIMIT 1`;
+    if (!station) throw httpErr(400, "Station not found");
+    if (station.customer_type !== "filling_station") {
+      throw httpErr(400, "That customer is not a filling station");
+    }
+    return { deliveryCustomerId: id, lpgStationId: null };
+  }
+
+  if (plantRaw !== null) {
+    const id = Number(plantRaw);
+    if (!Number.isFinite(id) || id <= 0) throw httpErr(400, "Plant not found");
+    const [plant] = await client`SELECT id FROM lpg_stations WHERE id = ${id} LIMIT 1`;
+    if (!plant) throw httpErr(400, "Plant not found");
+    return { deliveryCustomerId: null, lpgStationId: id };
+  }
+
+  return { deliveryCustomerId: null, lpgStationId: null };
+};
+
+/**
  * The invoice arithmetic, filled in where the caller left it out.
  *
  * Nothing here is forced: a figure that arrives is trusted, because an invoice
@@ -349,6 +401,8 @@ const listExpenses = asyncHandler(async (req, res) => {
     glGroup: req.query.group,
     glSubgroup: req.query.subgroup,
     pfiId: req.query.pfi,
+    stationId: req.query.station,
+    plantId: req.query.plant,
     vendorId: req.query.vendor,
     bank: req.query.bank,
     submitterId: req.query.submitter,
@@ -428,8 +482,12 @@ const createExpense = asyncHandler(async (req, res) => {
     ? paymentFor(req.body, { amount: String(amount), currency: money_.currency })
     : null;
 
+  const subject = await resolveSubject(req.body);
+
   const expense = await pfiExpenseRepo.createExpense({
     pfi_id: pfiId,
+    delivery_customer_id: subject.deliveryCustomerId,
+    lpg_station_id: subject.lpgStationId,
     category_id: Number(categoryId),
     expense_date: parseDate(req.body.expense_date ?? req.body.expenseDate) || new Date().toISOString(),
     vendor: vendorName,
@@ -525,6 +583,28 @@ const updateExpense = asyncHandler(async (req, res) => {
     const { pfiId } = await resolveBooking(effectiveCategory, effectivePfi);
     data.category_id = Number(effectiveCategory);
     data.pfi_id = pfiId;
+  }
+
+  /*
+   * The subject moves on its own.
+   *
+   * Separate from the block above because the chart decides the cargo and the
+   * caller decides the subject; they constrain nothing in each other. Only
+   * touched when the body mentions one of them, so an edit to the amount
+   * alone cannot quietly unhook an expense from its station.
+   *
+   * Naming either one and leaving it empty is how a subject is REMOVED —
+   * resolveSubject returns nulls for both — which is the only way to turn a
+   * station expense back into an overhead.
+   */
+  const mentionsSubject = [
+    "delivery_customer_id", "deliveryCustomerId", "station_id", "stationId",
+    "lpg_station_id", "lpgStationId", "plant_id", "plantId",
+  ].some((k) => req.body[k] !== undefined);
+  if (mentionsSubject) {
+    const subject = await resolveSubject(req.body);
+    data.delivery_customer_id = subject.deliveryCustomerId;
+    data.lpg_station_id = subject.lpgStationId;
   }
 
   if (req.body.amount !== undefined) {
@@ -647,7 +727,8 @@ const updateExpense = asyncHandler(async (req, res) => {
 
   // Only these fields are worth a diff; the rest is noise in the trail.
   const TRACKED = [
-    "expense_date", "category_id", "pfi_id", "vendor", "vendor_id", "description",
+    "expense_date", "category_id", "pfi_id", "delivery_customer_id", "lpg_station_id",
+    "vendor", "vendor_id", "description",
     "amount", "bank_paid_from", "receipt_reference",
     "tin_number", "invoice_number", "amount_ex_vat", "vat_amount",
     "invoice_amount", "wht_deduction", "wht_rate",
