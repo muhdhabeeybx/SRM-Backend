@@ -83,41 +83,70 @@ const resolveBooking = async (categoryId, rawPfiId) => {
  * chart of accounts, not the subject.
  */
 const resolveSubject = async (body) => {
+  /**
+   * One name may carry a list. The same bill covers six stations often
+   * enough — a servicing round, a year's insurance — and raising it six
+   * times is six chances for the figures to drift apart.
+   */
   const raw = (...names) => {
+    const out = [];
     for (const n of names) {
       const v = body[n];
-      if (v !== undefined && v !== null && v !== "") return v;
+      if (v === undefined || v === null || v === "") continue;
+      for (const one of Array.isArray(v) ? v : [v]) {
+        if (one !== undefined && one !== null && one !== "") out.push(one);
+      }
     }
-    return null;
+    // The same station named twice would take two shares of the bill.
+    return [...new Set(out.map((x) => Number(x)))];
   };
-  const stationRaw = raw("delivery_customer_id", "deliveryCustomerId", "station_id", "stationId");
-  const plantRaw = raw("lpg_station_id", "lpgStationId", "plant_id", "plantId");
+  const stations = raw("delivery_customer_id", "deliveryCustomerId", "station_id", "stationId",
+    "station_ids", "stationIds", "delivery_customer_ids", "deliveryCustomerIds");
+  const plants = raw("lpg_station_id", "lpgStationId", "plant_id", "plantId",
+    "lpg_station_ids", "lpgStationIds", "plant_ids", "plantIds");
 
-  if (stationRaw !== null && plantRaw !== null) {
-    throw httpErr(400, "An expense is for a station or a plant, not both");
+  if (stations.length && plants.length) {
+    throw httpErr(400, "An expense is for stations or plants, not both");
   }
 
-  if (stationRaw !== null) {
-    const id = Number(stationRaw);
-    if (!Number.isFinite(id) || id <= 0) throw httpErr(400, "Station not found");
-    const [station] = await client`
-      SELECT id, customer_type FROM delivery_customers WHERE id = ${id} LIMIT 1`;
-    if (!station) throw httpErr(400, "Station not found");
-    if (station.customer_type !== "filling_station") {
+  if (stations.length) {
+    if (stations.some((id) => !Number.isFinite(id) || id <= 0)) {
+      throw httpErr(400, "Station not found");
+    }
+    const found = await client`
+      SELECT id, customer_type FROM delivery_customers WHERE id = ANY(${stations})`;
+    if (found.length !== stations.length) throw httpErr(400, "Station not found");
+    if (found.some((r) => r.customer_type !== "filling_station")) {
       throw httpErr(400, "That customer is not a filling station");
     }
-    return { deliveryCustomerId: id, lpgStationId: null };
+    return stations.map((id) => ({ deliveryCustomerId: id, lpgStationId: null }));
   }
 
-  if (plantRaw !== null) {
-    const id = Number(plantRaw);
-    if (!Number.isFinite(id) || id <= 0) throw httpErr(400, "Plant not found");
-    const [plant] = await client`SELECT id FROM lpg_stations WHERE id = ${id} LIMIT 1`;
-    if (!plant) throw httpErr(400, "Plant not found");
-    return { deliveryCustomerId: null, lpgStationId: id };
+  if (plants.length) {
+    if (plants.some((id) => !Number.isFinite(id) || id <= 0)) {
+      throw httpErr(400, "Plant not found");
+    }
+    const found = await client`SELECT id FROM lpg_stations WHERE id = ANY(${plants})`;
+    if (found.length !== plants.length) throw httpErr(400, "Plant not found");
+    return plants.map((id) => ({ deliveryCustomerId: null, lpgStationId: id }));
   }
 
-  return { deliveryCustomerId: null, lpgStationId: null };
+  return [{ deliveryCustomerId: null, lpgStationId: null }];
+};
+
+/**
+ * A total divided into `n` shares that add back up to it, exactly.
+ *
+ * In kobo, because a third of ₦100,000 is ₦33,333.333… and three of those
+ * rounded is ₦99,999.99 — a naira short of the bill, on every odd split, for
+ * ever. The odd kobo go to the earliest shares, so the parts always sum to
+ * the whole and the same rows carry the remainder in every field.
+ */
+const splitEvenly = (total, n) => {
+  const kobo = Math.round(Number(total) * 100);
+  const base = Math.trunc(kobo / n);
+  const over = kobo - base * n;
+  return Array.from({ length: n }, (_, i) => (base + (i < over ? 1 : 0)) / 100);
 };
 
 /**
@@ -478,11 +507,47 @@ const createExpense = asyncHandler(async (req, res) => {
   }
 
   const money_ = currencyFor(req.body);
-  const payment = directToPaid
-    ? paymentFor(req.body, { amount: String(amount), currency: money_.currency })
-    : null;
 
-  const subject = await resolveSubject(req.body);
+  const subjects = await resolveSubject(req.body);
+
+  /*
+   * One bill, one share each.
+   *
+   * The invoice covers all of them, so it is entered once and divided rather
+   * than retyped per station — retyping is how six rows end up adding to
+   * something other than the bill. `splitEvenly` is exact to the kobo.
+   *
+   * The ex-VAT figure is split the same way and the VAT, invoice total and
+   * withholding are then DERIVED per row from it, rather than being split
+   * themselves. Splitting each of them independently breaks the arithmetic on
+   * individual rows — a row whose VAT and ex-VAT no longer add up to its
+   * invoice total is a row an auditor will stop at — whereas deriving keeps
+   * every row internally consistent and the set adding up to the bill.
+   */
+  const shares = splitEvenly(amount, subjects.length);
+  const exVatRaw = req.body.amount_ex_vat ?? req.body.amountExVat;
+  const exVatShares = exVatRaw === undefined || exVatRaw === null || exVatRaw === ""
+    ? null
+    : splitEvenly(Number(exVatRaw), subjects.length);
+
+  const created = [];
+  for (const [i, subject] of subjects.entries()) {
+    const share = shares[i];
+    const figures = subjects.length === 1
+      ? invoiceFigures(req.body)
+      : invoiceFigures({
+          ...req.body,
+          amount_ex_vat: exVatShares ? exVatShares[i] : undefined,
+          amountExVat: undefined,
+          // Derived from this row's ex-VAT and the rate, never carried over
+          // whole from a bill that covered every station.
+          vat_amount: undefined, vatAmount: undefined,
+          invoice_amount: undefined, invoiceAmount: undefined,
+          wht_deduction: undefined, whtDeduction: undefined,
+        });
+    const payment = directToPaid
+      ? paymentFor(req.body, { amount: String(share), currency: money_.currency })
+      : null;
 
   const expense = await pfiExpenseRepo.createExpense({
     pfi_id: pfiId,
@@ -497,9 +562,9 @@ const createExpense = asyncHandler(async (req, res) => {
     description: req.body.description || "",
     // What the vendor is owed, in money_.currency. The naira translation is
     // the database's to derive — see db/migrations/0026.
-    amount: String(amount),
+    amount: String(share),
     ...money_,
-    ...invoiceFigures(req.body),
+    ...figures,
     bank_paid_from: req.body.bank_paid_from ?? req.body.bankPaidFrom ?? "",
     receipt_reference: req.body.receipt_reference ?? req.body.receiptReference ?? "",
     payee_bank_name: req.body.payee_bank_name ?? req.body.payeeBankName ?? "",
@@ -527,6 +592,8 @@ const createExpense = asyncHandler(async (req, res) => {
     added_by: actorId,
   });
 
+    created.push(expense);
+
   await pfiExpenseRepo.writeAudit({
     expenseId: expense.id,
     // Named for what it was, not as an ordinary "created". This is the one
@@ -551,11 +618,17 @@ const createExpense = asyncHandler(async (req, res) => {
       expense, stage: chain.STATUS.PENDING, note: "", actorId, actorName,
     }).catch(() => {});
   }
+  }
 
+  const rows = decorate(created, req.user);
   res.status(201).json({
     success: true,
-    message: "Payment request raised",
-    data: { expense: decorate([expense], req.user)[0] },
+    message: created.length === 1
+      ? "Payment request raised"
+      : `Payment request raised for ${created.length} — ${money_.currency || "NGN"} ${shares[0]} each`,
+    // `expense` stays the first row so every existing caller keeps working;
+    // `expenses` is the whole set for anything that splits.
+    data: { expense: rows[0], expenses: rows },
   });
 });
 
@@ -602,7 +675,16 @@ const updateExpense = asyncHandler(async (req, res) => {
     "lpg_station_id", "lpgStationId", "plant_id", "plantId",
   ].some((k) => req.body[k] !== undefined);
   if (mentionsSubject) {
-    const subject = await resolveSubject(req.body);
+    const subjects = await resolveSubject(req.body);
+    /*
+     * An edit moves ONE row. Splitting is something a new bill does, and a
+     * list here would have to either silently take the first or quietly spawn
+     * rows the caller did not ask to create — so it is refused instead.
+     */
+    if (subjects.length > 1) {
+      throw httpErr(400, "An expense belongs to one station or plant — split it when raising it, not when editing");
+    }
+    const [subject] = subjects;
     data.delivery_customer_id = subject.deliveryCustomerId;
     data.lpg_station_id = subject.lpgStationId;
   }

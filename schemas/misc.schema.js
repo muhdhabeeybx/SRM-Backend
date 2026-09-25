@@ -496,6 +496,18 @@ const expenseBase = {
   lpgStationId: id("Plant").optional().nullable(),
   plant_id: id("Plant").optional().nullable(),
   plantId: id("Plant").optional().nullable(),
+  /**
+   * The same, as a list. One bill covering six stations is raised once and
+   * divided into six rows — see splitEvenly in the controller.
+   */
+  station_ids: z.array(id("Station")).optional().nullable(),
+  stationIds: z.array(id("Station")).optional().nullable(),
+  delivery_customer_ids: z.array(id("Station")).optional().nullable(),
+  deliveryCustomerIds: z.array(id("Station")).optional().nullable(),
+  plant_ids: z.array(id("Plant")).optional().nullable(),
+  plantIds: z.array(id("Plant")).optional().nullable(),
+  lpg_station_ids: z.array(id("Plant")).optional().nullable(),
+  lpgStationIds: z.array(id("Plant")).optional().nullable(),
   vendor: optionalString("Vendor", 255),
   // Set when the requester picked (or saved) an entry from the vendor list;
   // `vendor` above still carries the name — see expense.controller.js.

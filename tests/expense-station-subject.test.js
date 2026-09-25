@@ -37,6 +37,7 @@ let categoryId;
 let stationId;
 let plantId;
 const created = [];
+let station2 = null;
 /** Set when this file had to make its own station, so it can remove it. */
 let madeStation = null;
 
@@ -70,6 +71,12 @@ describe("an expense against a station or a plant", () => {
       `))[0]?.id;
       madeStation = stationId;
     }
+    // A second station, so a bill can be split across two.
+    station2 = rowsOf(await db.execute(sql`
+      INSERT INTO delivery_customers (customer_type, name, phone_number)
+      VALUES ('filling_station', ${`Test Station B ${RUN}`}, ${`0801${RUN}`})
+      RETURNING id
+    `))[0]?.id;
     plantId = rowsOf(await db.execute(sql`
       SELECT id FROM lpg_stations ORDER BY id LIMIT 1
     `))[0]?.id;
@@ -83,6 +90,9 @@ describe("an expense against a station or a plant", () => {
     }
     if (madeStation) {
       await db.execute(sql`DELETE FROM delivery_customers WHERE id = ${madeStation}`);
+    }
+    if (station2) {
+      await db.execute(sql`DELETE FROM delivery_customers WHERE id = ${station2}`);
     }
     await closeDb();
   });
@@ -180,4 +190,125 @@ describe("an expense against a station or a plant", () => {
     const row = await subjectOf(id);
     assert.equal(row.delivery_customer_id, null);
   });
+
+/**
+ * One bill, several stations.
+ *
+ * A servicing round or a year's insurance covers six stations on one invoice.
+ * Raising it six times is six chances for the figures to drift apart, so it
+ * is entered once and divided — and the division has to add back up to the
+ * bill exactly, which is the whole of what these hold down.
+ */
+describe("a bill split across stations", () => {
+  let token2;
+  let category2;
+  let a;
+  let b;
+  const made = [];
+
+  before(async () => {
+    token2 = await staffToken(request, app);
+    category2 = rowsOf(await db.execute(sql`
+      SELECT id FROM expense_categories
+      WHERE gl_group = 'general' AND is_active IS NOT FALSE ORDER BY id LIMIT 1
+    `))[0]?.id;
+    const stations = rowsOf(await db.execute(sql`
+      SELECT id FROM delivery_customers WHERE customer_type = 'filling_station' ORDER BY id DESC LIMIT 2
+    `));
+    a = stations[0]?.id;
+    b = stations[1]?.id;
+  });
+
+  after(async () => {
+    if (made.length) {
+      await db.execute(
+        sql`DELETE FROM pfi_expenses WHERE id IN (${sql.join(made.map((id) => sql`${id}`), sql`, `)})`
+      );
+    }
+  });
+
+  const raiseFor = async (ids, body = {}) => {
+    const res = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${token2}`)
+      .send({ category_id: category2, description: `Split ${RUN}`, station_ids: ids, ...body });
+    for (const e of res.body?.data?.expenses || []) made.push(e.id);
+    return res;
+  };
+
+  test("two stations, one bill, half each", async (t) => {
+    if (!category2 || !a || !b) return t.skip("no seeded category or two stations here");
+
+    const res = await raiseFor([a, b], { amount: 100000 });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.data.expenses.length, 2);
+
+    const amounts = res.body.data.expenses.map((e) => Number(e.amount));
+    assert.deepEqual(amounts, [50000, 50000]);
+    // Each row names its own station, and only its own.
+    const subjects = res.body.data.expenses.map((e) => Number(e.delivery_customer_id));
+    assert.deepEqual([...subjects].sort(), [a, b].sort());
+  });
+
+  test("an odd split still adds back up to the bill", async (t) => {
+    if (!category2 || !a || !b) return t.skip("no seeded category or two stations here");
+
+    // A third of this does not divide into kobo.
+    const res = await raiseFor([a, b], { amount: 100000.01 });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+
+    const amounts = res.body.data.expenses.map((e) => Number(e.amount));
+    const sum = amounts.reduce((x, y) => x + y, 0);
+    assert.equal(Math.round(sum * 100), Math.round(100000.01 * 100));
+    // The odd kobo goes to the first share, never lost.
+    assert.deepEqual(amounts, [50000.01, 50000]);
+  });
+
+  test("the same station twice takes one share, not two", async (t) => {
+    if (!category2 || !a) return t.skip("no seeded category or station here");
+
+    const res = await raiseFor([a, a], { amount: 90000 });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.data.expenses.length, 1);
+    assert.equal(Number(res.body.data.expenses[0].amount), 90000);
+  });
+
+  test("one station in a list behaves exactly as one station", async (t) => {
+    if (!category2 || !a) return t.skip("no seeded category or station here");
+
+    const res = await raiseFor([a], { amount: 45000 });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(res.body.data.expenses.length, 1);
+    assert.equal(Number(res.body.data.expenses[0].amount), 45000);
+    // `expense` stays the first row, so callers that never split still work.
+    assert.equal(res.body.data.expense.id, res.body.data.expenses[0].id);
+  });
+
+  test("a split ex-VAT keeps each row's own arithmetic", async (t) => {
+    if (!category2 || !a || !b) return t.skip("no seeded category or two stations here");
+
+    const res = await raiseFor([a, b], { amount: 107500, amount_ex_vat: 100000 });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+
+    for (const e of res.body.data.expenses) {
+      const exVat = Number(e.amount_ex_vat);
+      const vat = Number(e.vat_amount);
+      const invoice = Number(e.invoice_amount);
+      assert.equal(exVat, 50000);
+      // Derived per row, so the row still adds up on its own.
+      assert.equal(Math.round((exVat + vat) * 100), Math.round(invoice * 100));
+    }
+  });
+
+  test("stations and plants in one request is refused", async (t) => {
+    if (!category2 || !a || !plantId) return t.skip("no seeded subjects here");
+
+    const res = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${token2}`)
+      .send({ category_id: category2, amount: 1000, station_ids: [a], plant_ids: [plantId] });
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /not both/i);
+  });
+});
 });
