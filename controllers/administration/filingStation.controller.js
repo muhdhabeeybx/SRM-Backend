@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const { deliveryCustomerRepo } = require("../../repositories");
+const { scopedStationIds, stationVisible } = require("../../lib/stationScope");
 
 const getFilingStations = asyncHandler(async (req, res) => {
   const { search, page = 1, limit = 50 } = req.query;
@@ -7,6 +8,8 @@ const getFilingStations = asyncHandler(async (req, res) => {
   const result = await deliveryCustomerRepo.findAll({
     type: "filling_station",
     search,
+    // A person assigned stations sees only those — lib/stationScope.js.
+    ids: scopedStationIds(req.user),
     page,
     limit,
   });
@@ -32,7 +35,7 @@ const getFilingStations = asyncHandler(async (req, res) => {
 const getFilingStationById = asyncHandler(async (req, res) => {
   const station = await deliveryCustomerRepo.findById(req.params.id);
 
-  if (!station || station.customerType !== "filling_station") {
+  if (!station || station.customerType !== "filling_station" || !stationVisible(req.user, station.id)) {
     return res.status(404).json({ success: false, message: "Filing station not found" });
   }
 
@@ -91,7 +94,7 @@ const createFilingStation = asyncHandler(async (req, res) => {
 const updateFilingStation = asyncHandler(async (req, res) => {
   const station = await deliveryCustomerRepo.findById(req.params.id);
 
-  if (!station || station.customerType !== "filling_station") {
+  if (!station || station.customerType !== "filling_station" || !stationVisible(req.user, station.id)) {
     return res.status(404).json({ success: false, message: "Filing station not found" });
   }
 
@@ -125,7 +128,7 @@ const updateFilingStation = asyncHandler(async (req, res) => {
 const deleteFilingStation = asyncHandler(async (req, res) => {
   const station = await deliveryCustomerRepo.findById(req.params.id);
 
-  if (!station || station.customerType !== "filling_station") {
+  if (!station || station.customerType !== "filling_station" || !stationVisible(req.user, station.id)) {
     return res.status(404).json({ success: false, message: "Filing station not found" });
   }
 

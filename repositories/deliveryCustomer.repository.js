@@ -35,6 +35,8 @@ const findAll = async ({
   type,
   search,
   status,
+  /** Only these rows — a station-assigned person's stations. Null for all. */
+  ids = null,
   page = 1,
   limit = 50,
 } = {}) => {
@@ -50,6 +52,10 @@ const findAll = async ({
 
   if (status) {
     conditions.push(eq(deliveryCustomers.status, status));
+  }
+
+  if (Array.isArray(ids)) {
+    conditions.push(ids.length ? inArray(deliveryCustomers.id, ids) : sql`false`);
   }
 
   if (search) {

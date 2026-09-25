@@ -222,6 +222,7 @@ const staffBase = {
   depot_ids: z.array(z.union([id("Depot id"), z.string(), z.number()])).optional(),
   lpg_station_ids: z.array(z.union([id("LPG station id"), z.string(), z.number()])).optional(),
   pfi_ids: z.array(z.union([id("PFI id"), z.string(), z.number()])).optional(),
+  filling_station_ids: z.array(z.union([id("Filling station id"), z.string(), z.number()])).optional(),
   page_overrides: z
     .array(
       z.object({

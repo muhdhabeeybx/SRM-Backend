@@ -8,6 +8,8 @@ const {
   depotStaff,
   lpgStationStaff,
   pfiStaff,
+  fillingStationStaff,
+  deliveryCustomers,
   staffPageOverrides,
 } = require("../db/schema");
 
@@ -17,7 +19,7 @@ const {
  * one query with two joins fanning out the row count.
  */
 const getAuthContext = async (staffId) => {
-  const [staffRow, depotRows, stationRows, pfiRows, overrideRows] = await Promise.all([
+  const [staffRow, depotRows, stationRows, pfiRows, overrideRows, fillingRows] = await Promise.all([
     db.select({ canViewAllLocations: staff.canViewAllLocations, roles: staff.roles }).from(staff).where(eq(staff.id, staffId)).limit(1),
     db.select({ depotId: depotStaff.depotId }).from(depotStaff).where(eq(depotStaff.staffId, staffId)),
     db.select({ lpgStationId: lpgStationStaff.lpgStationId }).from(lpgStationStaff).where(eq(lpgStationStaff.staffId, staffId)),
@@ -25,6 +27,7 @@ const getAuthContext = async (staffId) => {
     db.select({ routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed })
       .from(staffPageOverrides)
       .where(eq(staffPageOverrides.staffId, staffId)),
+    db.select({ id: fillingStationStaff.deliveryCustomerId }).from(fillingStationStaff).where(eq(fillingStationStaff.staffId, staffId)),
   ]);
 
   // A super_admin sees everything by role, regardless of the
@@ -42,6 +45,7 @@ const getAuthContext = async (staffId) => {
       depotIds: depotRows.map((r) => r.depotId),
       lpgStationIds: stationRows.map((r) => r.lpgStationId),
       pfiIds: pfiRows.map((r) => r.pfiId),
+      fillingStationIds: fillingRows.map((r) => r.id),
     },
     pageOverrides: overrideRows,
   };
@@ -49,7 +53,7 @@ const getAuthContext = async (staffId) => {
 
 /** Same shape, plus resolved names — what the staff admin list/detail screens show. */
 const getScopeWithNames = async (staffId) => {
-  const [depotRows, stationRows, pfiRows] = await Promise.all([
+  const [depotRows, stationRows, pfiRows, fillingRows] = await Promise.all([
     db.select({ id: depots.id, name: depots.name })
       .from(depotStaff)
       .innerJoin(depots, eq(depotStaff.depotId, depots.id))
@@ -62,6 +66,10 @@ const getScopeWithNames = async (staffId) => {
       .from(pfiStaff)
       .innerJoin(pfis, eq(pfiStaff.pfiId, pfis.id))
       .where(eq(pfiStaff.staffId, staffId)),
+    db.select({ id: deliveryCustomers.id, name: deliveryCustomers.name })
+      .from(fillingStationStaff)
+      .innerJoin(deliveryCustomers, eq(fillingStationStaff.deliveryCustomerId, deliveryCustomers.id))
+      .where(eq(fillingStationStaff.staffId, staffId)),
   ]);
 
   return {
@@ -71,6 +79,8 @@ const getScopeWithNames = async (staffId) => {
     lpgStationNames: stationRows.map((r) => r.name),
     pfiIds: pfiRows.map((r) => r.id),
     pfiNumbers: pfiRows.map((r) => r.pfiNumber),
+    fillingStationIds: fillingRows.map((r) => r.id),
+    fillingStationNames: fillingRows.map((r) => r.name),
   };
 };
 
@@ -78,7 +88,7 @@ const getScopeWithNames = async (staffId) => {
 const getScopeWithNamesForStaffIds = async (staffIds) => {
   if (!staffIds.length) return new Map();
 
-  const [depotRows, stationRows, pfiRows] = await Promise.all([
+  const [depotRows, stationRows, pfiRows, fillingRows] = await Promise.all([
     db.select({ staffId: depotStaff.staffId, id: depots.id, name: depots.name })
       .from(depotStaff)
       .innerJoin(depots, eq(depotStaff.depotId, depots.id))
@@ -91,10 +101,17 @@ const getScopeWithNamesForStaffIds = async (staffIds) => {
       .from(pfiStaff)
       .innerJoin(pfis, eq(pfiStaff.pfiId, pfis.id))
       .where(inArray(pfiStaff.staffId, staffIds)),
+    db.select({ staffId: fillingStationStaff.staffId, id: deliveryCustomers.id, name: deliveryCustomers.name })
+      .from(fillingStationStaff)
+      .innerJoin(deliveryCustomers, eq(fillingStationStaff.deliveryCustomerId, deliveryCustomers.id))
+      .where(inArray(fillingStationStaff.staffId, staffIds)),
   ]);
 
   const byStaff = new Map(
-    staffIds.map((id) => [id, { depotIds: [], depotNames: [], lpgStationIds: [], lpgStationNames: [], pfiIds: [], pfiNumbers: [] }])
+    staffIds.map((id) => [id, {
+      depotIds: [], depotNames: [], lpgStationIds: [], lpgStationNames: [], pfiIds: [], pfiNumbers: [],
+      fillingStationIds: [], fillingStationNames: [],
+    }])
   );
   for (const r of depotRows) {
     const entry = byStaff.get(r.staffId);
@@ -110,6 +127,11 @@ const getScopeWithNamesForStaffIds = async (staffIds) => {
     const entry = byStaff.get(r.staffId);
     entry.pfiIds.push(r.id);
     entry.pfiNumbers.push(r.pfiNumber);
+  }
+  for (const r of fillingRows) {
+    const entry = byStaff.get(r.staffId);
+    entry.fillingStationIds.push(r.id);
+    entry.fillingStationNames.push(r.name);
   }
   return byStaff;
 };
@@ -145,8 +167,8 @@ const getPageOverridesForStaffIds = async (staffIds) => {
   return byStaff;
 };
 
-/** Replaces this staff member's rows in all three scope join tables. */
-const setScope = async (staffId, { depotIds = [], lpgStationIds = [], pfiIds = [] } = {}) => {
+/** Replaces this staff member's rows in all four scope join tables. */
+const setScope = async (staffId, { depotIds = [], lpgStationIds = [], pfiIds = [], fillingStationIds = [] } = {}) => {
   await db.transaction(async (tx) => {
     await tx.delete(depotStaff).where(eq(depotStaff.staffId, staffId));
     if (depotIds.length) {
@@ -161,6 +183,13 @@ const setScope = async (staffId, { depotIds = [], lpgStationIds = [], pfiIds = [
     await tx.delete(pfiStaff).where(eq(pfiStaff.staffId, staffId));
     if (pfiIds.length) {
       await tx.insert(pfiStaff).values(pfiIds.map((pfiId) => ({ pfiId, staffId })));
+    }
+
+    await tx.delete(fillingStationStaff).where(eq(fillingStationStaff.staffId, staffId));
+    if (fillingStationIds.length) {
+      await tx.insert(fillingStationStaff).values(
+        fillingStationIds.map((deliveryCustomerId) => ({ deliveryCustomerId, staffId })),
+      );
     }
   });
 };

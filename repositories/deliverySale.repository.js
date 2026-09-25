@@ -48,6 +48,11 @@ const findAll = async ({
    * assigned to a PFI see only its batches' sales — lib/pfiScope.js.
    */
   allowedCodes = null,
+  /**
+   * The filling stations this person may see, or null for everyone. Staff
+   * assigned stations see only sales to them — lib/stationScope.js.
+   */
+  allowedStationIds = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
@@ -61,6 +66,12 @@ const findAll = async ({
       allowedCodes.length
         ? inArray(sql`upper(trim(${deliverySales.allocationCode}))`, allowedCodes)
         : sql`false`,
+    );
+  }
+
+  if (Array.isArray(allowedStationIds)) {
+    conditions.push(
+      allowedStationIds.length ? inArray(deliverySales.customerId, allowedStationIds) : sql`false`,
     );
   }
 

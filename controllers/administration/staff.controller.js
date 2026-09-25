@@ -21,7 +21,7 @@ const generateResetToken = () => {
 const createAdmin = asyncHandler(async (req, res) => {
   const {
     first_name, surname, other_names, email, phone_number, roles, suspended,
-    can_view_all_locations, depot_ids, lpg_station_ids, pfi_ids, page_overrides,
+    can_view_all_locations, depot_ids, lpg_station_ids, pfi_ids, filling_station_ids, page_overrides,
   } = req.body;
 
   if (!first_name || !surname || !email) {
@@ -61,11 +61,12 @@ const createAdmin = asyncHandler(async (req, res) => {
     passwordResetExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
   });
 
-  if (depot_ids || lpg_station_ids || pfi_ids) {
+  if (depot_ids || lpg_station_ids || pfi_ids || filling_station_ids) {
     await staffScopeRepo.setScope(admin.id, {
       depotIds: toIdList(depot_ids),
       lpgStationIds: toIdList(lpg_station_ids),
       pfiIds: toIdList(pfi_ids),
+      fillingStationIds: toIdList(filling_station_ids),
     });
   }
   if (page_overrides) {
@@ -142,7 +143,7 @@ const getAdminById = asyncHandler(async (req, res) => {
 const updateAdmin = asyncHandler(async (req, res) => {
   const {
     first_name, surname, other_names, email, phone_number, roles, suspended,
-    can_view_all_locations, depot_ids, lpg_station_ids, pfi_ids, page_overrides,
+    can_view_all_locations, depot_ids, lpg_station_ids, pfi_ids, filling_station_ids, page_overrides,
   } = req.body;
 
   const admin = await staffRepo.findById(req.params.id);
@@ -170,6 +171,7 @@ const updateAdmin = asyncHandler(async (req, res) => {
     depot_ids !== undefined ||
     lpg_station_ids !== undefined ||
     pfi_ids !== undefined ||
+    filling_station_ids !== undefined ||
     page_overrides !== undefined;
 
   if (changesPrivileges && !isSuperAdmin) {
@@ -237,12 +239,17 @@ const updateAdmin = asyncHandler(async (req, res) => {
 
   const updated = await staffRepo.update(admin.id, updateData);
 
-  if (depot_ids !== undefined || lpg_station_ids !== undefined || pfi_ids !== undefined) {
+  if (
+    depot_ids !== undefined || lpg_station_ids !== undefined ||
+    pfi_ids !== undefined || filling_station_ids !== undefined
+  ) {
     const current = await staffScopeRepo.getScopeWithNames(admin.id);
     await staffScopeRepo.setScope(admin.id, {
       depotIds: depot_ids !== undefined ? toIdList(depot_ids) : current.depotIds,
       lpgStationIds: lpg_station_ids !== undefined ? toIdList(lpg_station_ids) : current.lpgStationIds,
       pfiIds: pfi_ids !== undefined ? toIdList(pfi_ids) : current.pfiIds,
+      fillingStationIds:
+        filling_station_ids !== undefined ? toIdList(filling_station_ids) : current.fillingStationIds,
     });
   }
   if (page_overrides !== undefined) {

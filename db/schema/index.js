@@ -13,6 +13,7 @@ const productSchema = require("./product");
 const depotStaffSchema = require("./depotStaff");
 const lpgStationSchema = require("./lpgStation");
 const lpgStationStaffSchema = require("./lpgStationStaff");
+const fillingStationStaffSchema = require("./fillingStationStaff");
 const lpgStationCylinderSchema = require("./lpgStationCylinder");
 const lpgPriceHistorySchema = require("./lpgPriceHistory");
 const depotProductCapacitiesSchema = require("./depotProductCapacities");
@@ -94,6 +95,7 @@ module.exports = {
   ...depotStaffSchema,
   ...lpgStationSchema,
   ...lpgStationStaffSchema,
+  ...fillingStationStaffSchema,
   ...lpgStationCylinderSchema,
   ...lpgPriceHistorySchema,
   ...depotProductCapacitiesSchema,

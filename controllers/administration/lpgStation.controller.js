@@ -25,7 +25,11 @@ const getLpgStations = asyncHandler(async (req, res) => {
 const getLpgStationById = asyncHandler(async (req, res) => {
   const station = await lpgStationRepo.findById(req.params.id);
 
-  if (!station) {
+  // The list is already narrowed to a person's assigned plants
+  // (lpgStation.repository via scopeFilter); opening one by id is held to
+  // the same rule, and an unassigned plant reads as not found.
+  const assigned = req.user?.canViewAllLocations ? [] : req.user?.scope?.lpgStationIds || [];
+  if (!station || (assigned.length && !assigned.map(Number).includes(Number(station.id)))) {
     return res.status(404).json({ success: false, message: "LPG station not found" });
   }
 

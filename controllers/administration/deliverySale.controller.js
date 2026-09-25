@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const { deliverySaleRepo, deliveryCustomerRepo } = require("../../repositories");
 const { client } = require("../../config/db");
 const { allocationCodesFor } = require("../../lib/pfiScope");
+const { scopedStationIds, stationVisible } = require("../../lib/stationScope");
 const pfiBankScope = require("../../lib/pfiBankScope");
 
 /*
@@ -17,6 +18,16 @@ const notFound = (res) => res.status(404).json({ success: false, message: "Sale 
 const forbidden = (res, message) => res.status(403).json({ success: false, message });
 
 const saleVisible = (codes, sale) => codes === null || (!!sale && codes.includes(code(sale.allocationCode)));
+
+/**
+ * The filling-station half of visibility, beside the PFI half above. Someone
+ * assigned stations sees only sales to those stations (lib/stationScope.js);
+ * both halves must pass, so a person given a station AND a PFI sees that
+ * station's sales on that PFI.
+ */
+const stationOk = (user, sale) => !sale || stationVisible(user, sale.customerId);
+const rowStation = (row) => row?.customerId ?? row?.customer_id ?? null;
+const stationWriteOk = (user, row) => rowStation(row) == null || stationVisible(user, rowStation(row));
 
 /**
  * A truck cycle — truck, load date, customer — is visible when every sale in
@@ -51,6 +62,7 @@ const getDeliverySales = asyncHandler(async (req, res) => {
     page,
     limit,
     allowedCodes: await allocationCodesFor(req.user),
+    allowedStationIds: scopedStationIds(req.user),
   });
 
   res.json({ success: true, data: result });
@@ -58,7 +70,7 @@ const getDeliverySales = asyncHandler(async (req, res) => {
 
 const getDeliverySaleById = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
-  if (!sale || !saleVisible(await allocationCodesFor(req.user), sale)) return notFound(res);
+  if (!sale || !saleVisible(await allocationCodesFor(req.user), sale) || !stationOk(req.user, sale)) return notFound(res);
   res.json({ success: true, data: { sale } });
 });
 
@@ -104,6 +116,7 @@ const createDeliverySale = asyncHandler(async (req, res) => {
     return forbidden(res, "That batch is not on your PFI.");
   }
   if (bankAccountId) await pfiBankScope.assertAccountAllowed(req.user, bankAccountId);
+  if (!stationWriteOk(req.user, base)) return forbidden(res, "That station is not one of yours.");
 
   if (Array.isArray(lineIds) && lineIds.length) {
     const sales = await deliverySaleRepo.createFromStatementLines({
@@ -146,6 +159,9 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
   if (codes !== null && rows.some((r) => !codes.includes(code(r.allocationCode ?? r.allocation_code)))) {
     return forbidden(res, "One or more of those rows is on a batch that is not on your PFI.");
   }
+  if (rows.some((r) => !stationWriteOk(req.user, r))) {
+    return forbidden(res, "One or more of those rows is for a station that is not one of yours.");
+  }
   // A station's hand-keyed deposit names an account, and the single-row route
   // already refuses one outside this person's PFI. The same rule here.
   for (const accountId of new Set(rows.map((r) => r.bankAccountId).filter(Boolean))) {
@@ -180,6 +196,10 @@ const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
       }
     }
   }
+  const ends = [req.body.from, ...(Array.isArray(req.body.to) ? req.body.to : [])];
+  if (ends.some((end) => !stationWriteOk(req.user, end))) {
+    return forbidden(res, "Both ends of a transfer must be at your stations.");
+  }
   const actor = req.user?.name || req.user?.email || "";
   const result = await deliverySaleRepo.transferOverpayment({
     from: req.body.from,
@@ -205,6 +225,7 @@ const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
     customerId: req.query.customerId || null,
   };
   if (!(await cycleVisible(await allocationCodesFor(req.user), cycle))) return notFound(res);
+  if (!stationWriteOk(req.user, cycle)) return notFound(res);
   const standing = await deliverySaleRepo.cycleStanding({
     truckNumber: req.query.truckNumber,
     dateLoaded: req.query.dateLoaded,
@@ -216,7 +237,9 @@ const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
 const updateDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
   const codes = await allocationCodesFor(req.user);
-  if (sale && !saleVisible(codes, sale)) return notFound(res);
+  if (sale && (!saleVisible(codes, sale) || !stationOk(req.user, sale))) return notFound(res);
+  // Nor moved onto a station that is not theirs.
+  if (!stationWriteOk(req.user, req.body)) return forbidden(res, "That station is not one of yours.");
   // Nor may it be moved onto a batch outside their PFI.
   const nextCode = req.body.allocationCode ?? req.body.allocation_code;
   if (codes !== null && nextCode !== undefined && !codes.includes(code(nextCode))) {
@@ -245,7 +268,9 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
  */
 const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
-  if (sale && !saleVisible(await allocationCodesFor(req.user), sale)) return notFound(res);
+  if (sale && (!saleVisible(await allocationCodesFor(req.user), sale) || !stationOk(req.user, sale))) {
+    return notFound(res);
+  }
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });
   }
@@ -263,9 +288,9 @@ const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
 
 const deleteDeliverySale = asyncHandler(async (req, res) => {
   const codes = await allocationCodesFor(req.user);
-  if (codes !== null) {
+  if (codes !== null || scopedStationIds(req.user) !== null) {
     const existing = await deliverySaleRepo.findById(req.params.id);
-    if (!existing || !saleVisible(codes, existing)) return notFound(res);
+    if (!existing || !saleVisible(codes, existing) || !stationOk(req.user, existing)) return notFound(res);
   }
   const sale = await deliverySaleRepo.deleteById(req.params.id);
   if (!sale) {

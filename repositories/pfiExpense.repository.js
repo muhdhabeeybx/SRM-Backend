@@ -469,8 +469,14 @@ const listExpenses = async ({
   // a location test can only ever fail on it, and failing closed hid every
   // company-wide overhead from everyone outside head office.
   if (onlySubmitterId == null && scopeUser && !scopeUser.canViewAllLocations) {
-    const { depotIds = [], lpgStationIds = [], pfiIds = [] } = scopeUser.scope || {};
-    base.push(client`(
+    const { depotIds = [], lpgStationIds = [], pfiIds = [], fillingStationIds = [] } = scopeUser.scope || {};
+    // A station expense, for someone assigned stations, is theirs exactly
+    // when the station is — whatever PFI it is attributed to. Everyone else
+    // falls through to the rule below, unchanged (lib/stationScope.js).
+    base.push(client`(CASE
+      WHEN e.delivery_customer_id IS NOT NULL AND cardinality(${fillingStationIds}::int[]) > 0
+      THEN e.delivery_customer_id = ANY(${fillingStationIds}::int[])
+      ELSE (
       (e.pfi_id IS NULL AND e.lpg_station_id IS NULL)
       OR e.pfi_id = ANY(${pfiIds})
       OR e.pfi_id IN (
@@ -480,7 +486,7 @@ const listExpenses = async ({
       -- it is narrowed the same way a cargo is. A station expense has no
       -- location to test and passes like a general overhead does.
       OR e.lpg_station_id = ANY(${lpgStationIds})
-    )`);
+    ) END)`);
   }
 
   if (search) {
