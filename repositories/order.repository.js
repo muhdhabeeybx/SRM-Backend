@@ -348,6 +348,8 @@ const findAll = async ({
   search,
   status,
   customer,
+  /** One cargo's orders, whoever the customer — the surplus-transfer picker. */
+  pfi,
   depot,
   dateFrom,
   dateTo,
@@ -384,6 +386,10 @@ const findAll = async ({
 
   if (customer) {
     conditions.push(eq(orders.customerId, Number(customer)));
+  }
+
+  if (pfi) {
+    conditions.push(eq(orders.pfiId, Number(pfi)));
   }
 
   if (depot) {

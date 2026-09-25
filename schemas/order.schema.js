@@ -79,6 +79,7 @@ const listOrders = pagination.extend({
     "Expired",
   ]).optional(),
   customer: id("Customer").optional(),
+  pfi: id("PFI").optional(),
   dateFrom: z.string().trim().max(40, "Start date is too long").optional(),
   dateTo: z.string().trim().max(40, "End date is too long").optional(),
 });
