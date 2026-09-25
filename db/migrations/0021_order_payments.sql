@@ -237,6 +237,29 @@ WHERE NOT EXISTS (
      AND al.entity_id = chosen.order_id
      AND (al.metadata->>'amount')::numeric = chosen.line_amount
 )
+/*
+  ── An order that took part in a merge is finished with this backfill ──────
+
+  services/orderMerge.service.js moves payments, transfers and allocation rows
+  from the merged-away orders onto the one that survives, summing allocation
+  rows that share a deposit. Every rule in sections 3-5 asks "does THIS order
+  already have the row it should?", keyed on the order's id — and after a merge
+  the honest answer is "no, the survivor has it", which each rule would read as
+  a gap and fill. A summed allocation, in particular, matches none of the
+  existing transfers by amount and would spawn a new one on every run.
+
+  Merges post-date this backfill by definition (0056 came later), so anything
+  the backfill was ever going to write for these orders was already written.
+  Keyed on audit_logs rather than orders.merged_into_order_id because this
+  file runs before 0056 on a fresh database, where that column does not exist
+  yet — the same reason the removed-payment guard above uses audit_logs.
+*/
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_logs al
+     WHERE al.entity_type = 'order'
+       AND al.action IN ('order.merged', 'order.merged_away')
+       AND al.entity_id = chosen.order_id
+  )
 -- Idempotent: the unique index on statement_line_id is what makes re-running
 -- this file a no-op rather than a duplicate-key failure.
 ON CONFLICT (statement_line_id) WHERE statement_line_id IS NOT NULL DO NOTHING;
@@ -276,6 +299,13 @@ WHERE draw.order_id <> owner.order_id
     SELECT 1 FROM order_payment_transfers t
     WHERE t.from_order_id = owner.order_id AND t.to_order_id = draw.order_id
       AND t.amount = draw.applied_amount::numeric
+  )
+  -- Neither side may have been merged. See the note at the end of section 3.
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_logs al
+     WHERE al.entity_type = 'order'
+       AND al.action IN ('order.merged', 'order.merged_away')
+       AND al.entity_id IN (owner.order_id, draw.order_id)
   );
 
 -- The two legs of each backfilled transfer. Written from the transfer rows
@@ -352,6 +382,13 @@ WHERE a.amount::numeric > 0
        AND al.action = 'order.payment_removed'
        AND al.entity_id = a.order_id
        AND (al.metadata->>'amount')::numeric = a.amount::numeric
+  )
+  -- Nor may the order have been merged. See the note at the end of section 3.
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_logs al
+     WHERE al.entity_type = 'order'
+       AND al.action IN ('order.merged', 'order.merged_away')
+       AND al.entity_id = a.order_id
   );
 
 -- ── 6. Backfill: paid orders the ledger never recorded at all ──────────────

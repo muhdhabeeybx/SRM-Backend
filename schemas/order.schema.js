@@ -393,8 +393,28 @@ const updateTruckLoad = z.object({
   driverPhone: optionalString("Driver phone", 50),
 });
 
+/**
+ * Orders folded into the one in the path. The server decides whether they
+ * match — the client only names them.
+ */
+const mergeOrderIds = z
+  .array(z.coerce.number().int().positive(), { invalid_type_error: "Choose the orders to merge" })
+  .min(1, "Choose at least one order to merge")
+  .max(20, "At most 20 orders can be merged at once");
+
+const previewOrderMerge = z.object({ sourceOrderIds: mergeOrderIds });
+
+const mergeOrders = z.object({
+  sourceOrderIds: mergeOrderIds,
+  // Required for the same reason a transfer's is: payment rows move between
+  // orders, and the audit should find the answer to "why" on the record.
+  reason: z.string().trim().min(3, "Say why these orders are being merged").max(500),
+});
+
 module.exports = {
   createOrder,
+  previewOrderMerge,
+  mergeOrders,
   createMyOrder,
   createGuestOrder,
   listMyOrders,

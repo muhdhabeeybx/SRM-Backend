@@ -21,6 +21,7 @@ const orderStatus = require("../../services/orderStatus.service");
 const truckProgress = require("../../services/truckProgress.service");
 const orderService = require("../../services/order.service");
 const orderPaymentService = require("../../services/orderPayment.service");
+const orderMergeService = require("../../services/orderMerge.service");
 const { sendOrderInvoiceEmail } = require("../../services/email.service");
 const { sendOrderSummarySMS } = require("../../services/sms.service");
 const { placeOrder, withExpiresAt } = orderService;
@@ -1772,7 +1773,52 @@ const revokeCreditRelease = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * GET /orders/:id/merges — what this order was merged from or into, and which
+ * of the customer's other orders could be folded into it. Read-only.
+ */
+const getOrderMerges = asyncHandler(async (req, res) => {
+  const data = await orderMergeService.mergeOverview(Number(req.params.id));
+  res.json({ success: true, data });
+});
+
+/**
+ * POST /orders/:id/merge/preview — what folding these orders into this one
+ * would do, from the same code the merge runs. Nothing is written.
+ */
+const previewOrderMerge = asyncHandler(async (req, res) => {
+  const data = await orderMergeService.previewMerge({
+    targetOrderId: Number(req.params.id),
+    sourceOrderIds: req.body.sourceOrderIds,
+  });
+  res.json({ success: true, data });
+});
+
+/**
+ * POST /orders/:id/merge — fold the given orders into this one.
+ *
+ * Finance-gated like every other route that moves payment rows between
+ * orders: this one moves all of them.
+ */
+const mergeOrders = asyncHandler(async (req, res) => {
+  const result = await orderMergeService.mergeOrders({
+    targetOrderId: Number(req.params.id),
+    sourceOrderIds: req.body.sourceOrderIds,
+    reason: req.body.reason,
+    staffId: req.user.id,
+  });
+  const n = result.merged.length;
+  res.json({
+    success: true,
+    message: `${n} order${n === 1 ? "" : "s"} merged into ${result.target.reference}. Their payments, trucks and tickets are now on it.`,
+    data: result,
+  });
+});
+
 module.exports = {
+  getOrderMerges,
+  previewOrderMerge,
+  mergeOrders,
   getReceivables,
   setOrderPrice,
   authoriseCreditRelease,

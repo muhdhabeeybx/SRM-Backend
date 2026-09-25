@@ -638,6 +638,30 @@ const reverseTransfer = async ({ transferId, staffId = null, reason = "" }, tx) 
       .limit(1);
     if (!transfer) throw httpError(404, "Transfer not found");
 
+    /**
+     * A transfer with a merged-away order at either end is history.
+     *
+     * An order merge moves both legs onto the surviving order, where they
+     * cancel out, and leaves the transfer row naming the orders as they were.
+     * Reversing it now would delete legs from the survivor and recompute an
+     * empty order — neither of which is the movement this row describes.
+     */
+    const merged = await trx
+      .select({ id: orders.id })
+      .from(orders)
+      .where(
+        and(
+          inArray(orders.id, [transfer.fromOrderId, transfer.toOrderId]),
+          sql`${orders.mergedIntoOrderId} IS NOT NULL`,
+        ),
+      );
+    if (merged.length) {
+      throw httpError(
+        409,
+        "One of these orders has since been merged into another, and both sides of this transfer are now on the merged order. There is nothing left to reverse.",
+      );
+    }
+
     const [to] = await trx
       .select({ id: orders.id, orderNumber: orders.orderNumber, totalAmount: orders.totalAmount })
       .from(orders)

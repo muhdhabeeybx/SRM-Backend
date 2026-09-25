@@ -136,6 +136,12 @@ const orders = pgTable(
     // same key returns the original order instead of creating a duplicate.
     idempotencyKey: varchar("idempotency_key", { length: 128 }),
 
+    // Set on an order folded into another (migration 0056). Such an order is
+    // Cancelled and empty; everything it held is on the order named here. The
+    // foreign key lives in the migration — a self-reference here would need
+    // the table to exist before its own definition.
+    mergedIntoOrderId: integer("merged_into_order_id"),
+
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

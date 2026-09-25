@@ -36,6 +36,9 @@ const {
   getPaymentReviewQueue,
   getOrdersWithSurplus,
   reconcileOrderEffects,
+  getOrderMerges,
+  previewOrderMerge,
+  mergeOrders,
 } = require("../../controllers/administration/order.controller");
 
 // Payable orders (must be before /:id to avoid param conflict)
@@ -245,6 +248,23 @@ router.post(
   validate({ params: orderSchemas.idParam }),
   generateOrderTickets
 );
+// Folding orders at the same unit price into one. The overview and preview
+// write nothing; the merge moves every payment row, so it is finance-gated.
+router.get("/:id/merges", verifyStaff, validate({ params: orderSchemas.idParam }), getOrderMerges);
+router.post(
+  "/:id/merge/preview",
+  verifyStaff,
+  validate({ params: orderSchemas.idParam, body: orderSchemas.previewOrderMerge }),
+  previewOrderMerge
+);
+router.post(
+  "/:id/merge",
+  authenticateStaff,
+  requireRole("finance", "super_admin", { message: "Finance access required to merge orders" }),
+  validate({ params: orderSchemas.idParam, body: orderSchemas.mergeOrders }),
+  mergeOrders
+);
+
 router.get("/:id/trucks/:loadId/print", verifyStaff, getTruckTicketPrintData);
 router.get("/:id/trucks", verifyStaff, getOrderTrucks);
 

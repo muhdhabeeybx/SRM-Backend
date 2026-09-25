@@ -559,6 +559,7 @@ const undoRefund = async ({ refundId, reason = "", staffId = null }) => {
 };
 
 module.exports = {
+  RESURRECTED_PAYMENT_IDS_SQL,
   realSurplus,
   listRefundable,
   listRefunds,
