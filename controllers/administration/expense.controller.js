@@ -673,6 +673,21 @@ const updateExpense = asyncHandler(async (req, res) => {
   const mentionsSubject = [
     "delivery_customer_id", "deliveryCustomerId", "station_id", "stationId",
     "lpg_station_id", "lpgStationId", "plant_id", "plantId",
+    /*
+     * The list forms belong here too, and their absence was a silent bug.
+     *
+     * resolveSubject has always read both shapes, and the dialog sends the
+     * list one — station_ids / plant_ids — on an edit exactly as it does on a
+     * new request. But this gate named only the singular keys, so an edit
+     * that moved an expense onto a station passed validation, returned 200,
+     * and changed nothing: the subject was never looked at. Nothing told the
+     * person their edit had been dropped.
+     *
+     * A list carrying more than one is still refused below. Splitting stays a
+     * thing a new bill does.
+     */
+    "station_ids", "stationIds", "delivery_customer_ids", "deliveryCustomerIds",
+    "plant_ids", "plantIds", "lpg_station_ids", "lpgStationIds",
   ].some((k) => req.body[k] !== undefined);
   if (mentionsSubject) {
     const subjects = await resolveSubject(req.body);

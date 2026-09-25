@@ -174,6 +174,67 @@ describe("an expense against a station or a plant", () => {
     assert.equal(Number(row.delivery_customer_id), Number(stationId));
   });
 
+  /*
+   * The dialog edits with the LIST key, not the singular one.
+   *
+   * It sends station_ids on an edit exactly as it does on a new request, and
+   * the update handler used to gate the whole subject block on the singular
+   * names alone — so this returned 200 and changed nothing at all. An expense
+   * filed as an overhead could not be moved onto a station from the screen
+   * that offered to do it, and nothing said so.
+   */
+  test("an overhead is moved onto a station by the list key", async (t) => {
+    if (!categoryId || !stationId) return t.skip("no seeded category or filling station here");
+
+    const raised = await raise({});
+    assert.equal(raised.status, 201, JSON.stringify(raised.body));
+    const id = raised.body.data.expense.id;
+    assert.equal((await subjectOf(id)).delivery_customer_id, null);
+
+    const res = await request(app)
+      .patch(`${EXPENSES}/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ station_ids: [stationId] });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+
+    const row = await subjectOf(id);
+    assert.equal(Number(row.delivery_customer_id), Number(stationId));
+  });
+
+  test("an empty list is how the subject is removed too", async (t) => {
+    if (!categoryId || !stationId) return t.skip("no seeded category or filling station here");
+
+    const made = await raise({ station_id: stationId });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const id = made.body.data.expense.id;
+
+    const res = await request(app)
+      .patch(`${EXPENSES}/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ station_ids: [] });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+
+    assert.equal((await subjectOf(id)).delivery_customer_id, null);
+  });
+
+  test("a list of two on an edit is refused, not half-applied", async (t) => {
+    if (!categoryId || !stationId || !station2) return t.skip("needs two filling stations here");
+
+    const made = await raise({ station_id: stationId });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const id = made.body.data.expense.id;
+
+    const res = await request(app)
+      .patch(`${EXPENSES}/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ station_ids: [stationId, station2] });
+    assert.equal(res.status, 400, JSON.stringify(res.body));
+
+    // Still where it was: a refusal must not move it halfway.
+    const row = await subjectOf(id);
+    assert.equal(Number(row.delivery_customer_id), Number(stationId));
+  });
+
   test("naming the station empty is how it is removed", async (t) => {
     if (!categoryId || !stationId) return t.skip("no seeded category or filling station here");
 
