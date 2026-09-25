@@ -904,7 +904,33 @@ const removeOrderPayment = asyncHandler(async (req, res) => {
  * order, so the refundable figure falls with it, and a refund takes it out of
  * what a transfer could move. Both are computed from the same payment rows.
  */
+/**
+ * The cargoes whose orders may move surplus between each other. Nothing else.
+ *
+ * Transfers were switched off on the finance report (the owner's call — the
+ * report is audited) and are back for one cargo only: PFI 39/26/PMS/MT
+ * STELLAR/LIQUID BULK (#42). BOTH ends must be on a listed PFI, so money can
+ * move between that cargo's orders but never onto or off another cargo. Keyed
+ * by id rather than by name: the number is typed by hand and has already been
+ * written two ways ("PFI 39/26" and "PFI/39/26").
+ *
+ * Checked here, at the route, rather than in transferSurplus — the service is
+ * also driven directly by scripts and tests that are not the desk.
+ */
+const SURPLUS_TRANSFER_PFI_IDS = new Set([42]);
+
 const transferOrderPayment = asyncHandler(async (req, res) => {
+  const ends = await db.execute(sql`
+    SELECT o.id, o.pfi_id AS "pfiId" FROM orders o
+     WHERE o.id IN (${Number(req.params.id)}, ${Number(req.body.toOrderId)})`);
+  const outside = (ends.rows ?? ends).filter((o) => !SURPLUS_TRANSFER_PFI_IDS.has(Number(o.pfiId)));
+  if (outside.length) {
+    return res.status(409).json({
+      success: false,
+      message: "Moving surplus between orders is only open for PFI 39/26 (MT STELLAR), and both orders must be on it. Refund the overpayment instead.",
+    });
+  }
+
   const result = await orderPaymentService.transferSurplus({
     fromOrderId: Number(req.params.id),
     toOrderId: Number(req.body.toOrderId),
