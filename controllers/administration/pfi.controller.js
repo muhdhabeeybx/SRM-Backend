@@ -9,6 +9,8 @@ const {
   orderRepo,
   orderPfiAllocationRepo,
   pfiSurplusRepo,
+  pfiNoteRepo,
+  pfiFileRepo,
 } = require("../../repositories");
 const { db } = require("../../config/db");
 const { eq } = require("drizzle-orm");
@@ -17,6 +19,7 @@ const { computeFinancials, explainFinancials, BILLED_ON_OWN_QUANTITY } = require
 const { resolveBooking, actorFor, vendorFor } = require("./expense.controller");
 const { isWithinScope } = require("../../lib/scopeFilter");
 const { scopedPfiIds } = require("../../lib/pfiBankScope");
+const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../lib/pfiAssignmentContext");
 const smsService = require("../../services/sms.service");
 
 function httpErr(status, message) {
@@ -480,7 +483,11 @@ const deletePfi = asyncHandler(async (req, res) => {
     });
   }
 
-  await pfiRepo.deleteById(pfi.id);
+  // Its assignments go with it, by cascade; the record says so, and who did it.
+  await withAssignmentContext(
+    contextFromRequest(req, SOURCES.PFI_DELETED, `PFI ${pfi.pfiNumber || pfi.id} was deleted`),
+    (tx) => pfiRepo.deleteById(pfi.id, tx),
+  );
 
   res.json({ success: true, message: "PFI deleted successfully" });
 });
@@ -554,6 +561,7 @@ const activatePfi = asyncHandler(async (req, res) => {
     bankAccountIds,
     officers,
     activatedBy: req.user?.id ?? null,
+    context: contextFromRequest(req, SOURCES.PFI_ACTIVATION, "Named as an officer when the PFI was released to trade"),
     note: req.body.note || "",
   });
 
@@ -1069,7 +1077,168 @@ const voidPfiSurplus = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Surplus taken back", data: { entry, pfi: updated } });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// The PFI file
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Everything about one PFI, for its file page and its report.
+ *
+ * The PFI and its money figures, and around them what the row alone cannot
+ * say: who raised it and who released it to trade, the accounts it collects
+ * into and the ones its money actually landed in, every truck on every order
+ * with its ticket, the surplus entries, the notes, and what the audit log
+ * holds about it.
+ *
+ * Orders themselves are NOT here. The report reads them from the finance
+ * report, so their money figures are the audited report's own; this answers
+ * only what the finance report does not carry — which trucks took each one.
+ *
+ * Scoped like the surplus endpoints: a PFI person asking about another PFI is
+ * told it does not exist.
+ */
+const getPfiFile = asyncHandler(async (req, res) => {
+  const found = await surplusPfiFor(req, { write: false });
+  const id = Number(found.id);
+  const onTrucks = found.pfiType === "delivery" || found.pfiType === "trucking";
+
+  const [
+    pfi, expenses, people, banks, collections, activity,
+    notes, surpluses, audit, trucks, orderTickets, manifest, allowedLocations,
+  ] = await Promise.all([
+    withFinancials(found),
+    pfiExpenseRepo.listExpensesForPfi(id),
+    pfiFileRepo.peopleFor([id]),
+    pfiFileRepo.banksFor([id]),
+    pfiFileRepo.collectionsFor([id]),
+    pfiFileRepo.activityFor([id]),
+    pfiNoteRepo.listFor(id),
+    pfiSurplusRepo.listFor(id),
+    pfiFileRepo.auditFor(id),
+    pfiFileRepo.trucksForPfi(id),
+    pfiFileRepo.orderTicketsForPfi(id),
+    onTrucks ? pfiRepo.trucksFor(id) : [],
+    found.pfiType === "delivery" ? pfiRepo.allowedDepots(id) : [],
+  ]);
+
+  res.json({
+    success: true,
+    data: {
+      pfi,
+      explain: explainFinancials(pfi, pfi.financials),
+      expenses,
+      people: people.get(id) || null,
+      banks: banks.get(id) || [],
+      collections: collections.get(id) || [],
+      activity: activity.get(id) || null,
+      notes,
+      surpluses,
+      audit,
+      trucks,
+      orderTickets,
+      manifest,
+      allowedLocations,
+    },
+  });
+});
+
+/**
+ * The same facts for every PFI at once, for the full PFI report.
+ *
+ * Keyed by PFI id and without the PFI rows themselves: the page asking for
+ * this already holds the list and its money figures, and computing them a
+ * second time here would be a second answer that could disagree with the
+ * first. Scoped by the same rule as the list, so a PFI person's report covers
+ * their PFIs and nothing else.
+ */
+const getPfiRegister = asyncHandler(async (req, res) => {
+  const { pfis: rows } = await pfiRepo.findAll({ scopeUser: req.user, limit: 1000 });
+  const pfiIds = rows.map((p) => Number(p.id));
+
+  const [people, banks, collections, activity, notes] = await Promise.all([
+    pfiFileRepo.peopleFor(pfiIds),
+    pfiFileRepo.banksFor(pfiIds),
+    pfiFileRepo.collectionsFor(pfiIds),
+    pfiFileRepo.activityFor(pfiIds),
+    pfiNoteRepo.summaryFor(pfiIds),
+  ]);
+
+  const register = {};
+  for (const id of pfiIds) {
+    register[id] = {
+      people: people.get(id) || null,
+      banks: banks.get(id) || [],
+      collections: collections.get(id) || [],
+      activity: activity.get(id) || null,
+      notes: notes.get(id) || { count: 0, issues: 0, decisions: 0, latest: null },
+    };
+  }
+
+  res.json({ success: true, data: { register } });
+});
+
+const listPfiNotes = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: false });
+  res.json({ success: true, data: { notes: await pfiNoteRepo.listFor(pfi.id) } });
+});
+
+/** Anybody who can open the PFI can add to its file. */
+const addPfiNote = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const { actorId, actorName } = await actorFor(req);
+  const note = await pfiNoteRepo.create({
+    pfiId: pfi.id,
+    kind: req.body.kind || "note",
+    body: req.body.body,
+    occurredOn: req.body.occurredOn || null,
+    authorId: actorId,
+    authorName: actorName,
+  });
+  res.status(201).json({ success: true, message: "Note added to the file", data: { note } });
+});
+
+/**
+ * Only the person who wrote a note may change or withdraw it — or a super
+ * admin, who can correct anything. Somebody else's account of what happened
+ * is answered with a note of your own, not by rewriting theirs.
+ */
+const notePfiFor = async (req) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const note = await pfiNoteRepo.findById(req.params.noteId);
+  if (!note || note.deletedAt || Number(note.pfiId) !== Number(pfi.id)) {
+    throw httpErr(404, "Note not found");
+  }
+  const superAdmin = (req.user?.roles || []).includes("super_admin");
+  if (!superAdmin && Number(note.authorId) !== Number(req.user?.id)) {
+    throw httpErr(403, "Only the person who wrote this note can change it.");
+  }
+  return { pfi, note };
+};
+
+const updatePfiNote = asyncHandler(async (req, res) => {
+  const { note } = await notePfiFor(req);
+  const updated = await pfiNoteRepo.update(note.id, {
+    kind: req.body.kind,
+    body: req.body.body,
+    occurredOn: req.body.occurredOn,
+  });
+  res.json({ success: true, message: "Note updated", data: { note: updated } });
+});
+
+const deletePfiNote = asyncHandler(async (req, res) => {
+  const { note } = await notePfiFor(req);
+  const { actorId, actorName } = await actorFor(req);
+  await pfiNoteRepo.softDelete(note.id, { staffId: actorId, staffName: actorName });
+  res.json({ success: true, message: "Note removed from the file" });
+});
+
 module.exports = {
+  getPfiFile,
+  getPfiRegister,
+  listPfiNotes,
+  addPfiNote,
+  updatePfiNote,
+  deletePfiNote,
   getPfiSurpluses,
   addPfiSurplus,
   voidPfiSurplus,

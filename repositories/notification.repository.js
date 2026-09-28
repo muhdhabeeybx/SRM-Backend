@@ -1,4 +1,4 @@
-const { eq, and, isNull, isNotNull, desc, count, sql, inArray, lt } = require("drizzle-orm");
+const { eq, and, isNull, isNotNull, desc, count, sql, inArray, notInArray, lt } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { notifications } = require("../db/schema");
 const { principalValues, principalWhere } = require("../utils/principal");
@@ -53,8 +53,16 @@ const createMany = async (rows, tx = db) => {
     .returning();
 };
 
-const buildFilters = (principal, { category, type, unreadOnly, includeArchived } = {}) => {
-  const conditions = [principalWhere(notifications, principal)];
+/**
+ * `excludeTypes` hides the types a staff member has had switched off on Manage
+ * Users (notifications/staffChoices.js), so an untick clears their bell at
+ * once instead of after their backlog of old rows is read.
+ */
+const withoutTypes = (excludeTypes) =>
+  excludeTypes?.length ? [notInArray(notifications.type, excludeTypes)] : [];
+
+const buildFilters = (principal, { category, type, unreadOnly, includeArchived, excludeTypes } = {}) => {
+  const conditions = [principalWhere(notifications, principal), ...withoutTypes(excludeTypes)];
   if (category && category !== "all") conditions.push(eq(notifications.category, category));
   if (type) conditions.push(eq(notifications.type, type));
   if (unreadOnly) conditions.push(isNull(notifications.readAt));
@@ -65,13 +73,13 @@ const buildFilters = (principal, { category, type, unreadOnly, includeArchived }
 /** The inbox screen: newest first, paginated, with the unread badge alongside. */
 const findForPrincipal = async (
   principal,
-  { page = 1, limit = 20, category, type, unreadOnly = false, includeArchived = false } = {}
+  { page = 1, limit = 20, category, type, unreadOnly = false, includeArchived = false, excludeTypes } = {}
 ) => {
   const pageNum = Math.max(1, parseInt(page) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 20));
   const offset = (pageNum - 1) * limitNum;
 
-  const whereClause = buildFilters(principal, { category, type, unreadOnly, includeArchived });
+  const whereClause = buildFilters(principal, { category, type, unreadOnly, includeArchived, excludeTypes });
 
   const [rows, [{ total }]] = await Promise.all([
     db
@@ -96,13 +104,14 @@ const findForPrincipal = async (
 };
 
 /** The badge. Hits the partial unread index; called on every app foreground. */
-const unreadCount = async (principal) => {
+const unreadCount = async (principal, { excludeTypes } = {}) => {
   const [row] = await db
     .select({ total: count() })
     .from(notifications)
     .where(
       and(
         principalWhere(notifications, principal),
+        ...withoutTypes(excludeTypes),
         isNull(notifications.readAt),
         isNull(notifications.archivedAt)
       )
@@ -111,13 +120,14 @@ const unreadCount = async (principal) => {
 };
 
 /** Per-category unread tallies, for tabbed inboxes. */
-const unreadCountsByCategory = async (principal) => {
+const unreadCountsByCategory = async (principal, { excludeTypes } = {}) => {
   const rows = await db
     .select({ category: notifications.category, total: count() })
     .from(notifications)
     .where(
       and(
         principalWhere(notifications, principal),
+        ...withoutTypes(excludeTypes),
         isNull(notifications.readAt),
         isNull(notifications.archivedAt)
       )

@@ -1,8 +1,11 @@
 const crypto = require("crypto");
 const asyncHandler = require("express-async-handler");
-const { staffRepo, staffScopeRepo } = require("../../repositories");
+const { staffRepo, staffScopeRepo, sessionRepo } = require("../../repositories");
 const { mapRolesToBackend } = require("../../config/roleMapping");
 const { notifyAndWait } = require("../../notifications");
+const staffChoices = require("../../notifications/staffChoices");
+const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../lib/pfiAssignmentContext");
+const pfiAssignments = require("../../services/pfiAssignments.service");
 const sessionService = require("../../services/session.service");
 
 const REALM = "staff";
@@ -22,6 +25,7 @@ const createAdmin = asyncHandler(async (req, res) => {
   const {
     first_name, surname, other_names, email, phone_number, roles, suspended,
     can_view_all_locations, depot_ids, lpg_station_ids, pfi_ids, filling_station_ids, page_overrides,
+    notification_overrides,
   } = req.body;
 
   if (!first_name || !surname || !email) {
@@ -67,10 +71,13 @@ const createAdmin = asyncHandler(async (req, res) => {
       lpgStationIds: toIdList(lpg_station_ids),
       pfiIds: toIdList(pfi_ids),
       fillingStationIds: toIdList(filling_station_ids),
-    });
+    }, contextFromRequest(req, SOURCES.MANAGE_USERS, "Assigned when the account was created"));
   }
   if (page_overrides) {
     await staffScopeRepo.setPageOverrides(admin.id, page_overrides.map((o) => ({ routePath: o.route_path, allowed: o.allowed })));
+  }
+  if (notification_overrides) {
+    await staffChoices.setOverrides(admin.id, notification_overrides);
   }
 
   // Through the engine rather than the bare sender, so the send lands in
@@ -103,14 +110,25 @@ const getAllAdmins = asyncHandler(async (req, res) => {
 
   const safeStaff = staff.map(({ password, refreshToken, passwordResetToken, passwordResetExpires, ...rest }) => rest);
   const staffIds = safeStaff.map((s) => s.id);
-  const [scopeByStaff, overridesByStaff] = await Promise.all([
+  const [scopeByStaff, overridesByStaff, notificationsByStaff, activity] = await Promise.all([
     staffScopeRepo.getScopeWithNamesForStaffIds(staffIds),
     staffScopeRepo.getPageOverridesForStaffIds(staffIds),
+    staffChoices.overridesForStaffIds(staffIds),
+    sessionRepo.staffActivity(staffIds),
   ]);
   const enriched = safeStaff.map((s) => ({
     ...s,
     ...scopeByStaff.get(s.id),
     pageOverrides: overridesByStaff.get(s.id) || [],
+    // Carried on the list for the same reason as pageOverrides: the edit form
+    // opens from it, and a save that started without them would wipe them.
+    notificationOverrides: notificationsByStaff.get(s.id) || [],
+    // When they were last active, and how many sign-ins are live. The address
+    // and browser stay on the detail — a list of everybody's IPs is not what
+    // the directory is for.
+    lastActiveAt: activity.get(s.id)?.lastActiveAt ?? null,
+    activeSessions: activity.get(s.id)?.activeSessions ?? 0,
+    activeBrowsers: activity.get(s.id)?.activeBrowsers ?? 0,
   }));
 
   res.json({
@@ -129,14 +147,31 @@ const getAdminById = asyncHandler(async (req, res) => {
   }
 
   const { password, refreshToken, passwordResetToken, passwordResetExpires, ...safeAdmin } = admin;
-  const [scope, pageOverrides] = await Promise.all([
+  const [scope, pageOverrides, notificationOverrides, activity] = await Promise.all([
     staffScopeRepo.getScopeWithNames(admin.id),
     staffScopeRepo.getPageOverrides(admin.id),
+    staffChoices.overridesFor(admin.id),
+    sessionRepo.staffActivity([admin.id]),
   ]);
+  const seen = activity.get(Number(admin.id));
 
   res.json({
     success: true,
-    data: { admin: { ...safeAdmin, ...scope, pageOverrides } },
+    data: {
+      admin: {
+        ...safeAdmin,
+        ...scope,
+        pageOverrides,
+        notificationOverrides,
+        lastActiveAt: seen?.lastActiveAt ?? null,
+        activeSessions: seen?.activeSessions ?? 0,
+        activeBrowsers: seen?.activeBrowsers ?? 0,
+        // The latest sign-in seen, for "last active from".
+        lastSession: seen
+          ? { ipAddress: seen.ipAddress, userAgent: seen.userAgent, deviceName: seen.deviceName }
+          : null,
+      },
+    },
   });
 });
 
@@ -144,6 +179,7 @@ const updateAdmin = asyncHandler(async (req, res) => {
   const {
     first_name, surname, other_names, email, phone_number, roles, suspended,
     can_view_all_locations, depot_ids, lpg_station_ids, pfi_ids, filling_station_ids, page_overrides,
+    notification_overrides,
   } = req.body;
 
   const admin = await staffRepo.findById(req.params.id);
@@ -172,7 +208,10 @@ const updateAdmin = asyncHandler(async (req, res) => {
     lpg_station_ids !== undefined ||
     pfi_ids !== undefined ||
     filling_station_ids !== undefined ||
-    page_overrides !== undefined;
+    page_overrides !== undefined ||
+    // Who gets order and payment notices is as much about what somebody sees
+    // as which pages they open.
+    notification_overrides !== undefined;
 
   if (changesPrivileges && !isSuperAdmin) {
     return res.status(403).json({
@@ -250,10 +289,13 @@ const updateAdmin = asyncHandler(async (req, res) => {
       pfiIds: pfi_ids !== undefined ? toIdList(pfi_ids) : current.pfiIds,
       fillingStationIds:
         filling_station_ids !== undefined ? toIdList(filling_station_ids) : current.fillingStationIds,
-    });
+    }, contextFromRequest(req, SOURCES.MANAGE_USERS));
   }
   if (page_overrides !== undefined) {
     await staffScopeRepo.setPageOverrides(admin.id, page_overrides.map((o) => ({ routePath: o.route_path, allowed: o.allowed })));
+  }
+  if (notification_overrides !== undefined) {
+    await staffChoices.setOverrides(admin.id, notification_overrides);
   }
 
   res.json({
@@ -397,7 +439,12 @@ const deleteAdmin = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "User not found" });
   }
 
-  await staffRepo.deleteById(req.params.id);
+  // The account's PFI assignments go with it, by cascade; the record says so,
+  // and who did it.
+  await withAssignmentContext(
+    contextFromRequest(req, SOURCES.ACCOUNT_DELETED, "The account was deleted"),
+    (tx) => staffRepo.deleteById(req.params.id, tx),
+  );
 
   res.json({
     success: true,
@@ -449,7 +496,31 @@ const resendInvite = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * The notifications an admin can tick per person, with who gets each by
+ * default — what the Manage Users form draws. See notifications/staffChoices.js.
+ */
+/**
+ * A staff member's PFI record — current assignments, past ones, and every
+ * change, from the append-only log (services/pfiAssignments.service.js).
+ */
+const getPfiAssignments = asyncHandler(async (req, res) => {
+  const admin = await staffRepo.findById(req.params.id);
+  // A deleted account's record is still readable by id: the log outlives it.
+  const record = await pfiAssignments.recordFor(req.params.id);
+  if (!admin && !record.events.length) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+  res.json({ success: true, data: record });
+});
+
+const getNotificationChoices = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: { choices: staffChoices.publicChoices() } });
+});
+
 module.exports = {
+  getPfiAssignments,
+  getNotificationChoices,
   createAdmin,
   getAllAdmins,
   getAdminById,

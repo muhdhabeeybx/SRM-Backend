@@ -25,6 +25,12 @@ const {
   getPfiSurpluses,
   addPfiSurplus,
   voidPfiSurplus,
+  getPfiFile,
+  getPfiRegister,
+  listPfiNotes,
+  addPfiNote,
+  updatePfiNote,
+  deletePfiNote,
 } = require("../../controllers/administration/pfi.controller");
 
 // Stock across every PFI. Declared before "/:id" so it is not swallowed by it.
@@ -32,6 +38,9 @@ router.get("/stock-summary", verifyStaff, getStockSummary);
 // Bulk assignment lives here rather than under /orders because it is the PFI
 // that validates the request.
 router.post("/assign-orders", verifyStaff, assignOrdersToPfi);
+// What the full PFI report needs beyond the list — banks, people, activity,
+// notes — for every PFI in the caller's scope. Also before "/:id".
+router.get("/register", verifyStaff, getPfiRegister);
 
 router.get("/", verifyStaff, validate({ query: misc.listPfis }), getPfis);
 router.post("/", verifyStaff, validate({ body: misc.createPfi }), createPfi);
@@ -79,5 +88,25 @@ router.post(
   validate({ params: misc.pfiSurplusParam, body: misc.voidPfiSurplus }),
   voidPfiSurplus
 );
+
+// The PFI file: everything about one PFI, for its page and its report.
+router.get("/:id/file", verifyStaff, validate({ params: misc.idParam }), getPfiFile);
+
+// Notes on the file — what happened, what went wrong, what was decided. See
+// migration 0058.
+router.get("/:id/notes", verifyStaff, validate({ params: misc.idParam }), listPfiNotes);
+router.post(
+  "/:id/notes",
+  verifyStaff,
+  validate({ params: misc.idParam, body: misc.addPfiNote }),
+  addPfiNote
+);
+router.patch(
+  "/:id/notes/:noteId",
+  verifyStaff,
+  validate({ params: misc.pfiNoteParam, body: misc.updatePfiNote }),
+  updatePfiNote
+);
+router.delete("/:id/notes/:noteId", verifyStaff, validate({ params: misc.pfiNoteParam }), deletePfiNote);
 
 module.exports = router;

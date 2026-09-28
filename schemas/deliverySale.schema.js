@@ -1,6 +1,6 @@
 const z = require("zod");
 const {
-  id, money, quantity, requiredString, optionalString, optionalEmail,
+  id, money, volume, requiredString, optionalString, optionalEmail,
   enumOf, searchTerm, pagination,
 } = require("./fields");
 
@@ -25,7 +25,8 @@ const base = {
   customerId: id("Customer").optional(),
   customerName: optionalString("Customer name", 255),
   location: optionalString("Location", 255),
-  quantity: quantity("Quantity").optional(),
+  // Litres off the pump or the truck's dip — decimals allowed (fields.volume).
+  quantity: volume("Quantity").optional(),
   rate: money("Rate").optional(),
   salesValue: money("Sales value").optional(),
   paymentAmount: money("Payment amount").optional(),

@@ -105,8 +105,8 @@ const update = async (id, data) => {
   return row || null;
 };
 
-const deleteById = async (id) => {
-  const [row] = await db.delete(staff).where(eq(staff.id, id)).returning();
+const deleteById = async (id, tx = db) => {
+  const [row] = await tx.delete(staff).where(eq(staff.id, id)).returning();
   return row || null;
 };
 

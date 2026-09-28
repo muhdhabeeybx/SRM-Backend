@@ -232,6 +232,17 @@ const staffBase = {
     )
     .max(200, "Too many page overrides")
     .optional(),
+  // Per-person exceptions to the notifications their roles bring — see
+  // notifications/staffChoices.js. Gated like page_overrides.
+  notification_overrides: z
+    .array(
+      z.object({
+        choice: requiredString("Notification choice", 64),
+        enabled: z.boolean({ error: "enabled must be true or false" }),
+      })
+    )
+    .max(50, "Too many notification choices")
+    .optional(),
 };
 const createStaff = z.object({
   ...staffBase,
@@ -289,7 +300,14 @@ const bankAccountBase = {
    * disagree with them.
    */
   pfiIds: z.array(z.union([id("PFI id"), z.string(), z.number()])).optional(),
+  /**
+   * Depots the account is assigned to directly, beside those its PFIs imply
+   * (migration 0062). The server still writes depotIds itself, as the union.
+   */
+  assignedDepotIds: z.array(z.union([id("Depot id"), z.string(), z.number()])).optional(),
   lpgStationIds: z.array(z.union([id("Station id"), z.string(), z.number()])).optional(),
+  /** Filling stations whose sales are lodged here (migration 0062). */
+  fillingStationIds: z.array(z.union([id("Filling station id"), z.string(), z.number()])).optional(),
   /**
    * Which areas of the app may collect into this account.
    *
@@ -907,6 +925,23 @@ const voidPfiSurplus = z.object({
 });
 
 /**
+ * A note on a PFI's file. The words are required; the kind defaults to a plain
+ * note and the day to today. See migration 0058.
+ */
+const PFI_NOTE_KINDS = ["note", "issue", "decision"];
+const pfiNoteParam = z.object({ id: id("PFI"), noteId: id("Note") });
+const addPfiNote = z.object({
+  kind: enumOf("Kind", PFI_NOTE_KINDS).optional(),
+  body: requiredString("Note", 4000),
+  occurredOn: optCalendarDay("Date"),
+});
+const updatePfiNote = z.object({
+  kind: enumOf("Kind", PFI_NOTE_KINDS).optional(),
+  body: requiredString("Note", 4000).optional(),
+  occurredOn: optCalendarDay("Date"),
+});
+
+/**
  * Which accounts a PFI collects into — the whole list, not a change to it.
  * Empty is allowed: it is how a PFI is taken off every account.
  */
@@ -919,6 +954,9 @@ module.exports = {
   pfiSurplusParam,
   recordPfiSurplus,
   voidPfiSurplus,
+  pfiNoteParam,
+  addPfiNote,
+  updatePfiNote,
   pfiAccountsParam,
   setPfiAccounts,
   setPfiTrucks,

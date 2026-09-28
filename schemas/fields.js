@@ -59,13 +59,30 @@ const id = (label = "id") =>
     z.number().int(`${label} must be a whole number`).positive(`${label} must be a valid id`)
   );
 
-/** Litres, units — a whole positive count. */
+/** Litres, units — a whole positive count. For orders, which are sold in whole litres. */
 const quantity = (label = "Quantity") =>
   numberLike(label).pipe(
     z
       .number()
       .int(`${label} must be a whole number`)
       .positive(`${label} must be greater than zero`)
+  );
+
+/**
+ * A measured volume — litres off a pump meter or a dip — which is not a whole
+ * number: a filling station's day reads 12,345.67 litres, and making the desk
+ * round it made the sheet disagree with the meter.
+ *
+ * Up to three decimal places, the finest any meter here reads. Positive, and
+ * capped well above any real day so a slipped key is caught.
+ */
+const volume = (label = "Volume") =>
+  numberLike(label).pipe(
+    z
+      .number()
+      .positive(`${label} must be greater than zero`)
+      .max(100_000_000, `${label} is too large`)
+      .refine((n) => Number.isInteger(Math.round(n * 1000 * 1e6) / 1e6), `${label} can have at most 3 decimal places`)
   );
 
 /**
@@ -175,6 +192,7 @@ module.exports = {
   numberLike,
   id,
   quantity,
+  volume,
   money,
   requiredString,
   optionalString,

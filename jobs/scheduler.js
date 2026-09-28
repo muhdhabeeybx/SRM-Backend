@@ -1,4 +1,5 @@
 const { registerWorker, scheduleCron } = require("../config/queue");
+const { rolesFor } = require("../notifications/staffChoices");
 const { expiryTimeOfDay, EXPIRY_TZ } = require("../config/orderExpiry");
 const { expireStaleOrders } = require("../services/order.service");
 const { expireStaleRequests } = require("../services/requestExpiry.service");
@@ -84,7 +85,7 @@ const start = async () => {
       console.error("[scheduler] daily report FAILED:", err.message);
       try {
         await notify("staff.report_send_failed", {
-          to: { roles: ["admin", "super_admin"] },
+          to: { roles: rolesFor("report_failures") },
           data: { reason: err.message, at: new Date().toISOString() },
         });
       } catch (notifyErr) {

@@ -176,6 +176,23 @@ async function depotsForPfis(pfiIds) {
 }
 
 /**
+ * An account's locations: the depots its PFIs imply, and the depots it is
+ * assigned to directly (migration 0062). depot_ids is the union — the one list
+ * every reader uses — so an order at a depot finds an account assigned there
+ * whichever way it was assigned.
+ */
+async function locationsFor(pfiIds, assignedDepotIds) {
+  const derived = await depotsForPfis(pfiIds);
+  const direct = [...new Set((Array.isArray(assignedDepotIds) ? assignedDepotIds : [])
+    .map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  return {
+    pfiIds: derived.pfiIds,
+    assignedDepotIds: direct,
+    depotIds: [...new Set([...derived.depotIds, ...direct])],
+  };
+}
+
+/**
  * The assignment stamps for a new set of PFIs, given the old ones.
  *
  * A PFI already assigned keeps the date it was first attached — re-saving an
@@ -196,7 +213,7 @@ function stampAssignments(previous, nextIds, now = new Date()) {
 }
 
 const createBankAccount = asyncHandler(async (req, res) => {
-  const { bankName, accountName, accountNumber, bankCode, branchName, currency, status, isDefault, pfiIds, lpgStationIds, usage, notes } = req.body;
+  const { bankName, accountName, accountNumber, bankCode, branchName, currency, status, isDefault, pfiIds, assignedDepotIds, lpgStationIds, fillingStationIds, usage, notes } = req.body;
 
   if (!bankName || !accountName || !accountNumber) {
     return res.status(400).json({
@@ -205,7 +222,7 @@ const createBankAccount = asyncHandler(async (req, res) => {
     });
   }
 
-  const scoped = await depotsForPfis(pfiIds);
+  const scoped = await locationsFor(pfiIds, assignedDepotIds);
 
   const account = await bankAccountRepo.create({
     bankName: bankName.trim(),
@@ -219,7 +236,9 @@ const createBankAccount = asyncHandler(async (req, res) => {
     pfiIds: scoped.pfiIds,
     pfiAssignedAt: stampAssignments({}, scoped.pfiIds),
     depotIds: scoped.depotIds,
+    assignedDepotIds: scoped.assignedDepotIds,
     lpgStationIds: Array.isArray(lpgStationIds) ? lpgStationIds : [],
+    fillingStationIds: Array.isArray(fillingStationIds) ? fillingStationIds : [],
     usage: Array.isArray(usage) ? usage : [],
     notes: notes || "",
   });
@@ -240,13 +259,19 @@ const updateBankAccount = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "Bank account not found" });
   }
 
-  // Same rule as create: the locations follow the PFIs. Only recomputed when
-  // pfiIds is actually part of the update, so a patch changing only the bank
-  // name does not silently clear the assignment.
+  // Same rule as create: the locations are the PFIs' depots plus the ones
+  // assigned directly. Only recomputed when either is part of the update, so a
+  // patch changing only the bank name does not silently clear the assignment;
+  // the half not sent is taken as it stands.
   const patch = { ...req.body };
-  if (patch.pfiIds !== undefined) {
-    const scoped = await depotsForPfis(patch.pfiIds);
+  delete patch.depotIds; // derived, never sent
+  if (patch.pfiIds !== undefined || patch.assignedDepotIds !== undefined) {
+    const scoped = await locationsFor(
+      patch.pfiIds !== undefined ? patch.pfiIds : account.pfiIds,
+      patch.assignedDepotIds !== undefined ? patch.assignedDepotIds : account.assignedDepotIds,
+    );
     patch.pfiIds = scoped.pfiIds;
+    patch.assignedDepotIds = scoped.assignedDepotIds;
     patch.depotIds = scoped.depotIds;
     patch.pfiAssignedAt = stampAssignments(account.pfiAssignedAt, scoped.pfiIds);
   }
@@ -315,7 +340,8 @@ const setAccountsForPfi = asyncHandler(async (req, res) => {
   const accounts = await client`
     SELECT id, status, bank_name, account_number,
            CASE WHEN jsonb_typeof(pfi_ids) = 'array' THEN pfi_ids ELSE '[]'::jsonb END AS pfi_ids,
-           CASE WHEN jsonb_typeof(pfi_assigned_at) = 'object' THEN pfi_assigned_at ELSE '{}'::jsonb END AS pfi_assigned_at
+           CASE WHEN jsonb_typeof(pfi_assigned_at) = 'object' THEN pfi_assigned_at ELSE '{}'::jsonb END AS pfi_assigned_at,
+           CASE WHEN jsonb_typeof(assigned_depot_ids) = 'array' THEN assigned_depot_ids ELSE '[]'::jsonb END AS assigned_depot_ids
       FROM bank_accounts`;
   const byId = new Map(accounts.map((a) => [Number(a.id), a]));
 
@@ -339,7 +365,9 @@ const setAccountsForPfi = asyncHandler(async (req, res) => {
     const want = wanted.includes(id);
     if (has === want) continue;
     const next = want ? [...current, pfiId] : current.filter((x) => x !== pfiId);
-    const derived = await depotsForPfis(next);
+    // The account's own direct locations ride along, so taking a PFI off an
+    // account never takes away a depot it was assigned to by hand.
+    const derived = await locationsFor(next, a.assigned_depot_ids);
     // Stamped here as well as on the account form: assigning from the PFI side
     // is the same act, and a date that appeared only when finance happened to
     // use one of the two screens would be worse than none.

@@ -1,4 +1,5 @@
 const { eq } = require("drizzle-orm");
+const { rolesFor } = require("../notifications/staffChoices");
 const { db } = require("../config/db");
 const { orders, customers } = require("../db/schema");
 const { auditLogRepo, customerRepo } = require("../repositories");
@@ -132,7 +133,7 @@ async function announce(order, toStatus, opts) {
     // that an order is ready to release.
     if (toStatus === "Paid") {
       notify("staff.payment_received", {
-        to: { roles: ["admin", "super_admin", "finance_manager", "sales_manager"] },
+        to: { roles: rolesFor("payments_received") },
         data: {
           orderId: order.id,
           orderNumber: order.orderNumber,

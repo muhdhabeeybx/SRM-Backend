@@ -2,7 +2,7 @@ const { denyPfiScoped } = require("../../lib/pfiScope");
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
-const { getStats, getOverview, getWorkQueues, getActivity } = require("../../controllers/administration/dashboard.controller");
+const { getStats, getOverview, getWorkQueues, getMyPfis, getMyNotifications, getActivity } = require("../../controllers/administration/dashboard.controller");
 const {
   getDeskAssignments, getDeskNudges, sendDeskNudges, smsDeskNudge,
 } = require("../../controllers/administration/deskNudge.controller");
@@ -20,6 +20,12 @@ router.get("/overview", verifyStaff, denyPfiScoped, getOverview);
 // Sidebar badges and the "my work" landing page. Any signed-in staff member —
 // it reports how much work is waiting on THEM, scoped to their own locations.
 router.get("/work-queues", verifyStaff, getWorkQueues);
+// The PFIs this person is assigned to, for their dashboard. Their own
+// assignments only, so it is not refused to PFI-confined staff — they are
+// exactly who it is for.
+router.get("/my-pfis", verifyStaff, getMyPfis);
+// Their notifications, narrowed to what is about them. Their own inbox only.
+router.get("/my-notifications", verifyStaff, getMyNotifications);
 // The full activity log. Same source as the overview’s ten rows.
 router.get("/activity", verifyStaff, denyPfiScoped, getActivity);
 

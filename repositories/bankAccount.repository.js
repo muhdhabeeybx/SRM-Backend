@@ -31,7 +31,57 @@ function resolveBankCode(bankName, providedCode) {
   return "";
 }
 
+/** A jsonb id list as positive whole numbers, whatever shape it arrived in. */
+function idList(raw) {
+  let list = raw;
+  if (typeof list === "string") {
+    try { list = JSON.parse(list); } catch { list = []; }
+  }
+  return Array.isArray(list)
+    ? [...new Set(list.map(Number).filter((n) => Number.isInteger(n) && n > 0))]
+    : [];
+}
+
 let tableInitialized = false;
+
+/**
+ * Whether migration 0062's filling_station_ids is on this database.
+ *
+ * Checked rather than added here: unlike the columns ensureTableExists adds,
+ * this one is written only by the migration, so a server running ahead of it
+ * keeps working and says what is missing instead of failing every save. Only
+ * a yes is remembered, so applying the migration needs no restart.
+ */
+let hasFillingColumn = false;
+async function fillingStationColumn() {
+  if (hasFillingColumn) return true;
+  const rows = await client`
+    SELECT 1 FROM information_schema.columns
+     WHERE table_name = 'bank_accounts' AND column_name = 'filling_station_ids'`;
+  hasFillingColumn = rows.length > 0;
+  return hasFillingColumn;
+}
+
+/**
+ * The filling stations to store, from what a client sent: filling stations
+ * only, each once. Anything else is dropped rather than stored as a dangling
+ * id. Refused outright when the column is not there yet.
+ */
+async function cleanFillingStations(raw) {
+  const ids = idList(raw);
+  if (!(await fillingStationColumn())) {
+    if (!ids.length) return null;
+    const err = new Error("Assigning a filling station needs migration 0062 on this database.");
+    err.status = 409;
+    throw err;
+  }
+  if (!ids.length) return [];
+  const rows = await client`
+    SELECT id FROM delivery_customers
+     WHERE id = ANY(${ids}) AND customer_type = 'filling_station'`;
+  const known = new Set(rows.map((r) => Number(r.id)));
+  return ids.filter((id) => known.has(id));
+}
 
 async function ensureTableExists() {
   if (tableInitialized) return;
@@ -59,6 +109,10 @@ async function ensureTableExists() {
     `;
     await client`
       ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS usage JSONB DEFAULT '[]'::jsonb NOT NULL;
+    `;
+    // Migration 0062 — depots assigned directly, beside those the PFIs imply.
+    await client`
+      ALTER TABLE bank_accounts ADD COLUMN IF NOT EXISTS assigned_depot_ids JSONB DEFAULT '[]'::jsonb NOT NULL;
     `;
     tableInitialized = true;
   } catch (err) {
@@ -132,6 +186,22 @@ async function attachDepotsToAccount(account) {
     }
   }
 
+  const fillingStationIds = idList(account.filling_station_ids ?? account.fillingStationIds);
+  let fillingStations = [];
+  if (fillingStationIds.length > 0) {
+    try {
+      const rows = await client`
+        SELECT id, name, customer_code, status
+          FROM delivery_customers
+         WHERE id = ANY(${fillingStationIds})`;
+      fillingStations = rows.map((r) => ({
+        id: r.id, name: r.name, code: r.customer_code || "", status: r.status,
+      }));
+    } catch (e) {
+      console.error("Failed to fetch filling stations for bank account:", e.message);
+    }
+  }
+
   const usage = Array.isArray(account.usage)
     ? account.usage
     : typeof account.usage === "string"
@@ -179,9 +249,13 @@ async function attachDepotsToAccount(account) {
     pfiIds: numericPfiIds,
     pfiAssignedAt: assignedAt,
     depotIds: numericDepotIds,
+    /** The depots assigned directly — the rest of depotIds comes from the PFIs. */
+    assignedDepotIds: idList(account.assigned_depot_ids ?? account.assignedDepotIds),
     depots,
     lpgStationIds: numericStationIds,
     lpgStations,
+    fillingStationIds,
+    fillingStations,
     usage: usage.map((u) => String(u)).filter(Boolean),
     notes: account.notes || "",
     createdAt: account.created_at || account.createdAt,
@@ -212,7 +286,8 @@ const bankAccountRepo = {
         const inStation = acc.lpgStations?.some((s) =>
           s.name?.toLowerCase().includes(query) || s.code?.toLowerCase().includes(query)
         );
-        return inBank || inName || inNumber || inDepot || inStation;
+        const inFilling = acc.fillingStations?.some((s) => s.name?.toLowerCase().includes(query));
+        return inBank || inName || inNumber || inDepot || inStation || inFilling;
       });
     }
 
@@ -321,7 +396,12 @@ const bankAccountRepo = {
       notes = "",
       pfiIds = [],
       pfiAssignedAt = {},
+      assignedDepotIds = [],
+      fillingStationIds = [],
     } = data;
+    const jsonAssignedDepots = JSON.stringify(idList(assignedDepotIds));
+    // Before the INSERT, so a refusal leaves nothing half-created.
+    const fillingStations = await cleanFillingStations(fillingStationIds);
 
     const cleanUsage = Array.isArray(usage)
       ? [...new Set(usage.map((u) => String(u).trim()).filter(Boolean))]
@@ -377,6 +457,7 @@ const bankAccountRepo = {
         pfi_ids,
         pfi_assigned_at,
         depot_ids,
+        assigned_depot_ids,
         lpg_station_ids,
         usage,
         notes,
@@ -394,6 +475,7 @@ const bankAccountRepo = {
         ${jsonPfiIds}::jsonb,
         ${jsonAssignedAt}::jsonb,
         ${jsonDepotIds}::jsonb,
+        ${jsonAssignedDepots}::jsonb,
         ${jsonStationIds}::jsonb,
         ${jsonUsage}::jsonb,
         ${notes},
@@ -403,7 +485,13 @@ const bankAccountRepo = {
       RETURNING *
     `;
 
-    const result = await attachDepotsToAccount(rows[0]);
+    let row = rows[0];
+    if (fillingStations && fillingStations.length) {
+      [row] = await client`
+        UPDATE bank_accounts SET filling_station_ids = ${JSON.stringify(fillingStations)}::jsonb
+         WHERE id = ${row.id} RETURNING *`;
+    }
+    const result = await attachDepotsToAccount(row);
 
     // Sync subaccounts for newly linked depots and stations
     const { syncSubaccountForDepot, syncSubaccountForStation } = require("../services/subaccount.service");
@@ -445,6 +533,7 @@ const bankAccountRepo = {
     const pfiIds = data.pfiIds !== undefined ? data.pfiIds : existing.pfiIds;
     const pfiAssignedAt = data.pfiAssignedAt !== undefined ? data.pfiAssignedAt : existing.pfiAssignedAt;
     const depotIds = data.depotIds !== undefined ? data.depotIds : existing.depotIds;
+    const assignedDepotIds = data.assignedDepotIds !== undefined ? data.assignedDepotIds : existing.assignedDepotIds;
     const lpgStationIds = data.lpgStationIds !== undefined ? data.lpgStationIds : existing.lpgStationIds;
     const usage = data.usage !== undefined ? data.usage : existing.usage;
     const notes = data.notes !== undefined ? data.notes : existing.notes;
@@ -474,6 +563,10 @@ const bankAccountRepo = {
       : [];
     const jsonStationIds = JSON.stringify(numericStationIds);
 
+    const fillingStations = data.fillingStationIds !== undefined
+      ? await cleanFillingStations(data.fillingStationIds)
+      : null;
+
     const oldDepotIds = (existing.depotIds || []).map(Number);
     const oldStationIds = (existing.lpgStationIds || []).map(Number);
 
@@ -495,6 +588,7 @@ const bankAccountRepo = {
         pfi_ids = ${jsonPfiIds}::jsonb,
         pfi_assigned_at = ${jsonAssignedAt}::jsonb,
         depot_ids = ${jsonDepotIds}::jsonb,
+        assigned_depot_ids = ${JSON.stringify(idList(assignedDepotIds))}::jsonb,
         lpg_station_ids = ${jsonStationIds}::jsonb,
         usage = ${jsonUsage}::jsonb,
         notes = ${notes},
@@ -504,7 +598,13 @@ const bankAccountRepo = {
     `;
 
     if (rows.length === 0) return null;
-    const result = await attachDepotsToAccount(rows[0]);
+    let row = rows[0];
+    if (fillingStations) {
+      [row] = await client`
+        UPDATE bank_accounts SET filling_station_ids = ${JSON.stringify(fillingStations)}::jsonb
+         WHERE id = ${numericId} RETURNING *`;
+    }
+    const result = await attachDepotsToAccount(row);
 
     // Sync subaccounts for affected depots and stations
     const { syncSubaccountForDepot, syncSubaccountForStation } = require("../services/subaccount.service");

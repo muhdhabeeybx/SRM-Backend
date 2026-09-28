@@ -77,6 +77,7 @@ const notificationDeliverySchema = require("./notificationDelivery");
 const notificationPreferenceSchema = require("./notificationPreference");
 const deviceTokenSchema = require("./deviceToken");
 const staffPageOverrideSchema = require("./staffPageOverride");
+const staffNotificationOverrideSchema = require("./staffNotificationOverride");
 // After ./staff — messageTemplate destructures it at load time.
 const messageTemplateSchema = require("./messageTemplate");
 const messageCampaignSchema = require("./messageCampaign");
@@ -149,6 +150,7 @@ module.exports = {
   ...notificationPreferenceSchema,
   ...deviceTokenSchema,
   ...staffPageOverrideSchema,
+  ...staffNotificationOverrideSchema,
   ...messageTemplateSchema,
   ...messageCampaignSchema,
   ...cfoReportEntrySchema,

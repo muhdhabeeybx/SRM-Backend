@@ -37,6 +37,19 @@ describe("bulk delivery sales schema", () => {
     assert.equal("depositStatus" in r.data.sales[0], false);
   });
 
+  test("a pump volume can carry decimals, as the meter reads it", () => {
+    const r = createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], quantity: "12345.67" }] });
+    assert.equal(r.success, true, JSON.stringify(r.error?.issues));
+    assert.equal(r.data.sales[0].quantity, 12345.67);
+    assert.equal(createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], quantity: 2500.5 }] }).success, true);
+  });
+
+  test("but not more than three decimal places, and never zero or less", () => {
+    assert.equal(createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], quantity: 1.2345 }] }).success, false);
+    assert.equal(createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], quantity: 0 }] }).success, false);
+    assert.equal(createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], quantity: -5.5 }] }).success, false);
+  });
+
   test("every row still needs its truck", () => {
     const r = createDeliverySalesBulk.safeParse({ sales: [day[0], { customerId: 12, paymentAmount: 1 }] });
     assert.equal(r.success, false);

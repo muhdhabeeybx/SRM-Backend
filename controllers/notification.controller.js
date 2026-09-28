@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const staffChoices = require("../notifications/staffChoices");
 const {
   notificationRepo,
   deviceTokenRepo,
@@ -35,6 +36,10 @@ const principalFrom = (req) => {
 
 const audienceFrom = (principal) => (principal.type === "staff" ? "staff" : "customer");
 
+/** Types this staff member has had switched off — hidden from their inbox. Nothing for a customer. */
+const hiddenTypesFor = (principal) =>
+  principal?.type === "staff" ? staffChoices.mutedTypesFor(principal.id) : Promise.resolve([]);
+
 /** The client-facing shape. Internal arc columns are never exposed. */
 const toPublic = (row) => ({
   id: row.id,
@@ -60,6 +65,7 @@ const toPublic = (row) => ({
 const list = asyncHandler(async (req, res) => {
   const principal = principalFrom(req);
   const { page, limit, category, type, unreadOnly, includeArchived } = req.query;
+  const excludeTypes = await hiddenTypesFor(principal);
 
   const [{ rows, pagination }, unread] = await Promise.all([
     notificationRepo.findForPrincipal(principal, {
@@ -69,8 +75,9 @@ const list = asyncHandler(async (req, res) => {
       type,
       unreadOnly,
       includeArchived,
+      excludeTypes,
     }),
-    notificationRepo.unreadCount(principal),
+    notificationRepo.unreadCount(principal, { excludeTypes }),
   ]);
 
   res.json({
@@ -88,9 +95,10 @@ const list = asyncHandler(async (req, res) => {
 /** GET /notifications/unread-count — the badge. Cheap enough to poll. */
 const unreadCount = asyncHandler(async (req, res) => {
   const principal = principalFrom(req);
+  const excludeTypes = await hiddenTypesFor(principal);
   const [total, byCategory] = await Promise.all([
-    notificationRepo.unreadCount(principal),
-    notificationRepo.unreadCountsByCategory(principal),
+    notificationRepo.unreadCount(principal, { excludeTypes }),
+    notificationRepo.unreadCountsByCategory(principal, { excludeTypes }),
   ]);
   res.json({ success: true, data: { unreadCount: total, byCategory } });
 });

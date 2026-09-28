@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const { rolesFor } = require("../../notifications/staffChoices");
 const {
   dangoteProductRepo,
   dangoteOrderRequestRepo,
@@ -166,7 +167,7 @@ const createDangoteOrderRequest = asyncHandler(async (req, res) => {
     },
   });
   notify("staff.request_submitted", {
-    to: { roles: ["admin", "super_admin", "sales_manager"] },
+    to: { roles: rolesFor("requests_submitted") },
     data: {
       requestId: request.id,
       requestNumber,

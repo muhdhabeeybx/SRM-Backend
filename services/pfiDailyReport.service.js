@@ -28,6 +28,8 @@
  *
  * A filling station is a row in `delivery_customers` with
  * customer_type = 'filling_station', reached through the sale's customer_id.
+ * An LPG plant ('lpg_plant', migration 0061) is a station too, and is listed
+ * with them — see isStationType.
  *
  * It was briefly grouped on `location` instead — free text on the sale row —
  * which listed DAMATURU and KADUNA as stations. They are cities. Grouping on
@@ -42,6 +44,7 @@ const { dayBounds, REPORT_TZ } = require("./dailyCombinedReport.service");
 // with the combined report so the two cannot describe the same sheet
 // differently — see notifications/templates/roleFields.js.
 const { ROLE_ORDER, ROLE_LABELS } = require("../notifications/templates/roleFields");
+const { isStationType } = require("../lib/customerTypes");
 
 const num = (v) => Number(v || 0);
 
@@ -106,7 +109,7 @@ const PAID_NGN_E = paidNgn("e.");
  * @param {object[]} liveRows the subset that is still trading — see isLive
  */
 const rollUpTruckSales = (all, liveRows) => {
-  const isTruckSale = (r) => r.customerType !== "filling_station";
+  const isTruckSale = (r) => !isStationType(r.customerType);
 
   const batches = new Map();
   for (const r of all.filter(isTruckSale)) {
@@ -494,9 +497,11 @@ const buildPfiDailyReportData = async (date = new Date()) => {
   /**
    * Delivery trading splits in two, by who bought.
    *
-   * `delivery_customers.customer_type` is either 'customer' or
-   * 'filling_station', and the two are different businesses wearing the same
-   * table. A customer buys a truck; a filling station holds stock and sells it
+   * `delivery_customers.customer_type` is 'customer', 'filling_station' or
+   * 'lpg_plant', and a customer and a station are different businesses
+   * wearing the same table. (An LPG plant is a station that sells gas — it
+   * holds stock and sells it down exactly as a filling station does, so it is
+   * counted with them: lib/customerTypes.js.) A customer buys a truck; a filling station holds stock and sells it
    * down. So a truck sale is counted in TRUCKS — how many went out, what they
    * were worth, what is still owed — and a station is counted in LITRES, because
    * the question there is how much is left in the ground.
@@ -654,7 +659,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
   const truckSales = rollUpTruckSales(all, liveRows);
 
   const stations = liveRows
-    .filter((r) => r.customerType === "filling_station")
+    .filter((r) => isStationType(r.customerType))
     // Batch first, then station alphabetically: the batch is what a reader
     // scans for, and within it the name is the only stable order there is.
     .sort((a, b) => a.code.localeCompare(b.code) || a.party.localeCompare(b.party));
@@ -853,9 +858,9 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       { litresToday: 0, valueToday: 0, receivedToday: 0, balance: 0, trucksToday: 0 }
     );
 
-  const truckSaleRows = liveRows.filter((r) => r.customerType !== "filling_station" && r.code !== "(unassigned)");
-  const stationSaleRows = liveRows.filter((r) => r.customerType === "filling_station");
-  const unassignedRows = liveRows.filter((r) => r.code === "(unassigned)" && r.customerType !== "filling_station");
+  const truckSaleRows = liveRows.filter((r) => !isStationType(r.customerType) && r.code !== "(unassigned)");
+  const stationSaleRows = liveRows.filter((r) => isStationType(r.customerType));
+  const unassignedRows = liveRows.filter((r) => r.code === "(unassigned)" && !isStationType(r.customerType));
 
   const truckTotals = tally(truckSaleRows);
   const stationTotals = tally(stationSaleRows);

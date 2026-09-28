@@ -1,6 +1,8 @@
 const asyncHandler = require("express-async-handler");
 const workQueues = require("../../services/workQueues.service");
 const overview = require("../../services/overview.service");
+const myPfis = require("../../services/myPfis.service");
+const myNotifications = require("../../services/myNotifications.service");
 const { resolvePeriod } = require("../../lib/reportPeriod");
 const { db } = require("../../config/db");
 const {
@@ -504,6 +506,29 @@ const getWorkQueues = asyncHandler(async (req, res) => {
 });
 
 /**
+ * The PFIs this person is assigned to, for their dashboard — stock, sales,
+ * loading and the accounts each collects into. Litres and counts only; see
+ * services/myPfis.service.js for why no money figure is on it.
+ *
+ * Open to every signed-in staff member, PFI-confined ones included: it only
+ * ever reads the caller's own assignments.
+ */
+const getMyPfis = asyncHandler(async (req, res) => {
+  const data = await myPfis.getMyPfis(req.user);
+  res.json({ success: true, data });
+});
+
+/**
+ * This person's notifications, for their dashboard: their own inbox, less the
+ * role-wide notices about orders and requests outside their scope. See
+ * services/myNotifications.service.js.
+ */
+const getMyNotifications = asyncHandler(async (req, res) => {
+  const data = await myNotifications.getMyNotifications(req.user, { limit: req.query.limit });
+  res.json({ success: true, data });
+});
+
+/**
  * The full activity log, paginated and filterable.
  *
  * Backs the activity page, and the overview's ten rows come from the same
@@ -537,4 +562,4 @@ const getActivity = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { getStats, getOverview, getWorkQueues, getActivity };
+module.exports = { getStats, getOverview, getWorkQueues, getMyPfis, getMyNotifications, getActivity };

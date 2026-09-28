@@ -1,5 +1,6 @@
 const { onEvent } = require("../services/events");
 const { notify } = require("./index");
+const { rolesFor, OPERATIONS_REVIEWERS, INCIDENT_REVIEWERS } = require("./staffChoices");
 
 /**
  * The bridge from the business event bus to the notification engine.
@@ -22,17 +23,17 @@ const { notify } = require("./index");
  * here; the one exception is noted where it occurs.
  */
 
-// Reviewers of operational paperwork. Roles are matched by overlap, so an
-// installation that has not created every role still notifies the ones it has.
-const OPERATIONS_REVIEWERS = ["admin", "super_admin", "operations_manager"];
-const INCIDENT_REVIEWERS = [...OPERATIONS_REVIEWERS, "hse_officer", "safety_officer"];
+// Who reviews what now lives in ./staffChoices.js, with every other role
+// notice, so an admin can take a person out of one or add a person to it.
+// Roles are matched by overlap, so an installation that has not created
+// every role still notifies the ones it has.
 
 const registerNotificationListeners = () => {
   // ─── ERP: daily reports ───────────────────────────────────────────────────
 
   onEvent("daily_report.submitted", async (p) => {
     await notify("staff.daily_report_submitted", {
-      to: { roles: OPERATIONS_REVIEWERS },
+      to: { roles: rolesFor("daily_reports") },
       data: {
         reportId: p.entityId,
         location: p.location,
@@ -65,7 +66,7 @@ const registerNotificationListeners = () => {
 
   onEvent("incident.submitted", async (p) => {
     await notify("staff.incident_submitted", {
-      to: { roles: INCIDENT_REVIEWERS },
+      to: { roles: rolesFor("incidents") },
       data: {
         incidentId: p.entityId,
         incidentType: p.incidentType,
@@ -115,7 +116,7 @@ const registerNotificationListeners = () => {
 
   onEvent("fleet.truck_created", async (p) => {
     await notify("staff.fleet_updated", {
-      to: { roles: [...OPERATIONS_REVIEWERS, "fleet_manager"] },
+      to: { roles: rolesFor("fleet_changes") },
       data: {
         truckId: p.entityId,
         truckNumber: p.plateNumber,

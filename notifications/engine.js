@@ -1,5 +1,6 @@
 const catalog = require("./catalog");
 const recipients = require("./recipients");
+const staffChoices = require("./staffChoices");
 const inAppChannel = require("./channels/inApp");
 const pushChannel = require("./channels/push");
 const emailChannel = require("./channels/email");
@@ -456,6 +457,18 @@ const dispatch = async (type, { to, data = {}, channels, force = false, campaign
   } catch (err) {
     console.error(`[notify] could not resolve recipients for "${type}":`, err.message);
     return { type, recipients: 0, delivered: 0, duplicates: 0, results: [], error: err.message };
+  }
+
+  // Each person's own choice of notices, ticked by an admin on Manage Users
+  // (./staffChoices.js): somebody switched off is dropped from every channel,
+  // somebody switched on is added, and an order notice reaches only those
+  // whose PFIs or depots hold the order. If the choices cannot be read, the send
+  // goes to the recipients as resolved — a notice reaching one person too
+  // many is better than one reaching nobody.
+  try {
+    resolved = await staffChoices.apply(type, resolved, data);
+  } catch (err) {
+    console.error(`[notify] could not apply staff notification choices for "${type}":`, err.message);
   }
 
   if (!resolved.length) {

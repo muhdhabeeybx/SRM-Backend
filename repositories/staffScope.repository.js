@@ -1,4 +1,5 @@
-const { eq, inArray } = require("drizzle-orm");
+const { eq, and, inArray } = require("drizzle-orm");
+const { setAssignmentContext } = require("../lib/pfiAssignmentContext");
 const { db } = require("../config/db");
 const {
   staff,
@@ -167,9 +168,20 @@ const getPageOverridesForStaffIds = async (staffIds) => {
   return byStaff;
 };
 
-/** Replaces this staff member's rows in all four scope join tables. */
-const setScope = async (staffId, { depotIds = [], lpgStationIds = [], pfiIds = [], fillingStationIds = [] } = {}) => {
+/**
+ * Replaces this staff member's rows in all four scope join tables.
+ *
+ * `context` says who is making the change and how (lib/pfiAssignmentContext.js),
+ * for the PFI assignment record the pfi_staff trigger writes.
+ */
+const setScope = async (
+  staffId,
+  { depotIds = [], lpgStationIds = [], pfiIds = [], fillingStationIds = [] } = {},
+  context = {},
+) => {
   await db.transaction(async (tx) => {
+    await setAssignmentContext(tx, context);
+
     await tx.delete(depotStaff).where(eq(depotStaff.staffId, staffId));
     if (depotIds.length) {
       await tx.insert(depotStaff).values(depotIds.map((depotId) => ({ depotId, staffId })));
@@ -180,9 +192,23 @@ const setScope = async (staffId, { depotIds = [], lpgStationIds = [], pfiIds = [
       await tx.insert(lpgStationStaff).values(lpgStationIds.map((lpgStationId) => ({ lpgStationId, staffId })));
     }
 
-    await tx.delete(pfiStaff).where(eq(pfiStaff.staffId, staffId));
-    if (pfiIds.length) {
-      await tx.insert(pfiStaff).values(pfiIds.map((pfiId) => ({ pfiId, staffId })));
+    /**
+     * PFIs are changed, not re-written. Every row here is an entry in the
+     * assignment record (migration 0060), so deleting and re-inserting them
+     * all on each save would log every assignment as ended and begun again
+     * whenever anything about the person was saved — and it is why
+     * pfi_staff.created_at could only ever say when the row was last saved.
+     */
+    const held = (await tx.select({ pfiId: pfiStaff.pfiId }).from(pfiStaff).where(eq(pfiStaff.staffId, staffId)))
+      .map((r) => Number(r.pfiId));
+    const wanted = [...new Set(pfiIds.map(Number).filter(Number.isFinite))];
+    const removed = held.filter((id) => !wanted.includes(id));
+    const added = wanted.filter((id) => !held.includes(id));
+    if (removed.length) {
+      await tx.delete(pfiStaff).where(and(eq(pfiStaff.staffId, staffId), inArray(pfiStaff.pfiId, removed)));
+    }
+    if (added.length) {
+      await tx.insert(pfiStaff).values(added.map((pfiId) => ({ pfiId, staffId })));
     }
 
     await tx.delete(fillingStationStaff).where(eq(fillingStationStaff.staffId, staffId));

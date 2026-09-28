@@ -16,6 +16,7 @@ const {
   deliveryCustomerStatusEnum,
 } = require("./enums");
 const { staff } = require("./staff");
+const { lpgStations } = require("./lpgStation");
 
 const deliveryCustomers = pgTable(
   "delivery_customers",
@@ -37,6 +38,9 @@ const deliveryCustomers = pgTable(
     stationAddress: text("station_address").default(""),
     tankCapacity: integer("tank_capacity").default(0),
     pumpCount: integer("pump_count").default(1),
+    // LPG plant only: the lpg_stations row this plant IS, when it is one of
+    // Soroman's own. One customer per plant. Migration 0061.
+    lpgStationId: integer("lpg_station_id").references(() => lpgStations.id, { onDelete: "set null" }),
     // Bank details (JSONB)
     bankDetails: jsonb("bank_details").default(sql`'{}'::jsonb`),
     // Structured plural forms: a customer can have several of each.
@@ -62,6 +66,9 @@ const deliveryCustomers = pgTable(
     index("delivery_customers_type_idx").on(table.customerType),
     index("delivery_customers_status_idx").on(table.status),
     index("delivery_customers_virtual_account_idx").on(table.virtualAccountNumber),
+    uniqueIndex("delivery_customers_lpg_station_uidx")
+      .on(table.lpgStationId)
+      .where(sql`${table.lpgStationId} IS NOT NULL`),
   ]
 );
 

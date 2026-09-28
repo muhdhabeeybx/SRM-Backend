@@ -10,6 +10,8 @@ const {
   changeMyPassword,
   deleteAdmin,
   resendInvite,
+  getNotificationChoices,
+  getPfiAssignments,
 } = require("../../controllers/administration/staff.controller");
 const { requireRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
@@ -27,7 +29,10 @@ router.patch("/me", validate({ body: misc.updateMyProfile }), updateMyProfile);
 router.post("/me/password", validate({ body: misc.changeMyPassword }), changeMyPassword);
 
 router.get("/", validate({ query: misc.listStaff }), getAllAdmins);
+// Before "/:id", so it is never read as an id.
+router.get("/notification-choices", getNotificationChoices);
 router.get("/:id", validate({ params: misc.idParam }), getAdminById);
+router.get("/:id/pfi-assignments", validate({ params: misc.idParam }), getPfiAssignments);
 // No route-level role gate on purpose: updateAdmin gates the privilege fields
 // (roles, suspended) per-field, so a super_admin route check here would also
 // block a normal staff member editing their own name/phone. See the comment in

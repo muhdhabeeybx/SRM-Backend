@@ -83,6 +83,7 @@ app.use("/api/drivers", require("./routes/administration/driver.route"));
 app.use("/api/depots", require("./routes/administration/depot.route"));
 app.use("/api/lpg-stations", require("./routes/administration/lpgStation.route"));
 app.use("/api/filing-stations", require("./routes/administration/filingStation.route"));
+app.use("/api/lpg-plants", require("./routes/administration/lpgPlant.route"));
 app.use("/api/products", require("./routes/administration/product.route"));
 app.use("/api/pfis", require("./routes/administration/pfi.route"));
 app.use("/api/expenses", require("./routes/administration/expense.route"));

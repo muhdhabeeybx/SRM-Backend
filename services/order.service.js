@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require("uuid");
+const { rolesFor } = require("../notifications/staffChoices");
 const { eq, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orders, commissions, pfiMovements, pfis } = require("../db/schema");
@@ -831,7 +832,7 @@ async function placeOrder({
   if (unpriced) {
     try {
       notify("staff.order_placed", {
-        to: { roles: ["admin", "super_admin", "sales_manager", "finance_manager"] },
+        to: { roles: rolesFor("orders_placed") },
         data: {
           orderId: order.id,
           orderNumber: reference,
@@ -941,7 +942,7 @@ async function placeOrder({
 
     // Sales and finance want to see the order land without watching the list.
     notify("staff.order_placed", {
-      to: { roles: ["admin", "super_admin", "sales_manager", "finance_manager"] },
+      to: { roles: rolesFor("orders_placed") },
       data: {
         orderId: order.id,
         orderNumber: reference,

@@ -182,6 +182,8 @@ const walletHoldStatusEnum = pgEnum("wallet_hold_status", [
 ]);
 
 // "customer" is the legacy catch-all; new records should use a specific type.
+// The API writes three of these — customer, filling_station and lpg_plant
+// (migration 0061); see lib/customerTypes.js.
 const deliveryCustomerTypeEnum = pgEnum("delivery_customer_type", [
   "customer",
   "filling_station",
@@ -192,6 +194,7 @@ const deliveryCustomerTypeEnum = pgEnum("delivery_customer_type", [
   "corporate",
   "government",
   "other",
+  "lpg_plant",
 ]);
 
 const deliveryCustomerStatusEnum = pgEnum("delivery_customer_status", [

@@ -182,4 +182,32 @@ const pfiEvacuationSurpluses = pgTable(
   ]
 );
 
-module.exports = { pfis, pfiEvacuationSurpluses };
+/**
+ * The narrative of a PFI — what happened, what went wrong, what was decided —
+ * printed in its report beside the figures it explains. `occurredOn` is when
+ * the thing happened, not when it was written. Withdrawn by marking it
+ * deleted, never by deleting the row. See migration 0058.
+ */
+const pfiNotes = pgTable(
+  "pfi_notes",
+  {
+    id: serial("id").primaryKey(),
+    pfiId: integer("pfi_id").notNull().references(() => pfis.id, { onDelete: "cascade" }),
+    kind: varchar("kind", { length: 20 }).default("note").notNull(),
+    body: text("body").notNull(),
+    occurredOn: date("occurred_on").defaultNow().notNull(),
+    authorId: integer("author_id").references(() => staff.id, { onDelete: "set null" }),
+    authorName: varchar("author_name", { length: 255 }).default("").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedBy: integer("deleted_by").references(() => staff.id, { onDelete: "set null" }),
+    deletedByName: varchar("deleted_by_name", { length: 255 }).default("").notNull(),
+  },
+  (table) => [
+    check("pfi_notes_kind_check", sql`${table.kind} IN ('note', 'issue', 'decision')`),
+    check("pfi_notes_body_check", sql`length(btrim(${table.body})) > 0`),
+  ]
+);
+
+module.exports = { pfis, pfiEvacuationSurpluses, pfiNotes };

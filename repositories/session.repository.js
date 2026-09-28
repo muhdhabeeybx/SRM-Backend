@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { eq, and, isNull, gt, desc, sql } = require("drizzle-orm");
-const { db } = require("../config/db");
+const { db, client } = require("../config/db");
+const { toIso } = require("./pfiFile.repository");
 const { sessions, staff, customers } = require("../db/schema");
 
 const PRINCIPAL_TABLES = { staff, customer: customers };
@@ -215,6 +216,63 @@ const touch = async (id, tx = db) => {
   return row || null;
 };
 
+/**
+ * When each member of staff was last active, and from where — for Manage Users.
+ *
+ * A refresh rotates the session into a new row, so the newest row by use is
+ * the latest activity, and its address and browser are the latest seen.
+ * `activeSessions` counts the sign-ins still live: not revoked, not expired.
+ * `activeBrowsers` counts the distinct browsers among them — people sign in
+ * afresh without signing out, so one laptop can hold twenty live sign-ins,
+ * and "20 devices" would be a figure nobody could believe.
+ * Staff who have never signed in are simply absent from the map.
+ *
+ * @returns {Promise<Map<number, {lastActiveAt: string|null, activeSessions: number,
+ *   ipAddress: string, userAgent: string, deviceName: string}>>}
+ */
+const staffActivity = async (staffIds) => {
+  const out = new Map();
+  const ids = [...new Set((staffIds || []).map(Number).filter(Number.isFinite))];
+  if (!ids.length) return out;
+  // Counted once per person, then joined — a count per session row ran to
+  // seconds once every refresh had left a row behind.
+  const rows = await client`
+    WITH latest AS (
+      SELECT DISTINCT ON (staff_id)
+             staff_id,
+             COALESCE(last_used_at, created_at) AS at,
+             COALESCE(ip_address, '') AS ip_address,
+             COALESCE(user_agent, '') AS user_agent,
+             COALESCE(device_name, '') AS device_name
+        FROM sessions
+       WHERE principal_type = 'staff' AND staff_id = ANY(${ids})
+       ORDER BY staff_id, COALESCE(last_used_at, created_at) DESC
+    ), live AS (
+      SELECT staff_id, count(*)::int AS n, count(DISTINCT COALESCE(user_agent, ''))::int AS browsers
+        FROM sessions
+       WHERE principal_type = 'staff' AND staff_id = ANY(${ids})
+         AND revoked_at IS NULL AND expires_at > now()
+       GROUP BY staff_id
+    )
+    SELECT l.staff_id AS "staffId", l.at AS "lastActiveAt", l.ip_address AS "ipAddress",
+           l.user_agent AS "userAgent", l.device_name AS "deviceName",
+           COALESCE(v.n, 0) AS "activeSessions",
+           COALESCE(v.browsers, 0) AS "activeBrowsers"
+      FROM latest l
+      LEFT JOIN live v ON v.staff_id = l.staff_id`;
+  for (const r of rows) {
+    out.set(Number(r.staffId), {
+      lastActiveAt: toIso(r.lastActiveAt),
+      activeSessions: r.activeSessions,
+      activeBrowsers: r.activeBrowsers,
+      ipAddress: r.ipAddress,
+      userAgent: r.userAgent,
+      deviceName: r.deviceName,
+    });
+  }
+  return out;
+};
+
 /** Housekeeping — rows past expiry are unrecoverable, so they are removable. */
 const deleteExpiredBefore = async (cutoff) => {
   return db
@@ -238,5 +296,6 @@ module.exports = {
   revokeAllForPrincipal,
   revokeFamily,
   touch,
+  staffActivity,
   deleteExpiredBefore,
 };

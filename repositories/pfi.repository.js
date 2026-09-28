@@ -1,4 +1,5 @@
-const { eq, and, or, ilike, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, asc, count, sql, gte, lte, inArray } = require("drizzle-orm");
+const { setAssignmentContext } = require("../lib/pfiAssignmentContext");
 const { db } = require("../config/db");
 const { pfis, depots, products, staff, pfiStaff, bankAccounts, deliveryInventory } = require("../db/schema");
 const { lpgStations } = require("../db/schema/lpgStation");
@@ -137,6 +138,28 @@ const findAll = async ({ search, status, location, type, scopeUser, page = 1, li
 };
 
 /**
+ * Named PFIs, with their location and product resolved the way findAll
+ * resolves them. Unknown ids are simply absent from the result.
+ */
+const findByIds = async (ids) => {
+  const list = [...new Set((ids || []).map(Number).filter(Number.isFinite))];
+  if (!list.length) return [];
+  const rows = await db
+    .select({ pfi: pfis, resolvedLocationName: LOCATION_NAME, resolvedProductName: products.name })
+    .from(pfis)
+    .leftJoin(depots, eq(pfis.locationId, depots.id))
+    .leftJoin(lpgStations, eq(pfis.lpgStationId, lpgStations.id))
+    .leftJoin(products, eq(pfis.productId, products.id))
+    .where(inArray(pfis.id, list));
+  return rows.map(({ pfi, resolvedLocationName, resolvedProductName }) => ({
+    ...pfi,
+    locationName: resolvedLocationName || pfi.locationName || "",
+    productName: pfi.productName || resolvedProductName || "",
+    _id: String(pfi.id),
+  }));
+};
+
+/**
  * The batches a depot may sell from, for one product.
  *
  * Two ways to match, not one:
@@ -188,8 +211,11 @@ const create = async (data) => {
  * see, and a batch written to inventory under a PFI that failed to activate is
  * stock owed against nothing.
  */
-const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy, note = "" }) => {
+const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy, note = "", context = {} }) => {
   return db.transaction(async (tx) => {
+    // For the PFI assignment record (migration 0060): the officers below are
+    // assigned by whoever released the PFI.
+    await setAssignmentContext(tx, context);
     const [current] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).limit(1);
     if (!current) throw new Error("PFI not found");
 
@@ -319,8 +345,8 @@ const update = async (id, data) => {
   return row || null;
 };
 
-const deleteById = async (id) => {
-  const [row] = await db.delete(pfis).where(eq(pfis.id, id)).returning();
+const deleteById = async (id, tx = db) => {
+  const [row] = await tx.delete(pfis).where(eq(pfis.id, id)).returning();
   return row || null;
 };
 
@@ -597,6 +623,7 @@ module.exports = {
   findById,
   findByNumber,
   findAll,
+  findByIds,
   findActiveByDepotAndProduct,
   create,
   activate,

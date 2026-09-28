@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const { rolesFor } = require("../../notifications/staffChoices");
 const { lpgOrderRequestRepo, lpgStationRepo, customerRepo } = require("../../repositories");
 const { sendLpgRequestReceivedEmail } = require("../../services/email.service");
 const { notify } = require("../../notifications");
@@ -90,7 +91,7 @@ const createMyLpgOrder = asyncHandler(async (req, res) => {
     },
   });
   notify("staff.request_submitted", {
-    to: { roles: ["admin", "super_admin", "sales_manager"] },
+    to: { roles: rolesFor("requests_submitted") },
     data: {
       requestId: request.id,
       requestNumber,
