@@ -83,7 +83,7 @@ const RESERVED_RECIPIENT =
 /**
  * @returns {Promise<Array<{destination, status, providerMessageId, error}>>}
  */
-const send = async ({ contact, rendered }) => {
+const sendOnce = async ({ contact, rendered }) => {
   const to = String(contact?.email || "").trim();
 
   if (!looksLikeEmail(to)) {
@@ -137,6 +137,36 @@ const send = async ({ contact, rendered }) => {
   } catch (err) {
     return [{ destination: to, status: "failed", providerMessageId: "", error: err.message }];
   }
+};
+
+/**
+ * The send, and its line in the message ledger (services/messageLog.service).
+ * Skipped sends went nowhere, so only sent and failed ones are written.
+ */
+const send = async (args) => {
+  const results = await sendOnce(args);
+  const { contact, rendered, principal, type } = args;
+  for (const r of results) {
+    if (r.status !== "sent" && r.status !== "failed") continue;
+    await require("../../services/messageLog.service").record({
+      channel: "email",
+      provider: "resend",
+      providerMessageId: r.providerMessageId || "",
+      recipient: r.destination || "",
+      subject: rendered?.email?.subject || rendered?.title || "",
+      body: rendered?.email?.text || rendered?.body || "",
+      status: r.status,
+      error: r.error || null,
+      tag: {
+        type,
+        audience: principal?.type === "staff" ? "staff" : principal?.type === "customer" ? "customer" : undefined,
+        staffId: principal?.type === "staff" ? principal.id : null,
+        customerId: principal?.type === "customer" ? principal.id : null,
+        recipientName: contact?.name || "",
+      },
+    });
+  }
+  return results;
 };
 
 module.exports = { send, isEnabled, looksLikeEmail };

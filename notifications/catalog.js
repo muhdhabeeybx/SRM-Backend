@@ -251,6 +251,26 @@ function expenseStages() {
   const who = (d) => d.actorName || "A colleague";
   const what = (d) => d.description || d.category || "expense";
 
+  /** Where the raiser's expense now is, per stage — for expense.progress. */
+  const by = (d) => (d.actorName ? ` by ${d.actorName}` : "");
+  const PROGRESS = {
+    verified: {
+      title: "Your expense was verified",
+      lead: (d) => `Your expense request was verified${by(d)}. It is now with the CFO for approval.`,
+      sms: (d) => `was verified${by(d)} and is now with the CFO for approval.`,
+    },
+    audit_approved: {
+      title: "Your expense was approved by the CFO",
+      lead: (d) => `Your expense request was approved by the CFO${d.actorName ? ` (${d.actorName})` : ""}. It now awaits final approval.`,
+      sms: (d) => `was approved by the CFO${d.actorName ? ` (${d.actorName})` : ""} and now awaits final approval.`,
+    },
+    admin_approved: {
+      title: "Your expense has final approval",
+      lead: (d) => `Your expense request was given final approval${by(d)} and is with the expenditure officer for payment.`,
+      sms: (d) => `was given final approval${by(d)} and is now with the expenditure officer for payment.`,
+    },
+  };
+
   return {
     "expense.pending": {
       ...base,
@@ -304,6 +324,31 @@ function expenseStages() {
         }),
       sms: (d) =>
         `${smsPrefix()}${expenseRef(d)} for ${what(d)} has CFO approval and is awaiting your final approval.`,
+    },
+
+    /**
+     * The same moves, told to the person whose expense it is.
+     *
+     * The approvers' copy says "awaiting your approval", and the raiser used to
+     * get exactly that — a request they cannot act on, worded as if they must.
+     * This says what happened to their expense and whose desk it is on now.
+     * data: the stage's data plus `stage` (verified | audit_approved | admin_approved)
+     */
+    "expense.progress": {
+      ...base,
+      priority: "normal",
+      channels: EMAIL_AND_SMS,
+      title: (d) => PROGRESS[d.stage]?.title || "Your expense moved on",
+      body: (d) => `${formatMoney(d.amount)} — ${what(d)}`,
+      email: (d) =>
+        mail(d, {
+          subject: `${expenseRef(d)} — ${PROGRESS[d.stage]?.title || "update"}`,
+          heading: PROGRESS[d.stage]?.title || "Your expense moved on",
+          lead: PROGRESS[d.stage]?.lead(d) || "Your expense request has moved to its next step.",
+          rows: payeeRows(d),
+        }),
+      sms: (d) =>
+        `${smsPrefix()}Your ${expenseRef(d)} for ${what(d)} ${PROGRESS[d.stage]?.sms(d) || "has moved to its next step."}`,
     },
 
     "expense.admin_approved": {
@@ -452,33 +497,37 @@ function deliverySms() {
   });
 
   return {
+    // Sent when the load is written to the inventory, which happens once the
+    // truck HAS loaded (a trucking PFI's activation, or the desk entering it) —
+    // so it says so, rather than asking the driver to report for loading.
     "delivery.truck_loaded": make(
-      "Truck assigned for loading",
+      "Truck loaded",
       (d) =>
-        `${P()}your truck ${truck(d)} has been assigned for loading at ` +
-        `${d.depotName || "the depot"}. Please report for loading.` +
-        `${d.inventoryId ? ` Reference INV-${d.inventoryId}.` : ""}`
+        `${P()}Your truck ${truck(d)} is loaded` +
+        `${d.quantity ? ` with ${smsQuantity(d.quantity, "Litres")}${d.product ? ` of ${d.product}` : ""}` : ""}` +
+        ` at ${d.depotName || "the depot"}${d.allocationCode ? ` on batch ${d.allocationCode}` : ""}. ` +
+        "You will get the customer's details by text."
     ),
 
     "delivery.assigned_driver": make(
       "Customer assigned to your truck",
       (d) =>
-        `${P()}your truck ${truck(d)} has been assigned to deliver to ` +
+        `${P()}Your truck ${truck(d)} has been assigned to deliver to ` +
         `${d.customerName || "a customer"}${on(d.customerPhone)}. Await further instructions.`
     ),
 
     "delivery.assigned_customer": make(
       "A truck is assigned to your order",
       (d) =>
-        `${P()}truck ${truck(d)} has been assigned to deliver your order.` +
+        `${P()}Truck ${truck(d)} has been assigned to deliver your order.` +
         `${d.driverName ? ` The driver is ${d.driverName}${on(d.driverPhone)}.` : ""}` +
-        " You will be notified when loading is confirmed."
+        " We will text you when your payment is received."
     ),
 
     "delivery.paid_driver": make(
       "Product sold — contact the customer",
       (d) =>
-        `${P()}the product in your truck ${truck(d)} has been sold to ` +
+        `${P()}The product in your truck ${truck(d)} has been sold to ` +
         `${d.payerName || "the payer"}${on(d.payerPhone)}. ` +
         `Please contact ${d.customerName || "the customer"}${on(d.customerPhone)} for delivery details.`,
       "high"
@@ -487,7 +536,7 @@ function deliverySms() {
     "delivery.paid_customer": make(
       "Payment received for your delivery",
       (d) =>
-        `${P()}payment received for truck ${truck(d)}. ` +
+        `${P()}Payment received for truck ${truck(d)}. ` +
         `Please contact the driver ${d.driverName || ""}${on(d.driverPhone)}`.replace(/ +/g, " ").trimEnd() +
         " to arrange delivery.",
       "high"
@@ -498,14 +547,14 @@ function deliverySms() {
     "delivery.paid_payer": make(
       "Payment confirmed",
       (d) =>
-        `${P()}payment confirmed. Truck ${truck(d)} is on the way with your product.` +
+        `${P()}Payment confirmed. Truck ${truck(d)} is on the way with your product.` +
         `${d.driverName ? ` The driver is ${d.driverName}${on(d.driverPhone)}.` : ""}`,
       "high"
     ),
 
     "delivery.release_confirmed": make(
       "Release confirmed",
-      (d) => `${P()}release confirmed for truck ${truck(d)}. Proceed to the exit gate.`,
+      (d) => `${P()}Release confirmed for truck ${truck(d)}. Proceed to the exit gate.`,
       "high"
     ),
 
@@ -523,6 +572,219 @@ function deliverySms() {
         `${P()}Dear ${d.customerName || "Customer"}, your delivery is on the way on truck ${truck(d)}` +
         `${d.ticketNumber ? `, ticket ${d.ticketNumber}` : ""}.`,
       "high"
+    ),
+  };
+}
+
+// ─── Desk steps ─────────────────────────────────────────────────────────────
+
+/**
+ * One text per move, to whoever makes the next one.
+ *
+ * An order passes desk to desk — finance, ticketing, the entrance gate, the
+ * exit gate — and a truck sale from the loading to the money. Each step tells
+ * the officers of the next desk on that PFI (notifications/deskOfficers.js),
+ * and the drivers and customers hear about their own truck. Sent by
+ * services/stepNotices.service.js, which is where the hooks call in.
+ *
+ * The gate desks get one text per ORDER, listing its trucks, not one per
+ * truck: sixty-odd trucks a day would bury the message that matters. Drivers
+ * and customers are told per truck, because each truck is their news.
+ *
+ * `customerName` is always passed by the sender, even as "": the engine fills
+ * a missing one with the RECIPIENT's name, which on a staff text would name the
+ * officer as the customer.
+ *
+ * data (staff): reference, orderId, customerName, product, quantity, unit,
+ *               totalAmount, depotName, pfiNumber, plates[], truckCount,
+ *               allocationCode, amount, payerName, truckNumber, reason
+ * data (driver/customer): see each entry
+ */
+function deskSteps() {
+  const P = () => smsPrefix();
+  const L = () => smsPrefixLoud();
+
+  /** "ABC123, DEF456 and 3 more" — a text is not the place for a manifest. */
+  const plateList = (plates = [], max = 5) => {
+    const list = plates.map((p) => String(p || "").trim()).filter(Boolean);
+    if (list.length <= max) return list.join(", ");
+    return `${list.slice(0, max).join(", ")} and ${list.length - max} more`;
+  };
+  const trucks = (n) => {
+    const k = Number(n) || 0;
+    return k ? `${k} truck${k === 1 ? "" : "s"}` : "trucks";
+  };
+  const on = (phone) => (phone ? ` on ${phone}` : "");
+  const pfi = (d) => (d.pfiNumber ? ` on PFI ${d.pfiNumber}` : "");
+  const at = (d) => (d.depotName ? ` at ${d.depotName}` : "");
+  /** The depot as the object of a verb: "left Calabar Depot", "entering the depot". */
+  const depot = (d) => d.depotName || "the depot";
+  const load = (d) =>
+    [smsQuantity(d.quantity, unitLabel(d)), d.product].filter(Boolean).join(" of ") || "the product";
+  const who = (d) => d.customerName || "a customer";
+
+  const orderEntity = (d) => ({ type: "order", id: d.orderId });
+  const orderLink = (d) => adminLink(`/orders/${d.orderId}`);
+
+  /** A staff step: bell, push and a text. */
+  const staffStep = ({ category = "orders", title, body, sms, entity = orderEntity, actionUrl = orderLink }) => ({
+    audience: "staff",
+    category,
+    priority: "high",
+    channels: APP_AND_SMS,
+    title,
+    body,
+    entity,
+    data: (d) => (d.orderId ? { screen: "OrderDetail", orderId: d.orderId } : {}),
+    actionUrl,
+    sms,
+  });
+
+  /** A text to somebody with no account — a driver, a truck-sale customer. */
+  const phoneOnly = (title, sms, entity) => ({
+    audience: "customer",
+    category: "delivery",
+    priority: "high",
+    channels: SMS_ONLY,
+    title: () => title,
+    body: (d) => sms(d),
+    entity,
+    sms,
+  });
+
+  return {
+    // ── Orders: the desks ──────────────────────────────────────────────────
+
+    "desk.order_to_confirm": staffStep({
+      category: "payments",
+      title: (d) => `New order ${ref(d)} — confirm payment`,
+      body: (d) =>
+        `${who(d)}: ${load(d)}${d.awaitingPrice ? " (not priced yet)" : ` for ${smsMoney(d.totalAmount)}`}${pfi(d)}.`,
+      sms: (d) =>
+        `${P()}New order ${ref(d)} from ${who(d)}: ${load(d)}` +
+        `${d.awaitingPrice ? "" : ` worth ${smsMoney(d.totalAmount)}`}${pfi(d)}${at(d)}. ` +
+        (d.awaitingPrice
+          ? "It has no price yet. Please price it and confirm the payment when it lands."
+          : "Please confirm the payment when it lands."),
+    }),
+
+    "desk.order_to_ticket": staffStep({
+      title: (d) => `${ref(d)} released — write its tickets`,
+      body: (d) => `${who(d)}: ${load(d)}${at(d)}. Paid and released, waiting for truck tickets.`,
+      sms: (d) =>
+        `${P()}${ref(d)} for ${who(d)} is released: ${load(d)}${at(d)}${pfi(d)}. ` +
+        "Please write its truck tickets.",
+    }),
+
+    "desk.trucks_to_admit": staffStep({
+      title: (d) => `${trucks(d.truckCount)} ticketed on ${ref(d)}`,
+      body: (d) => `${plateList(d.plates)} for ${who(d)}${at(d)}. Expect them at the gate.`,
+      sms: (d) =>
+        `${P()}${trucks(d.truckCount)} ticketed on ${ref(d)} for ${who(d)}${at(d)}: ` +
+        `${plateList(d.plates)}. Expect them at the gate.`,
+    }),
+
+    "desk.trucks_on_yard": staffStep({
+      title: (d) => `Trucks on ${ref(d)} are entering`,
+      body: (d) => `${d.truckNumber || "A truck"} for ${who(d)} is in${at(d)}. Gate them out once loaded.`,
+      sms: (d) =>
+        `${P()}Trucks on ${ref(d)} for ${who(d)} have started entering ${depot(d)}. ` +
+        `${d.truckNumber || "The first truck"} is in. Please gate them out once loaded.`,
+    }),
+
+    "desk.order_completed": staffStep({
+      title: (d) => `${ref(d)} completed`,
+      body: (d) => `Every truck for ${who(d)} has left ${depot(d)}.`,
+      sms: (d) =>
+        `${P()}${ref(d)} for ${who(d)} is complete. ` +
+        `${d.truckCount ? `All ${trucks(d.truckCount)} have` : "Every truck has"} left ${depot(d)}.`,
+    }),
+
+    "desk.order_cancelled": staffStep({
+      title: (d) => `${ref(d)} cancelled`,
+      body: (d) => `${who(d)}: ${load(d)}.${d.reason ? ` Reason: ${d.reason}` : ""}`,
+      sms: (d) =>
+        `${P()}${ref(d)} for ${who(d)}, ${load(d)}, was cancelled.${d.reason ? ` Reason: ${d.reason}.` : ""}`,
+    }),
+
+    // ── Truck sales: the desks ─────────────────────────────────────────────
+
+    "desk.trucks_to_sell": staffStep({
+      category: "delivery",
+      title: (d) => `${trucks(d.truckCount)} loaded on ${d.allocationCode || "a batch"}`,
+      body: (d) => `${plateList(d.plates)}${at(d)}. Ready to sell.`,
+      sms: (d) =>
+        `${P()}${trucks(d.truckCount)} loaded on batch ${d.allocationCode || ""}${at(d)}: ` +
+        `${plateList(d.plates)}. Please put their customers on them.`.replace(/ +/g, " "),
+      entity: (d) => ({ type: "delivery_batch", id: d.allocationCode || "" }),
+      actionUrl: () => adminLink("/delivery-operations"),
+    }),
+
+    "desk.truck_payment": staffStep({
+      category: "payments",
+      title: (d) => `${smsMoney(d.amount)} on truck ${d.truckNumber || ""}`.trim(),
+      body: (d) =>
+        `${d.payerName || who(d)} paid for ${who(d)} on batch ${d.allocationCode || ""}. Confirm the deposit.`,
+      sms: (d) =>
+        `${P()}${smsMoney(d.amount)} recorded on truck ${d.truckNumber || "TBA"}, batch ${d.allocationCode || ""}, ` +
+        `for ${who(d)}${d.payerName && d.payerName !== d.customerName ? ` from ${d.payerName}` : ""}. ` +
+        "Please confirm the deposit.",
+      entity: (d) => ({ type: "delivery_sale", id: d.saleId || "" }),
+      actionUrl: () => adminLink("/sales-ledger"),
+    }),
+
+    // ── Orders: drivers and customers ──────────────────────────────────────
+
+    /** data: ticketNumber, truckNumber, quantity, unit, product, depotName, customerName, reference */
+    "order.truck_ticketed_driver": phoneOnly(
+      "Loading ticket issued",
+      (d) =>
+        `${L()}Ticket ${d.ticketNumber || ""} is issued for truck ${d.truckNumber || "TBA"}: ` +
+        `load ${load(d)}${at(d)} for ${who(d)}, order ${ref(d)}. Present it at the gate.`.replace(/ +/g, " "),
+      (d) => ({ type: "order_truck", id: d.loadId || "" })
+    ),
+
+    /** data: reference, orderId, customerName, plates[], truckCount, depotName */
+    "order.trucks_ticketed": {
+      audience: "customer",
+      category: "orders",
+      priority: "high",
+      channels: APP_AND_SMS,
+      title: (d) => `${trucks(d.truckCount)} ticketed for ${ref(d)}`,
+      body: (d) => `${plateList(d.plates)}${at(d)}.`,
+      entity: orderEntity,
+      data: (d) => ({ screen: "OrderDetail", orderId: d.orderId }),
+      actionUrl: (d) => portalLink(`/orders/${d.orderId}`),
+      sms: (d) =>
+        `${greet(d.customerName)}${trucks(d.truckCount)} ticketed for your order ${ref(d)}${at(d)}: ` +
+        `${plateList(d.plates)}. We will text you as each one leaves the depot.`,
+    },
+
+    /** data: reference, orderId, customerName, truckNumber, quantity, unit, product, depotName, driverName, driverPhone */
+    "order.truck_departed": {
+      audience: "customer",
+      category: "orders",
+      priority: "high",
+      channels: APP_AND_SMS,
+      title: (d) => `Truck ${d.truckNumber || ""} has left the depot`.replace(/ +/g, " "),
+      body: (d) => `${load(d)} for ${ref(d)}.`,
+      entity: orderEntity,
+      data: (d) => ({ screen: "OrderDetail", orderId: d.orderId }),
+      actionUrl: (d) => portalLink(`/orders/${d.orderId}`),
+      sms: (d) =>
+        `${greet(d.customerName)}truck ${d.truckNumber || "TBA"} has left ${depot(d)} with ${load(d)} ` +
+        `for your order ${ref(d)}.${d.driverName ? ` The driver is ${d.driverName}${on(d.driverPhone)}.` : ""}`,
+    },
+
+    // ── Truck sales: customers ─────────────────────────────────────────────
+
+    /** data: amount, truckNumber, customerName, allocationCode, saleId */
+    "delivery.payment_confirmed": phoneOnly(
+      "Payment confirmed",
+      (d) =>
+        `${L()}${d.customerName ? `Dear ${d.customerName}, ` : ""}your payment of ${smsMoney(d.amount)} ` +
+        `for truck ${d.truckNumber || "TBA"} has been confirmed. Thank you.`,
+      (d) => ({ type: "delivery_sale", id: d.saleId || "" })
     ),
   };
 }
@@ -573,9 +835,9 @@ const announcement = (category) => ({
       cta: d.actionUrl ? { url: d.actionUrl, label: "Learn more" } : undefined,
     }),
   // Without this, the engine's defaultSmsText fallback sends
-  // "Soroman: {title}. {body}" — doubling up the title (composed for the
-  // email subject/in-app heading, not for a 160-char text) ahead of the
-  // body the sender actually wrote. Just the brand prefix + body instead.
+  // "{title}. {body}" — doubling up the title (composed for the email
+  // subject/in-app heading, not for a 160-char text) ahead of the body the
+  // sender actually wrote. Just the body instead.
   sms: (d) => `${smsPrefix()}${String(d.body || d.title || "").trim()}`,
 });
 
@@ -1065,7 +1327,7 @@ const CATALOG = {
     data: (d) => ({ screen: "DeliveryDetail", allocationCode: d.allocationCode, truckNumber: d.truckNumber }),
     dedupe: (d) => (d.allocationCode ? `delivery.released:${d.allocationCode}` : null),
     sms: (d) =>
-      `${smsPrefix()}your delivery ${d.allocationCode || ""} has been released on truck ` +
+      `${smsPrefix()}Your delivery ${d.allocationCode || ""} has been released on truck ` +
       `${d.truckNumber || "TBA"} with ${smsQuantity(d.quantityAllocated, "Litres")}.`,
   },
 
@@ -1398,6 +1660,45 @@ const CATALOG = {
     dedupe: (d) => (d.requestId && d.kind ? `staff.request_submitted:${d.kind}:${d.requestId}` : null),
   },
 
+  /**
+   * Trucks allocated off a cargo, waiting for an admin to approve them.
+   * data: allocationId, parentPfiId, parentPfiNumber, pfiNumber, quantity, unit, trucks, raisedByName
+   */
+  "staff.pfi_allocation_raised": {
+    audience: "staff",
+    category: "operations",
+    priority: "normal",
+    channels: APP_ONLY,
+    title: (d) => `${d.pfiNumber} waiting for approval`,
+    body: (d) =>
+      `${d.raisedByName || "Someone"} allocated ${d.trucks} truck${Number(d.trucks) === 1 ? "" : "s"} ` +
+      `(${formatQuantity(d.quantity, d.unit)}) off ${d.parentPfiNumber}. Approving places the order and raises ${d.pfiNumber}.`,
+    entity: (d) => ({ type: "pfi", id: d.parentPfiId }),
+    data: (d) => ({ screen: "PfiDetail", pfiId: d.parentPfiId }),
+    actionUrl: (d) => adminLink(`/pfi/details?id=${d.parentPfiId}`),
+    dedupe: (d) => (d.allocationId ? `staff.pfi_allocation_raised:${d.allocationId}` : null),
+  },
+
+  /**
+   * The decision on an allocation, to whoever raised it.
+   * data: allocationId, outcome, pfiNumber, parentPfiNumber, subPfiId, parentPfiId, decidedByName, note
+   */
+  "staff.pfi_allocation_decided": {
+    audience: "staff",
+    category: "operations",
+    priority: "normal",
+    channels: APP_ONLY,
+    title: (d) => `${d.pfiNumber} ${d.outcome === "approved" ? "approved" : "rejected"}`,
+    body: (d) =>
+      d.outcome === "approved"
+        ? `${d.decidedByName || "An admin"} approved the trucks off ${d.parentPfiNumber}. The order is placed and ${d.pfiNumber} is raised — it needs its bank account and officers to start selling.`
+        : `${d.decidedByName || "An admin"} rejected the trucks off ${d.parentPfiNumber}${d.note ? `: ${d.note}` : "."}`,
+    entity: (d) => ({ type: "pfi", id: d.subPfiId || d.parentPfiId }),
+    data: (d) => ({ screen: "PfiDetail", pfiId: d.subPfiId || d.parentPfiId }),
+    actionUrl: (d) => adminLink(`/pfi/details?id=${d.subPfiId || d.parentPfiId}`),
+    dedupe: (d) => (d.allocationId ? `staff.pfi_allocation_decided:${d.allocationId}` : null),
+  },
+
   /** data: reportId, location, reportDate, submitterName */
   "staff.daily_report_submitted": {
     audience: "staff",
@@ -1454,7 +1755,7 @@ const CATALOG = {
       // full stop; without this the alert reads "...returned 401 It will retry".
       const reason = String(d.reason || "").trim();
       const because = reason ? ` ${reason.replace(/[.\s]*$/, "")}.` : "";
-      return `${smsPrefix()}tonight's daily report did not send.${because} It will retry automatically.`;
+      return `${smsPrefix()}Tonight's daily report did not send.${because} It will retry automatically.`;
     },
   },
 
@@ -1472,7 +1773,7 @@ const CATALOG = {
     dedupe: (d) => (d.reportId ? `staff.daily_report_approved:${d.reportId}` : null),
     // Wording preserved from the previous notification.service.js listener.
     sms: (d) =>
-      `${smsPrefix()}your daily report for ${d.location || "your site"}` +
+      `${smsPrefix()}Your daily report for ${d.location || "your site"}` +
       `${d.reportDate ? ` on ${d.reportDate}` : ""} was approved.`,
   },
 
@@ -1491,7 +1792,7 @@ const CATALOG = {
     actionUrl: (d) => adminLink(`/daily-reports/${d.reportId}`),
     dedupe: (d) => (d.reportId ? `staff.daily_report_rejected:${d.reportId}` : null),
     sms: (d) =>
-      `${smsPrefix()}your daily report for ${d.location || "your site"}` +
+      `${smsPrefix()}Your daily report for ${d.location || "your site"}` +
       `${d.reportDate ? ` on ${d.reportDate}` : ""} was rejected.` +
       `${d.comment ? ` Reason: ${d.comment}` : ""}`,
   },
@@ -1860,6 +2161,9 @@ const CATALOG = {
   // brand prefix and wraps identifiers in [brackets], as Django did — the
   // prefix now comes from config/brand rather than a string literal.
   ...deliverySms(),
+
+  // ═══ Desk steps (staff, drivers, customers) ═══════════════════════════════
+  ...deskSteps(),
 };
 
 // ─── Accessors ──────────────────────────────────────────────────────────────

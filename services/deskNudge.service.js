@@ -262,12 +262,12 @@ const nudgeSms = (deskKey, payload) => {
     ? `${Math.floor(payload.oldestHours / 24)} days`
     : `${payload.oldestHours}h`;
   if (deskKey === "tickets") {
-    return `Soroman: ${payload.count} paid order(s) still have no loading ticket, oldest ${oldest}. Product cannot leave until they are generated. Please action today.`;
+    return `${payload.count} paid order(s) still have no loading ticket, oldest ${oldest}. Product cannot leave until they are generated. Please action today.`;
   }
   if (deskKey === "entry") {
-    return `Soroman: ${payload.count} ticketed truck(s) not yet gated in, oldest ${oldest}. Please record entries as they arrive.`;
+    return `${payload.count} ticketed truck(s) not yet gated in, oldest ${oldest}. Please record entries as they arrive.`;
   }
-  return `Soroman: ${payload.count} truck(s) recorded as still on the yard, oldest ${oldest}. Please gate out the ones that have left.`;
+  return `${payload.count} truck(s) recorded as still on the yard, oldest ${oldest}. Please gate out the ones that have left.`;
 };
 
 /**
@@ -300,7 +300,12 @@ const smsDesk = async (deskKey, { dryRun = false } = {}) => {
   const failed = [];
   for (const c of reachable) {
     try {
-      const res = await sendSMSWithFallback(c.phone, text);
+      const res = await sendSMSWithFallback(c.phone, text, {
+        type: `desk.nudge.${deskKey}`,
+        audience: "staff",
+        staffId: c.staffId ?? c.id ?? null,
+        recipientName: c.name || "",
+      });
       (res?.success ? sent : failed).push({ ...c, error: res?.success ? undefined : res?.message });
     } catch (err) {
       failed.push({ ...c, error: err.message });

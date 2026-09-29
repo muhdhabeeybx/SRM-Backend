@@ -98,6 +98,35 @@ const naira = (v) =>
  */
 const QUIET_CHANNELS = ["in_app", "push", "email"];
 
+/**
+ * The CFO, by name — who hears that an expense is waiting at the CFO step.
+ *
+ * The step is gated on the `finance` role, and eight people hold it: the whole
+ * finance team. Deriving the audience from the role texted all eight "awaiting
+ * your CFO approval" on every expense, when one person — Muideen Salami — does
+ * the approving (he signed every CFO approval on the book). The user chose to
+ * narrow the MESSAGE only (2026-09-29): anyone holding `finance` can still
+ * approve, they are just not told to.
+ *
+ * EXPENSE_CFO_STAFF_IDS (comma-separated) overrides the default. If none of
+ * the named people is active, the role is used again rather than telling
+ * nobody — a CFO step nobody hears about is money that stops moving.
+ */
+const cfoDeskIds = () =>
+  (process.env.EXPENSE_CFO_STAFF_IDS || "85")
+    .split(",")
+    .map((v) => Number(v.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+
+const cfoDesk = async () => {
+  const ids = cfoDeskIds();
+  if (!ids.length) return staffWithRoles(stageRoles("audit_approve"));
+  const rows = await client`
+    SELECT id FROM staff WHERE is_active = true AND id = ANY(${ids})
+  `;
+  return rows.length ? rows.map((r) => r.id) : staffWithRoles(stageRoles("audit_approve"));
+};
+
 /** Staff holding any of these roles, active only. */
 const staffWithRoles = async (roles) => {
   if (!roles?.length) return [];
@@ -154,20 +183,30 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
   const spec = STAGE_RECIPIENTS[stage];
   if (!spec) return;
 
+  const submitterId = expense.added_by ?? expense.recorded_by;
+  const isSubmitter = (id) => Number(id) === Number(submitterId);
+
   let recipients = [];
+  /**
+   * The raiser, told about their own expense in their own words
+   * (expense.progress) rather than handed the approvers' "awaiting your
+   * approval", which they cannot act on. Only when they are not also an
+   * approver at this step — then the approvers' copy is the one that matters.
+   */
+  let progressTo = [];
   if (spec.participants) recipients = participantsOf(expense);
-  else if (spec.submitterOnly) recipients = [expense.added_by ?? expense.recorded_by].filter(Boolean).map(Number);
+  else if (spec.submitterOnly) recipients = [submitterId].filter((v) => v != null).map(Number);
   else {
-    recipients = await staffWithRoles(spec.roles);
-    if (spec.includeSubmitter) {
-      const submitterId = expense.added_by ?? expense.recorded_by;
-      if (submitterId != null) recipients.push(Number(submitterId));
+    recipients = stage === chain.STATUS.VERIFIED ? await cfoDesk() : await staffWithRoles(spec.roles);
+    if (spec.includeSubmitter && submitterId != null && !recipients.some(isSubmitter)) {
+      progressTo = [Number(submitterId)];
     }
   }
 
   // Whoever just acted already knows.
   recipients = [...new Set(recipients)].filter((id) => Number(id) !== Number(actorId));
-  if (recipients.length === 0) return;
+  progressTo = progressTo.filter((id) => Number(id) !== Number(actorId));
+  if (recipients.length === 0 && progressTo.length === 0) return;
 
   /**
    * Who gets a text, as against who gets told.
@@ -182,9 +221,6 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
    * already happened, only the submitter is buzzed; the others who touched it
    * are told without being interrupted.
    */
-  const submitterId = expense.added_by ?? expense.recorded_by;
-  const isSubmitter = (id) => Number(id) === Number(submitterId);
-
   const texted = spec.actionNeeded ? recipients : recipients.filter(isSubmitter);
   const quiet = recipients.filter((id) => !texted.includes(id));
 
@@ -234,6 +270,9 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
     texted.length
       ? notify(`expense.${stage}`, { to: texted.map((staffId) => ({ staffId })), data })
       : null,
+    progressTo.length
+      ? notify("expense.progress", { to: progressTo.map((staffId) => ({ staffId })), data: { ...data, stage } })
+      : null,
   ]);
 }
 
@@ -269,4 +308,4 @@ async function notifyExpenseComment({ expense, body, actorId, actorName }) {
   });
 }
 
-module.exports = { notifyExpenseStage, notifyExpenseComment, STAGE_RECIPIENTS };
+module.exports = { notifyExpenseStage, notifyExpenseComment, STAGE_RECIPIENTS, cfoDeskIds };

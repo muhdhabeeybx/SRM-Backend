@@ -18,6 +18,7 @@ const { pfiMovements } = require("../../db/schema");
 const walletService = require("../../services/wallet.service");
 const { generateTicketForTruck } = require("../../services/ticket.service");
 const orderStatus = require("../../services/orderStatus.service");
+const stepNotices = require("../../services/stepNotices.service");
 const truckProgress = require("../../services/truckProgress.service");
 const orderService = require("../../services/order.service");
 const orderPaymentService = require("../../services/orderPayment.service");
@@ -435,6 +436,9 @@ const gateInTruck = asyncHandler(async (req, res) => {
     return gated;
   });
 
+  // A repeat gate-in returns { load, alreadyEntered } and tells nobody again.
+  if (!load?.alreadyEntered) stepNotices.truckGatedIn(orderId, load);
+
   res.json({ success: true, message: "Truck gated in", data: { truck: load } });
 });
 
@@ -677,6 +681,8 @@ const gateOutTruck = asyncHandler(async (req, res) => {
 
     return { truck: updated, orderCompleted: completed };
   });
+
+  if (!result.alreadyExited) stepNotices.truckGatedOut(orderId, result.truck);
 
   res.json({
     success: true,
@@ -1035,6 +1041,10 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
     throw httpErr(400, "Provide at least one truck");
   }
 
+  // The loads this call ticketed for the first time — a resubmitted truck is
+  // already known to its driver and the gate, and is not announced again.
+  let freshLoads = [];
+
   const result = await db.transaction(async (tx) => {
     const order = await orderRepo.lockById(orderId, tx);
     if (!order) throw httpErr(404, "Order not found");
@@ -1297,6 +1307,8 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
         });
     }
 
+    freshLoads = created.filter((c) => !c.alreadyExisted).map((c) => c.load);
+
     return {
       generated: created.length,
       startedAt: startIndex + 1,
@@ -1306,6 +1318,11 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
       trucks: created.map((c) => c.load),
     };
   });
+
+  // The entrance gate, the customer and each driver hear about the trucks
+  // this call ticketed — after the commit, so nobody is told about a batch
+  // that rolled back.
+  stepNotices.ticketsWritten(orderId, freshLoads);
 
   res.json({
     success: true,

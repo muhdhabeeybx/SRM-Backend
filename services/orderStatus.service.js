@@ -5,6 +5,8 @@ const { orders, customers } = require("../db/schema");
 const { auditLogRepo, customerRepo } = require("../repositories");
 const { notify } = require("../notifications");
 const { generateOrderReference } = require("../utils/helpers");
+// Lazy: the step notices read orders through the same modules that load this one.
+const stepNotices = () => require("./stepNotices.service");
 
 /**
  * The order state machine — the ONE place order.status changes.
@@ -102,6 +104,10 @@ const ARRIVAL_NOTIFICATIONS = Object.freeze({
  * failure must never roll it back or surface as a 500 to the caller.
  */
 async function announce(order, toStatus, opts) {
+  // The next desk hears too — ticketing on a release, finance and ticketing
+  // on completion or cancellation. Its own module; it never throws.
+  if (order?.id) stepNotices().orderArrived(order.id, toStatus, { reason: opts.metadata?.reason });
+
   const type = ARRIVAL_NOTIFICATIONS[toStatus];
   if (!type || !order?.customerId) return;
 

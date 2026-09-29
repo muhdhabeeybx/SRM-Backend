@@ -122,11 +122,44 @@ const dailyReportQuerySchema = z.object({
 const emailReportsHubSchema = z.object({
   recipients: z.array(z.string().email()).min(1).max(25),
   reportDate: z.string().date(),
+  /** A covering line from whoever sends it, printed above the report. */
+  note: z.string().trim().max(1000).optional(),
   filename: z.string().max(255).optional(),
   attachmentBase64: z.string().optional(),
   reportCount: z.coerce.number().int().nonnegative().optional(),
   location: z.string().max(255).optional(),
   pfi: z.string().max(50).optional(),
+});
+
+/** The email exactly as it would be sent, without sending it. */
+const emailPreviewSchema = z.object({
+  reportDate: z.string().date(),
+  note: z.string().trim().max(1000).optional(),
+});
+
+/**
+ * The Hub's on-screen copy of the emailed report: one Lagos day, nothing else.
+ * No filters, because the email takes none either — the page and the email are
+ * the same report, and a filter only one of them honoured would split them.
+ */
+const operationsReportQuerySchema = z.object({
+  date: z.string().date(),
+});
+
+/**
+ * Officers to text about a missing report: each one names the person, the
+ * desk and the batch, and the server re-checks all three before sending.
+ * Capped so a mistaken select-all cannot page the whole company twice over.
+ */
+const reportReminderSchema = z.object({
+  date: z.string().date(),
+  targets: z.array(z.object({
+    staffId: z.coerce.number().int().positive(),
+    role: z.enum(["sales_manager", "product_manager", "security_gate", "commissions", "it_compliance"]),
+    pfiId: z.coerce.number().int().positive(),
+  })).min(1).max(500),
+  note: z.string().trim().max(160).optional(),
+  dryRun: z.boolean().optional(),
 });
 
 /**
@@ -152,4 +185,7 @@ module.exports = {
   reviewDailyReportSchema,
   dailyReportQuerySchema,
   emailReportsHubSchema,
+  operationsReportQuerySchema,
+  emailPreviewSchema,
+  reportReminderSchema,
 };

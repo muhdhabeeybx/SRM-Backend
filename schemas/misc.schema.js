@@ -942,6 +942,35 @@ const updatePfiNote = z.object({
 });
 
 /**
+ * Trucks allocated off a cargo (migration 0063). The quantities are whole
+ * units because the order approval places is sold in whole units; the price is
+ * the day's rate per unit. Everything else — the letter, the name, the
+ * drivers — is worked out on the server, never taken from here.
+ */
+const PFI_ALLOCATION_STATUSES = ["pending", "approved", "rejected", "withdrawn", "all"];
+const listPfiAllocations = z.object({
+  status: enumOf("Status", PFI_ALLOCATION_STATUSES).optional(),
+});
+const pfiAllocationParam = z.object({ allocationId: id("Allocation") });
+const raisePfiAllocation = z.object({
+  loadingDate: z
+    .string({ error: "Enter the day the trucks load" })
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "Loading date must be a date"),
+  price: numberLike("Price").pipe(z.number().positive("Enter the day's price")),
+  trucks: z
+    .array(z.object({ truckId: id("Truck"), loadedQty: quantity("Truck quantity") }), {
+      error: "Pick at least one truck",
+    })
+    .min(1, "Pick at least one truck")
+    .max(100, "At most 100 trucks in one allocation"),
+  note: optionalString("Note", 1000),
+});
+const decidePfiAllocation = z
+  .object({ note: optionalString("Note", 1000) })
+  .optional()
+  .transform((v) => v ?? { note: "" });
+
+/**
  * Which accounts a PFI collects into — the whole list, not a change to it.
  * Empty is allowed: it is how a PFI is taken off every account.
  */
@@ -951,6 +980,10 @@ const setPfiAccounts = z.object({
 });
 
 module.exports = {
+  listPfiAllocations,
+  pfiAllocationParam,
+  raisePfiAllocation,
+  decidePfiAllocation,
   pfiSurplusParam,
   recordPfiSurplus,
   voidPfiSurplus,

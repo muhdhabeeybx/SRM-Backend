@@ -43,7 +43,9 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
   let submitter;
   let officer;
   let cfo;
+  let otherFinance;
   let admin;
+  const savedCfo = process.env.EXPENSE_CFO_STAFF_IDS;
 
   before(async () => {
     const make = async (roles, tag) => {
@@ -67,7 +69,11 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     submitter = await make(["sales_manager"], "Submitter");
     officer = await make([chain.ROLE.OFFICER], "Officer");
     cfo = await make([chain.ROLE.CFO], "Cfo");
+    // Holds the same role as the CFO, the way the whole finance team does.
+    otherFinance = await make([chain.ROLE.CFO], "Finance");
     admin = await make([chain.ROLE.ADMIN], "Admin");
+    // The CFO is named, not the role: only `cfo` is the CFO here.
+    process.env.EXPENSE_CFO_STAFF_IDS = String(cfo.id);
   });
 
   /**
@@ -86,6 +92,8 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
    * their inbox rows with them.
    */
   after(async () => {
+    if (savedCfo === undefined) delete process.env.EXPENSE_CFO_STAFF_IDS;
+    else process.env.EXPENSE_CFO_STAFF_IDS = savedCfo;
     await db.delete(staff).where(sql`${staff.email} LIKE ${`notify-%-${RUN}@soroman.test`}`);
     await closeDb();
   });
@@ -104,23 +112,41 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     payee_account_number: "",
   });
 
-  test("verified: CFO role + the submitter, not the officer who just verified it", async () => {
+  test("verified: the named CFO is asked to approve; the rest of finance is not; the submitter is told where it is", async () => {
     const expense = baseExpense();
     await notifyExpenseStage({ expense, stage: chain.STATUS.VERIFIED, actorId: officer.id, actorName: "Officer" });
 
-    const recipients = await waitForRecipients("expense.verified", expense.id, [cfo.id, submitter.id]);
-    assert.ok(recipients.includes(cfo.id), "CFO role recipient");
-    assert.ok(recipients.includes(submitter.id), "submitter now hears about the middle stages too");
+    const recipients = await waitForRecipients("expense.verified", expense.id, [cfo.id]);
+    assert.ok(recipients.includes(cfo.id), "the CFO is asked for approval");
+    assert.ok(!recipients.includes(otherFinance.id), "another finance-role holder is not told it awaits THEIR CFO approval");
+    assert.ok(!recipients.includes(submitter.id), "the submitter does not get the approver's 'awaiting your approval'");
     assert.ok(!recipients.includes(officer.id), "the officer who just acted is not notified of their own action");
+
+    const progress = await waitForRecipients("expense.progress", expense.id, [submitter.id]);
+    assert.ok(progress.includes(submitter.id), "the submitter hears their expense was verified and is with the CFO");
+    assert.ok(!progress.includes(cfo.id));
+  });
+
+  test("the CFO step falls back to the role when the named CFO is not an active member of staff", async () => {
+    process.env.EXPENSE_CFO_STAFF_IDS = "999999999";
+    try {
+      const expense = baseExpense();
+      await notifyExpenseStage({ expense, stage: chain.STATUS.VERIFIED, actorId: officer.id, actorName: "Officer" });
+      const recipients = await waitForRecipients("expense.verified", expense.id, [cfo.id, otherFinance.id]);
+      assert.ok(recipients.includes(cfo.id) && recipients.includes(otherFinance.id), "nobody named, so the role hears — never no one");
+    } finally {
+      process.env.EXPENSE_CFO_STAFF_IDS = String(cfo.id);
+    }
   });
 
   test("audit_approved: admin role + the submitter, not the CFO who just approved it", async () => {
     const expense = baseExpense();
     await notifyExpenseStage({ expense, stage: chain.STATUS.AUDIT_APPROVED, actorId: cfo.id, actorName: "Cfo" });
 
-    const recipients = await waitForRecipients("expense.audit_approved", expense.id, [admin.id, submitter.id]);
+    const recipients = await waitForRecipients("expense.audit_approved", expense.id, [admin.id]);
     assert.ok(recipients.includes(admin.id), "admin role recipient");
-    assert.ok(recipients.includes(submitter.id));
+    assert.ok(!recipients.includes(submitter.id), "the submitter is not asked for final approval");
+    assert.ok((await waitForRecipients("expense.progress", expense.id, [submitter.id])).includes(submitter.id));
     assert.ok(!recipients.includes(cfo.id), "the CFO who just acted is not notified of their own action");
   });
 
@@ -128,9 +154,10 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     const expense = baseExpense();
     await notifyExpenseStage({ expense, stage: chain.STATUS.ADMIN_APPROVED, actorId: admin.id, actorName: "Admin" });
 
-    const recipients = await waitForRecipients("expense.admin_approved", expense.id, [officer.id, submitter.id]);
+    const recipients = await waitForRecipients("expense.admin_approved", expense.id, [officer.id]);
     assert.ok(recipients.includes(officer.id), "officer role recipient (they will make the payment)");
-    assert.ok(recipients.includes(submitter.id));
+    assert.ok(!recipients.includes(submitter.id), "the submitter is not told to pay it");
+    assert.ok((await waitForRecipients("expense.progress", expense.id, [submitter.id])).includes(submitter.id));
     assert.ok(!recipients.includes(admin.id), "the admin who just acted is not notified of their own action");
   });
 
@@ -208,12 +235,14 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
       actorId: officer.id,
       actorName: "Officer",
     });
-    await waitForRecipients("expense.verified", expenseId, [submitter.id, cfo.id]);
+    await waitForRecipients("expense.verified", expenseId, [cfo.id]);
+    await waitForRecipients("expense.progress", expenseId, [submitter.id]);
     const channelsFor = await channelsByStaff("expense.verified", expenseId);
+    const progressFor = await channelsByStaff("expense.progress", expenseId);
 
     // The CFO has to approve it — that is the whole point of the message.
     assert.ok(channelsFor(cfo.id).includes("sms"), "the CFO is waited on, so the CFO is texted");
-    assert.ok(channelsFor(submitter.id).includes("sms"), "and it is the submitter's own request");
+    assert.ok(progressFor(submitter.id).includes("sms"), "and it is the submitter's own request");
   });
 
   test("an announcement does not buzz everyone who touched it", async () => {

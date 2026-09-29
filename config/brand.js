@@ -26,26 +26,23 @@ const companyName = () => clean(process.env.COMPANY_NAME) || "Soroman";
 const companyLongName = () => clean(process.env.COMPANY_LONG_NAME) || `${companyName()} Energy`;
 
 /**
- * Prefix stamped on operational SMS (the truck/driver flow), where a recipient
- * may have no idea who is texting them. Set SMS_BRAND_PREFIX="" to switch it off.
+ * Optional prefix stamped on operational SMS. Off by default: every text now
+ * goes out under the whitelisted SOROMAN sender ID, so the handset already
+ * says who sent it and "Soroman:" at the head of the body only repeated it.
+ * Set SMS_BRAND_PREFIX (e.g. "Soroman:") to bring it back.
  */
 const smsPrefix = () => {
-  const raw = process.env.SMS_BRAND_PREFIX;
-  const value = raw === undefined ? `${companyName()}:` : clean(raw);
+  const value = clean(process.env.SMS_BRAND_PREFIX);
   return value ? `${value} ` : "";
 };
 
 /**
- * The all-caps variant used by the truck/driver flow.
- *
- * Django was inconsistent here — expense texts opened "Soroman:" and delivery
- * texts "SOROMAN:". Both are preserved rather than unified, because drivers and
- * gate staff have been reading the shouty one for years and it is the more
- * scannable of the two on a feature phone.
+ * The truck/driver flow's variant — Django opened those texts "SOROMAN:".
+ * Off by default for the same reason as smsPrefix; set SMS_BRAND_PREFIX_LOUD
+ * to bring it back.
  */
 const smsPrefixLoud = () => {
-  const raw = process.env.SMS_BRAND_PREFIX_LOUD;
-  const value = raw === undefined ? `${companyName().toUpperCase()}:` : clean(raw);
+  const value = clean(process.env.SMS_BRAND_PREFIX_LOUD);
   return value ? `${value} ` : "";
 };
 

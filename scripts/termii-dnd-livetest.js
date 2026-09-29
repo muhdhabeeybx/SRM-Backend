@@ -11,7 +11,7 @@
  * point is to actually send. Needs the production TERMII_API_KEY.
  *
  * Usage:
- *   TERMII_API_KEY=sk_live_... TERMII_SENDER_ID=Soroman \
+ *   TERMII_API_KEY=sk_live_... TERMII_SENDER_ID=SOROMAN \
  *     node scripts/termii-dnd-livetest.js --to=+2348012345678
  *
  *   # pick a channel / custom message:
@@ -109,7 +109,7 @@ const arg = (name, def = null) => {
   }
 
   const recipient = toSmsRecipient(to);
-  const sender = arg("from") || process.env.TERMII_SENDER_ID || "Soroman";
+  const sender = arg("from") || process.env.TERMII_SENDER_ID || "SOROMAN";
 
   console.log("── Termii live send ──────────────────────────────");
   console.log(`  to (formatted): ${recipient}`);

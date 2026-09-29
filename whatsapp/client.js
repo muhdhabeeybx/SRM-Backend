@@ -177,6 +177,17 @@ const sendReply = async (to, reply) => {
     try {
       const res = await axios.post(url, toApiPayload(to, reply), opts);
       const wamid = res.data?.messages?.[0]?.id || null;
+      // Into the message ledger. Meta bills per conversation, not per
+      // message, so no charge is recorded against it.
+      await require("../services/messageLog.service").record({
+        channel: "whatsapp",
+        provider: "meta",
+        providerMessageId: wamid || "",
+        recipient: String(to || ""),
+        body: reply?.text || reply?.body || reply?.caption || (reply?.name ? `Template: ${reply.name}` : reply?.kind || ""),
+        status: "sent",
+        tag: { type: `whatsapp.${reply?.kind || "reply"}`, audience: "customer" },
+      });
       return { wamid };
     } catch (err) {
       // A transient blip retries a couple of times, fast, before giving up to

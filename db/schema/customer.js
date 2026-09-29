@@ -71,6 +71,12 @@ const customers = pgTable(
     commissionAccountNumber: varchar("commission_account_number", { length: 30 }).default(""),
     // Written by verify-otp; cleared by any phone change, which also revokes
     // every session for the customer.
+    /**
+     * Set on the company's own internal customers, naming what each is for:
+     * 'trucking' is who the parent cargo sells to when trucks are allocated
+     * off it. NULL on every real customer. See migration 0063.
+     */
+    houseAccount: varchar("house_account", { length: 30 }),
     phoneVerifiedAt: timestamp("phone_verified_at", { withTimezone: true }),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

@@ -140,6 +140,12 @@ const pfis = pgTable(
     pendingBatch: jsonb("pending_batch"),
     /** The delivery batch this PFI raised, by its code. Trucking only. */
     allocationCode: varchar("allocation_code", { length: 100 }),
+    /**
+     * The cargo this trucking PFI was allocated from — set only by approving
+     * a pfi_truck_allocations row. NULL on everything raised any other way.
+     * See migration 0063.
+     */
+    parentPfiId: integer("parent_pfi_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

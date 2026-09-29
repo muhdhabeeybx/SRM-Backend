@@ -1,4 +1,5 @@
 const { eq, ne, and, or, ilike, inArray, notInArray, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
+const { PREFIX: ALLOCATION_ORDER_PREFIX } = require("../lib/allocationOrders");
 const { db } = require("../config/db");
 const {
   orders, customers, depots, products, pfis, orderTrucks,
@@ -1657,7 +1658,9 @@ const findStalePending = async (cutoff) => {
       and(
         eq(orders.status, "Pending"),
         eq(orders.paymentStatus, "Unpaid"),
-        lte(orders.createdAt, cutoff)
+        lte(orders.createdAt, cutoff),
+        // A truck allocation's order never lapses — see lib/allocationOrders.js.
+        sql`(${orders.idempotencyKey} IS NULL OR ${orders.idempotencyKey} NOT LIKE ${ALLOCATION_ORDER_PREFIX + "%"})`
       )
     )
     .orderBy(asc(orders.createdAt));

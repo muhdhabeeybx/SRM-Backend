@@ -253,7 +253,9 @@ routes and on OTPs. Termii approves a sender ID *per route*, and the account
 used to fall back to Termii's shared `N-Alert` for the `dnd` leg because the
 branded ID was not whitelisted for it — but an unbranded text is one the
 customer cannot place, and a verification code nobody recognises is a
-verification code nobody trusts. If the branded ID is not yet whitelisted for
+verification code nobody trusts. Termii whitelisted `SOROMAN` (all caps) for
+the `dnd` route in September 2026; the ID is matched exactly, so `Soroman` is a
+different, unapproved sender. If the configured ID is not whitelisted for
 DND, that leg comes back `Successfully Sent` and is then rejected by the
 carrier, with the `generic` leg still running behind it; the delivery log shows
 it as `sender_id` or `rejected` on the `dnd` channel, which is the signal to

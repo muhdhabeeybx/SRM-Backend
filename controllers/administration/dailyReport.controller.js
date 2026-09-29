@@ -34,6 +34,8 @@ const { staffActor } = require("../../utils/actor");
 const { notifyAndWait } = require("../../notifications");
 const { sendDailyReportToWhatsApp } = require("../../services/whatsappReport.service");
 const { buildPfiDailyReportData } = require("../../services/pfiDailyReport.service");
+const { renderPfiDailyReportEmail } = require("../../notifications/templates/pfiDailyReportEmail");
+const reportReminders = require("../../services/reportReminders.service");
 
 // Roles that manage reports rather than file them — the Reports Hub's own
 // allowed-roles list (see rbac.ts '/admin-reports'). Everyone else only ever
@@ -266,74 +268,143 @@ const whatsappDailyReports = asyncHandler(async (req, res) => {
   res.json({ success: ok, message, data: result });
 });
 
+/**
+ * The Sales & Operations Report as data, for the Reports Hub to draw on screen.
+ *
+ * The very object the email is rendered from — same builder, same date
+ * handling as emailDailyReports below — so what the Hub shows for a day is
+ * what "Email report" sends for it. Two builders would be two reports.
+ */
+const getOperationsReport = asyncHandler(async (req, res) => {
+  const { date } = req.validated?.query || req.query;
+  const report = await buildPfiDailyReportData(new Date(`${date}T12:00:00Z`));
+  res.json({ success: true, data: { report } });
+});
+
+/**
+ * Every desk on every live batch for a day: filed, or who has not filed it.
+ */
+const getOutstandingReports = asyncHandler(async (req, res) => {
+  const { date } = req.validated?.query || req.query;
+  const data = await reportReminders.outstandingReports(date);
+  res.json({ success: true, data });
+});
+
+/**
+ * Text officers about the reports they have not filed. With dryRun, the
+ * exact messages and nothing sent — the dialog shows them before Send.
+ */
+const sendReportReminders = asyncHandler(async (req, res) => {
+  const { date, targets, note, dryRun } = req.body;
+  const data = await reportReminders.sendReminders(
+    { date, targets, note, dryRun: dryRun === true },
+    { actor: staffActor(req) },
+  );
+  if (dryRun) return res.json({ success: true, data });
+  const sent = data.results.filter((r) => r.ok).length;
+  const failed = data.results.length - sent;
+  const message = data.results.length === 0
+    ? "Nobody to remind: every chosen desk has filed or the officers are not on it"
+    : `Reminder sent to ${sent} of ${data.results.length}${failed ? ` — ${failed} failed` : ""}`;
+  res.status(sent === 0 && data.results.length > 0 ? 422 : 200).json({ success: sent > 0 || data.results.length === 0, message, data });
+});
+
+/**
+ * The report data for a date, with the sender's covering note on it.
+ *
+ * `reportDate` is a Lagos calendar day; noon UTC sits inside it whatever the
+ * zone's offset, where midnight UTC would sit at its very edge.
+ */
+const reportDataFor = async (reportDate, note, req) => {
+  const data = await buildPfiDailyReportData(new Date(`${reportDate}T12:00:00Z`));
+  const trimmed = String(note || "").trim();
+  return trimmed ? { ...data, note: trimmed, noteFrom: staffActor(req).name } : data;
+};
+
+/** The email as it would arrive — subject, HTML and text — sent to nobody. */
+const previewDailyReportEmail = asyncHandler(async (req, res) => {
+  const { reportDate, note } = req.body;
+  const rendered = renderPfiDailyReportEmail(await reportDataFor(reportDate, note, req));
+  res.json({ success: true, data: { subject: rendered.subject, html: rendered.html } });
+});
+
+/**
+ * The Hub's "Email report" button: the Sales & Operations Report — the same
+ * one the 23:50 cron sends (see dailyReportDispatch) — to the addresses typed
+ * in, for the date on screen.
+ *
+ * ── One email per person ──────────────────────────────────────────────────
+ *
+ * Each address gets its own message, sent and judged on its own: nobody sees
+ * who else it went to, and one bounced address does not decide the fate of the
+ * rest. They go one delivery per address rather than as one list because a
+ * list is resolved as a group — reordered, deduplicated, filtered by each
+ * staff member's notification choices — and a result can then no longer be
+ * matched back to the address it belongs to. The desk needs to know WHICH
+ * address failed, so each is asked on its own.
+ *
+ * The report is built once and the same object goes to every address, so
+ * everyone on one send reads identical figures.
+ *
+ * Success is judged from what the email channel actually did, never from the
+ * call returning: a provider refusal is recorded, not thrown, and a send that
+ * "succeeded" while the provider refused it is how an operator comes to
+ * believe somebody was told something they never saw.
+ */
+const SEND_CONCURRENCY = 5;
+
+const emailOutcome = (email, result) => {
+  if (result?.error) return { email, status: "failed", error: result.error };
+  const r = result?.results?.[0];
+  if (!r) {
+    return {
+      email,
+      status: "failed",
+      error: "Not sent — this person has report emails switched off on Manage Users",
+    };
+  }
+  const ch = r.channels?.email;
+  if (ch === "sent" || ch === "partial") return { email, status: "sent" };
+  const reason =
+    r.error ||
+    r.channelErrors?.email ||
+    (r.suppressed || []).find((s) => s.channel === "email")?.reason ||
+    "The email provider did not accept it";
+  return { email, status: "failed", error: reason };
+};
+
 const emailDailyReports = asyncHandler(async (req, res) => {
-  const { recipients, reportDate } = req.body;
+  const { reportDate, note } = req.body;
+  const recipients = [...new Set(req.body.recipients.map((e) => e.trim().toLowerCase()))];
+  const data = await reportDataFor(reportDate, note, req);
 
-  /**
-   * The button sends the Sales & Operations Report — the same one the 23:50
-   * cron sends (see dailyReportDispatch). One report, one format, whether it
-   * goes out on a schedule or on a click.
-   *
-   * Body only. The request may still carry `attachmentBase64`/`filename` from
-   * an older dashboard build; it is ignored rather than rejected, because a
-   * stale client should still be able to send the report. The Hub's Download
-   * button remains the way to get the workbook.
-   *
-   * One known gap, dormant rather than fixed: this report groups depot trading
-   * by PFI, so an order with no pfi_id has nowhere to appear and is missing
-   * from the litres and value on the page. 54 such orders exist historically
-   * and none in the last seven days — but placeOrder can now write a null
-   * pfi_id for a depot with no active batch, so this becomes live the day
-   * somebody sells from one.
-   */
-  const data = await buildPfiDailyReportData(reportDate ? new Date(reportDate) : new Date());
-  const result = await notifyAndWait("reports.pfi_daily", {
-    to: recipients.map((email) => ({ email })),
-    data,
-  });
-
-  // notifyAndWait never throws — a provider outage must not read as a 500 — so
-  // success is judged from what the email channel actually did.
-  //
-  // `result.delivered` cannot answer that. It counts recipients the engine got
-  // through without throwing, and a provider refusal is not a throw: Resend
-  // rejecting every address for an unverified sending domain still produced
-  // delivered === 1, so this endpoint answered "Sent to 1 recipient" while the
-  // delivery log recorded the refusal and nothing reached anyone. A click that
-  // claims "sent" and delivers nothing is worse than an honest failure, which
-  // is the whole reason this endpoint waits for the dispatch at all.
-  const rows = result?.results || [];
-  const sent = rows.filter((r) => r.channels?.email === "sent" || r.channels?.email === "partial");
-  const problems = rows
-    .filter((r) => !sent.includes(r))
-    .map((r) => r.error || r.channelErrors?.email || (r.suppressed || []).find((s) => s.channel === "email")?.reason)
-    .filter(Boolean);
-
-  if (result?.error || sent.length === 0) {
-    // 422, not the 502 this answered with before — even though "the email
-    // provider refused" is precisely what 502 describes. A 502 never reached
-    // the browser: the edge in front of this app reads that status as "the
-    // origin is broken", drops the response and serves its own error page,
-    // which carries no CORS headers. So the dashboard logged a CORS violation,
-    // axios raised a bare "Network Error", and the toast showed that instead of
-    // the reason — the provider's own words were lost at the last hop, after
-    // everything above went to the trouble of collecting them. A 4xx is passed
-    // through untouched, so the message actually arrives.
-    return res.status(422).json({
-      success: false,
-      // The provider's own words. "The report could not be sent" is only
-      // reached when nothing said anything at all.
-      message: result?.error || problems[0] || "The report could not be sent",
-    });
+  const results = [];
+  for (let i = 0; i < recipients.length; i += SEND_CONCURRENCY) {
+    const batch = recipients.slice(i, i + SEND_CONCURRENCY);
+    results.push(
+      ...(await Promise.all(
+        batch.map(async (email) =>
+          emailOutcome(email, await notifyAndWait("reports.pfi_daily", { to: [{ email }], data }))
+        )
+      ))
+    );
   }
 
-  res.json({
-    success: true,
+  const sent = results.filter((r) => r.status === "sent").length;
+  const body = {
+    success: sent > 0,
     message:
-      sent.length < recipients.length
-        ? `Sent to ${sent.length} of ${recipients.length} recipients — ${[...new Set(problems)].join("; ")}`
-        : `Sent to ${sent.length} recipient${sent.length === 1 ? "" : "s"}`,
-  });
+      sent === results.length
+        ? `Sent to ${sent} recipient${sent === 1 ? "" : "s"}`
+        : sent === 0
+          ? results[0]?.error || "The report could not be sent"
+          : `Sent to ${sent} of ${results.length} recipients`,
+    data: { results },
+  };
+  // 422 rather than 502 when nothing went: an edge in front of this app turns
+  // a 502 into its own error page with no CORS headers, and the provider's
+  // reason never reaches the desk. A 4xx arrives untouched.
+  res.status(sent === 0 ? 422 : 200).json(body);
 });
 
 module.exports = {
@@ -345,6 +416,10 @@ module.exports = {
   amendDailyReport,
   reviewDailyReport,
   emailDailyReports,
+  previewDailyReportEmail,
+  getOperationsReport,
   whatsappDailyReports,
+  getOutstandingReports,
+  sendReportReminders,
   CAN_VIEW_ALL_REPORTS,
 };

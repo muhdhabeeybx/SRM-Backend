@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const stepNotices = require("../../services/stepNotices.service");
 const { deliveryInventoryRepo, pfiRepo, truckRepo } = require("../../repositories");
 
 /**
@@ -113,6 +114,10 @@ const createDeliveryInventory = asyncHandler(async (req, res) => {
     notes: notes || "",
     createdBy: req.user ? `${req.user.firstName} ${req.user.surname}` : "System",
   });
+
+  // The driver hears he is loaded, the truck sales desk that he is ready to
+  // sell. Never throws.
+  stepNotices.trucksLoaded([inventoryRecord.id]);
 
   res.status(201).json({
     success: true,

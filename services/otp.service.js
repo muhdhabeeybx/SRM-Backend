@@ -264,7 +264,13 @@ async function issueAndSend(customer, { action, requestIp, sendTo } = {}) {
   // and a verification code nobody recognises is a verification code nobody
   // trusts. If a DND-registered handset stops receiving codes, the whitelisting
   // is what to chase at Termii; the delivery log will say so.
-  const result = await sendSMSWithFallback(destination, smsBody(action, code));
+  const result = await sendSMSWithFallback(destination, smsBody(action, code), {
+    type: `otp.${action || "verify"}`,
+    category: "otp",
+    audience: "customer",
+    customerId: customer.id ?? null,
+    recipientName: customer.name || "",
+  });
 
   if (!result.success) {
     // The row is already written, so the code stays valid and the customer can

@@ -55,7 +55,7 @@ const truncate = (text) => {
 /**
  * @returns {Promise<Array<{destination, status, providerMessageId, error}>>}
  */
-const send = async ({ contact, rendered, entry }) => {
+const send = async ({ contact, rendered, entry, principal, type }) => {
   const phone = String(contact?.phone || "").trim();
 
   if (!phone) {
@@ -67,7 +67,18 @@ const send = async ({ contact, rendered, entry }) => {
     return [{ destination: phone, status: "skipped", error: "No SMS template for this type" }];
   }
 
-  const result = await route(phone, text, { messageClass: messageClassFor(entry) });
+  const result = await route(phone, text, {
+    messageClass: messageClassFor(entry),
+    // For the message ledger: what this was and who it was for. The campaign,
+    // when there is one, is joined in later from this send's delivery row.
+    tag: {
+      type,
+      audience: principal?.type === "staff" ? "staff" : principal?.type === "customer" ? "customer" : undefined,
+      staffId: principal?.type === "staff" ? principal.id : null,
+      customerId: principal?.type === "customer" ? principal.id : null,
+      recipientName: contact?.name || "",
+    },
+  });
 
   if (result.success) {
     return [

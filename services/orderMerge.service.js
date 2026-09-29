@@ -3,6 +3,7 @@ const { randomUUID } = require("crypto");
 const { db } = require("../config/db");
 const auditLogRepo = require("../repositories/auditLog.repository");
 const { generateOrderReference } = require("../utils/helpers");
+const { isAllocationOrder } = require("../lib/allocationOrders");
 const { DUPLICATE_LEGACY_IDS_SQL } = require("../repositories/cfoReport.repository");
 const { RESURRECTED_PAYMENT_IDS_SQL } = require("./orderRefund.service");
 const { recomputeOrder, httpError } = require("./orderPayment.service");
@@ -111,7 +112,8 @@ const ORDER_COLUMNS = sql`
   o.expected_trucks AS "expectedTrucks", o.payment_confirmed_at AS "paymentConfirmedAt",
   o.released_at AS "releasedAt", o.released_by AS "releasedBy",
   o.loading_started_at AS "loadingStartedAt", o.completed_at AS "completedAt",
-  o.created_at AS "createdAt", o.merged_into_order_id AS "mergedIntoOrderId"`;
+  o.created_at AS "createdAt", o.merged_into_order_id AS "mergedIntoOrderId",
+  o.idempotency_key AS "idempotencyKey"`;
 
 const ORDER_FROM = sql`
   FROM orders o
@@ -207,6 +209,9 @@ const ownBlockers = (order, facts) => {
   if (!LIVE_STATUSES.includes(order.status)) {
     out.push(`${ref} is ${order.status.toLowerCase()} — only live orders can be merged.`);
     return out;
+  }
+  if (isAllocationOrder(order)) {
+    out.push(`${ref} is a truck allocation's order — its quantity is its trucking PFI's stock, so it stays whole.`);
   }
   if (order.pricingStatus === "pending") {
     out.push(`${ref} has no price yet, so there is no unit price to match. Price it first.`);

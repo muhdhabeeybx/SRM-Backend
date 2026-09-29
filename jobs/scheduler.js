@@ -6,12 +6,23 @@ const { expireStaleRequests } = require("../services/requestExpiry.service");
 const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
 const { notify } = require("../notifications");
 const { runDeskNudges } = require("../services/deskNudge.service");
+const { resetPricesForTheDay } = require("../services/priceReset.service");
+const { syncTermii } = require("../services/messageLog.service");
 
 // An ad-hoc pg-boss queue created on demand, mirroring the WhatsApp maintenance
 // cron — not part of the WhatsApp queue set.
 const EXPIRY_QUEUE = "order-expiry-sweep";
 const DAILY_REPORT_QUEUE = "daily-report-send";
 const DESK_NUDGE_QUEUE = "desk-nudge-sweep";
+const PRICE_RESET_QUEUE = "depot-price-reset";
+const MESSAGE_COST_QUEUE = "message-cost-sync";
+const MESSAGE_COST_CRON = process.env.MESSAGE_COST_CRON || "*/30 * * * *";
+
+/**
+ * 23:59 Africa/Lagos, every day: every depot price goes to 0, so no product is
+ * on sale at yesterday's price. See services/priceReset.service.js.
+ */
+const PRICE_RESET_CRON = process.env.PRICE_RESET_CRON || "59 23 * * *";
 
 /**
  * 08:00 Africa/Lagos, every day — the start of the working day, when a desk
@@ -120,6 +131,34 @@ const start = async () => {
     `[scheduler] daily report scheduled (${DAILY_REPORT_CRON} ${DAILY_REPORT_TZ})`
   );
 
+  // ── The nightly price reset ───────────────────────────────────────────────
+  //
+  // Fails loudly, like the daily report: a reset that silently did not happen
+  // leaves yesterday's prices on sale all morning, so pg-boss retries it. It is
+  // idempotent — prices already at 0 are skipped — so a retry changes nothing
+  // twice.
+  await registerWorker(PRICE_RESET_QUEUE, async () => {
+    const result = await resetPricesForTheDay();
+    console.log(`[scheduler] price reset — ${result.updated} set to 0, ${result.skipped} already 0`);
+    return { updated: result.updated, skipped: result.skipped };
+  });
+  await scheduleCron(PRICE_RESET_QUEUE, PRICE_RESET_CRON, {}, { tz: DAILY_REPORT_TZ });
+  console.log(`[scheduler] price reset scheduled (${PRICE_RESET_CRON} ${DAILY_REPORT_TZ})`);
+
+  // ── What each SMS cost ────────────────────────────────────────────────────
+  //
+  // Reads Termii's message history into the message ledger (migration 0064):
+  // the charge on every SMS, its delivery status, and any message sent from
+  // Termii's own dashboard. Swallows its failure — the next run reads the same
+  // two days again, so nothing is lost by missing one.
+  await registerWorker(MESSAGE_COST_QUEUE, async () => {
+    const result = await syncTermii({ full: false });
+    if (!result.ok) console.error("[scheduler] message cost sync failed:", result.error);
+    return result;
+  });
+  await scheduleCron(MESSAGE_COST_QUEUE, MESSAGE_COST_CRON, {}, { tz: DAILY_REPORT_TZ });
+  console.log(`[scheduler] message cost sync scheduled (${MESSAGE_COST_CRON} ${DAILY_REPORT_TZ})`);
+
   // Say at boot whether this can actually work, rather than at 23:50 when
   // nobody is looking. An unset REPORT_RECIPIENTS is the single most likely
   // reason for a report that "just stopped arriving".
@@ -137,4 +176,4 @@ const start = async () => {
   }
 };
 
-module.exports = { start, EXPIRY_QUEUE, DAILY_REPORT_QUEUE, DAILY_REPORT_CRON };
+module.exports = { start, EXPIRY_QUEUE, DAILY_REPORT_QUEUE, DAILY_REPORT_CRON, PRICE_RESET_QUEUE, PRICE_RESET_CRON };

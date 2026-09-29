@@ -92,6 +92,13 @@ const CHOICES = [
     roles: ["admin", "super_admin", "sales_manager"],
   },
   {
+    key: "pfi_allocations",
+    label: "Truck allocations to approve",
+    description: "Trucks are allocated off a PFI and wait for approval before the order and the trucking PFI are made.",
+    types: ["staff.pfi_allocation_raised"],
+    roles: ["admin", "super_admin"],
+  },
+  {
     key: "daily_reports",
     label: "Daily reports submitted",
     description: "A desk submits its daily report for review.",
@@ -127,7 +134,7 @@ const CHOICES = [
     description: "Requests they raised or must act on, as they move through approval.",
     types: [
       "expense.pending", "expense.verified", "expense.audit_approved", "expense.admin_approved",
-      "expense.paid", "expense.rejected", "expense.changes_requested", "expense.comment",
+      "expense.progress", "expense.paid", "expense.rejected", "expense.changes_requested", "expense.comment",
     ],
     personal: true,
   },
@@ -139,12 +146,26 @@ const CHOICES = [
     personal: true,
   },
   {
+    // Sent to the officers of the next desk on the order's PFI, by text as
+    // well as the bell — see notifications/deskOfficers.js for who that is.
+    key: "desk_steps",
+    label: "Order and truck steps for their desk",
+    description:
+      "A text when an order or truck on their PFI reaches their desk: an order to confirm, tickets to write, trucks at the gate, truck payments to confirm.",
+    types: [
+      "desk.order_to_confirm", "desk.order_to_ticket", "desk.trucks_to_admit", "desk.trucks_on_yard",
+      "desk.order_completed", "desk.order_cancelled", "desk.trucks_to_sell", "desk.truck_payment",
+    ],
+    personal: true,
+  },
+  {
     key: "own_submissions",
     label: "Updates on what they submitted",
-    description: "Their daily report approved or sent back, an incident or offline sale they logged updated.",
+    description: "Their daily report approved or sent back, an incident or offline sale they logged updated, trucks they allocated approved or rejected.",
     types: [
       "staff.daily_report_approved", "staff.daily_report_rejected",
       "staff.incident_updated", "staff.offline_sale_updated",
+      "staff.pfi_allocation_decided",
     ],
     personal: true,
   },

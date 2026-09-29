@@ -1,6 +1,7 @@
 const axios = require("axios");
 const { virtualAccountName } = require("../utils/helpers");
 const { toSmsRecipient } = require("../utils/phone");
+const messageLog = require("./messageLog.service");
 // How a Soroman text is written — plain sentences, nothing in brackets, and
 // N rather than ₦ so the body stays in GSM-7. Shared with the catalog
 // templates so the two senders cannot drift into two voices again.
@@ -54,14 +55,16 @@ const MESSAGE_CLASS = {
  * customer who cannot tell who sent their payment instructions is a customer
  * who ignores it.
  *
- * So everything now goes out as the brand. If Termii has not whitelisted it
- * for DND, the DND leg is accepted ("Successfully Sent") and then rejected by
- * the carrier — visible in the delivery log as a `rejected` DLR, and the
+ * So everything now goes out as the brand. Termii whitelisted "SOROMAN" —
+ * all caps, matched exactly — for the dnd route in September 2026; "Soroman"
+ * is a different ID as far as the carrier is concerned. If Termii has not
+ * whitelisted the configured ID for DND, the DND leg is accepted ("Successfully
+ * Sent") and then rejected by the carrier — visible in the delivery log as a `rejected` DLR, and the
  * generic leg still runs behind it. Watch the log after deploying this; a run
  * of `sender_id` or `rejected` reasons on the dnd channel means the
  * whitelisting has not landed yet.
  */
-const sender = () => process.env.TERMII_SENDER_ID || "Soroman";
+const sender = () => process.env.TERMII_SENDER_ID || "SOROMAN";
 
 /**
  * Promotional traffic on the DND route: off, and it should stay off.
@@ -78,7 +81,7 @@ const sendSMSTermii = async (
   phone,
   sms,
   channel = CHANNELS.GENERIC,
-  from = process.env.TERMII_SENDER_ID || "Soroman"
+  from = sender()
 ) => {
   if (process.env.SMS_ENABLED === "false") {
     // Reported as a distinct outcome, NOT as success. Returning { success: true }
@@ -155,12 +158,42 @@ const routePlan = (messageClass) => {
  * Never throws. Termii soft-fails as `{ success: false }` without raising, so
  * a caller relying on try/catch alone would read a refusal as a delivery.
  *
+ * Every message that reaches this walk is written to the message ledger,
+ * sent or refused — services/messageLog.service.js. `tag` is what the caller
+ * knows about it (type, category, audience, recipient); what it does not know
+ * is worked out later from the phone number.
+ *
  * @param {object} [options]
  * @param {string} [options.messageClass] one of MESSAGE_CLASS; transactional by default
+ * @param {object} [options.tag] for the ledger: type, category, audience, staffId, customerId, recipientName, campaignId
  * @returns {Promise<{success: boolean, channel?: string, sender?: string,
  *                    messageId?: string, disabled?: boolean, message?: string}>}
  */
-const route = async (phone, sms, { messageClass = MESSAGE_CLASS.TRANSACTIONAL } = {}) => {
+const route = async (phone, sms, { messageClass = MESSAGE_CLASS.TRANSACTIONAL, tag = null } = {}) => {
+  const result = await walk(phone, sms, messageClass);
+  // The kill switch sent nothing, so there is nothing to account for.
+  if (!result.disabled) {
+    await messageLog.record({
+      channel: "sms",
+      provider: "termii",
+      providerMessageId: result.messageId || "",
+      recipient: formatPhoneForTermii(phone) || String(phone || ""),
+      route: result.channel || "",
+      sender: result.sender || sender(),
+      body: sms,
+      status: result.success ? "sent" : "failed",
+      error: result.success ? null : result.message,
+      tag: {
+        ...(tag || {}),
+        category: tag?.category || (messageClass === MESSAGE_CLASS.PROMOTIONAL ? "campaign" : undefined),
+      },
+    });
+  }
+  return result;
+};
+
+/** The route plan itself — `route` above is this plus the ledger. */
+const walk = async (phone, sms, messageClass) => {
   const attempts = [];
 
   for (const step of routePlan(messageClass)) {
@@ -244,8 +277,8 @@ const getTermiiBalance = async () => {
  * this function to explain, and a stack trace through `route` alone says less.
  * It once pinned its own sender ID; there is only one sender ID now.
  */
-const sendSMSWithFallback = async (phone, sms) =>
-  route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL });
+const sendSMSWithFallback = async (phone, sms, tag = null) =>
+  route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL, tag });
 
 /**
  * The route walk every bespoke sender below shares.
@@ -255,8 +288,11 @@ const sendSMSWithFallback = async (phone, sms) =>
  * They previously went generic first, which meant a DND-registered customer's
  * payment instructions were billed and dropped.
  */
-const deliver = async (phone, sms, label) => {
-  const result = await route(phone, sms, { messageClass: MESSAGE_CLASS.TRANSACTIONAL });
+const deliver = async (phone, sms, label, tag = null) => {
+  const result = await route(phone, sms, {
+    messageClass: MESSAGE_CLASS.TRANSACTIONAL,
+    tag: { type: label, ...(tag || {}) },
+  });
   if (result.success) return { success: true, message: `${label} sent successfully` };
 
   console.warn(`Termii failed during ${label}:`, result.message);
@@ -278,7 +314,7 @@ const sendPfiReviewSMS = async (phone, { pfiNumber, pfiType, locationName, produ
     `${productName ? ` for ${productName}` : ""}${locationName ? ` at ${locationName}` : ""}. ` +
     `It is not trading yet. Assign its bank account and officers on the dashboard to activate it.`;
 
-  return deliver(phone, sms, "PFI review notice");
+  return deliver(phone, sms, "PFI review notice", { audience: "staff" });
 };
 
 const sendOrderSummarySMS = async (phone, orderData) => {
@@ -293,7 +329,7 @@ const sendOrderSummarySMS = async (phone, orderData) => {
       bankName,
     })}. Thank you for your patronage.`;
 
-  return deliver(phone, sms, "Order SMS");
+  return deliver(phone, sms, "Order SMS", { audience: "customer" });
 };
 
 const sendTicketSummarySMS = async (phone, ticketData) => {
@@ -308,7 +344,7 @@ const sendTicketSummarySMS = async (phone, ticketData) => {
       ? `${greet(customerName)}your order of ${qty(quantity, unit)} of ${productName} from ${depotName || "our depot"} is confirmed and being prepared for delivery. We will keep you posted. Thank you for your patronage.`
       : `${greet(customerName)}your loading ticket for ${qty(quantity, unit)} of ${productName} at ${depotName || "our depot"} is ready. Thank you for your patronage.`;
 
-  return deliver(phone, sms, "Ticket SMS");
+  return deliver(phone, sms, "Ticket SMS", { audience: "customer" });
 };
 
 const sendDangoteDeliveryOrderSMS = async (phone, orderData) => {
@@ -323,7 +359,7 @@ const sendDangoteDeliveryOrderSMS = async (phone, orderData) => {
       bankName,
     })}. Thank you for your patronage.`;
 
-  return deliver(phone, sms, "Dangote delivery order SMS");
+  return deliver(phone, sms, "Dangote delivery order SMS", { audience: "customer" });
 };
 
 const sendLpgOrderSMS = async (phone, orderData) => {
@@ -338,7 +374,7 @@ const sendLpgOrderSMS = async (phone, orderData) => {
       bankName,
     })}. Thank you for your patronage.`;
 
-  return deliver(phone, sms, "LPG order SMS");
+  return deliver(phone, sms, "LPG order SMS", { audience: "customer" });
 };
 
 const sendOrderExpiredSMS = async (phone, { orderNumber, customerName }) => {
@@ -346,7 +382,7 @@ const sendOrderExpiredSMS = async (phone, { orderNumber, customerName }) => {
     `${greet(customerName)}your order ${orderNumber} has expired because payment was not received in time. ` +
     `The price is no longer held. Please place a new order at today's price whenever you are ready.`;
 
-  return deliver(phone, sms, "Order expiry SMS");
+  return deliver(phone, sms, "Order expiry SMS", { audience: "customer" });
 };
 
 const sendDangoteOrderExpiredSMS = async (phone, { requestNumber, customerName }) => {
@@ -354,7 +390,7 @@ const sendDangoteOrderExpiredSMS = async (phone, { requestNumber, customerName }
     `${greet(customerName)}your Dangote delivery order ${requestNumber} has expired because payment was not ` +
     `received in time. The price is no longer held. Please send a new request at today's price whenever you are ready.`;
 
-  return deliver(phone, sms, "Dangote expiry SMS");
+  return deliver(phone, sms, "Dangote expiry SMS", { audience: "customer" });
 };
 
 const sendLpgOrderExpiredSMS = async (phone, { requestNumber, customerName }) => {
@@ -362,7 +398,7 @@ const sendLpgOrderExpiredSMS = async (phone, { requestNumber, customerName }) =>
     `${greet(customerName)}your LPG order ${requestNumber} has expired because payment was not received in time. ` +
     `The price is no longer held. Please place a new order at today's price whenever you are ready.`;
 
-  return deliver(phone, sms, "LPG expiry SMS");
+  return deliver(phone, sms, "LPG expiry SMS", { audience: "customer" });
 };
 
 module.exports = { sendSMSTermii, route, getTermiiBalance, sendSMSWithFallback, sendPfiReviewSMS, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS, MESSAGE_CLASS };

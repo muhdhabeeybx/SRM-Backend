@@ -282,10 +282,11 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
       const code = String(pending.code || "").trim().toUpperCase().replace(/\s+/g, "-");
       let loadedTotal = 0;
 
+      const inventoryIds = [];
       for (const truck of pending.trucks) {
         const loaded = Number(truck.loadedQty) || 0;
         loadedTotal += loaded;
-        await tx.insert(deliveryInventory).values({
+        const [written] = await tx.insert(deliveryInventory).values({
           allocationCode: code,
           // Stamped so the batch names its PFI rather than the two being
           // joinable only through a code somebody typed.
@@ -298,7 +299,8 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
           quantityAllocated: loaded,
           dateAllocated: pending.dateAllocated || null,
           loadingStatus: "loaded",
-        });
+        }).returning({ id: deliveryInventory.id });
+        inventoryIds.push(written.id);
       }
 
       /**
@@ -328,7 +330,8 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
           .where(eq(pfis.id, pfiId));
       }
 
-      batch = { code, trucks: pending.trucks.length, loadedTotal };
+      // The load ids, so the caller can tell each driver once this commits.
+      batch = { code, trucks: pending.trucks.length, loadedTotal, inventoryIds };
     }
 
     const [finalPfi] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).limit(1);

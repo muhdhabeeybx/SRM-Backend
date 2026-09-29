@@ -213,7 +213,7 @@ describe("external boundaries — Turnstile and Termii", () => {
     };
 
     beforeEach(() => {
-      process.env.TERMII_SENDER_ID = "Soroman";
+      process.env.TERMII_SENDER_ID = "SOROMAN";
       delete process.env.TERMII_PROMO_ON_DND;
     });
 
@@ -255,7 +255,7 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(result.success, true);
       assert.equal(result.channel, "dnd");
       assert.equal(result.messageId, "m-1");
-      assert.deepEqual(seen, [{ channel: "dnd", from: "Soroman" }]);
+      assert.deepEqual(seen, [{ channel: "dnd", from: "SOROMAN" }]);
     });
 
     test("transactional falls back to generic", async () => {
@@ -271,8 +271,8 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(result.success, true);
       assert.equal(result.channel, "generic");
       assert.deepEqual(seen, [
-        { channel: "dnd", from: "Soroman" },
-        { channel: "generic", from: "Soroman" },
+        { channel: "dnd", from: "SOROMAN" },
+        { channel: "generic", from: "SOROMAN" },
       ]);
     });
 
@@ -287,7 +287,7 @@ describe("external boundaries — Turnstile and Termii", () => {
       });
 
       assert.equal(result.success, true);
-      assert.deepEqual(seen, [{ channel: "generic", from: "Soroman" }]);
+      assert.deepEqual(seen, [{ channel: "generic", from: "SOROMAN" }]);
     });
 
     test("TERMII_PROMO_ON_DND opens the dnd route to promos", async () => {
@@ -298,7 +298,7 @@ describe("external boundaries — Turnstile and Termii", () => {
         messageClass: MESSAGE_CLASS.PROMOTIONAL,
       });
 
-      assert.deepEqual(seen, [{ channel: "dnd", from: "Soroman" }]);
+      assert.deepEqual(seen, [{ channel: "dnd", from: "SOROMAN" }]);
     });
 
     test("defaults to transactional when no class is given", async () => {
@@ -316,14 +316,14 @@ describe("external boundaries — Turnstile and Termii", () => {
       // DND-whitelisted; an unbranded text is one the customer cannot place,
       // so the brand goes on both legs and the whitelisting is Termii's side
       // to fix.
-      process.env.TERMII_SENDER_ID = "Soroman";
+      process.env.TERMII_SENDER_ID = "SOROMAN";
       const seen = recordSends([{ message: "Insufficient balance" }, { message: "Successfully Sent" }]);
 
       await route("08012345678", "Your code is 123456");
 
       assert.deepEqual(seen, [
-        { channel: "dnd", from: "Soroman" },
-        { channel: "generic", from: "Soroman" },
+        { channel: "dnd", from: "SOROMAN" },
+        { channel: "generic", from: "SOROMAN" },
       ]);
       assert.ok(!seen.some((a) => /alert/i.test(a.from)), "no shared Termii sender ID survives");
     });
@@ -399,7 +399,7 @@ describe("external boundaries — Turnstile and Termii", () => {
       assert.equal(result.sent, true);
       assert.equal(result.reason, null);
       assert.equal(body.channel, "dnd", "OTP prefers Termii dnd over generic");
-      assert.equal(body.from, "Soroman", "an OTP is branded like every other text");
+      assert.equal(body.from, "SOROMAN", "an OTP is branded like every other text");
 
       const sentCode = body.sms.match(/\b(\d{6})\b/)?.[1];
       assert.ok(sentCode, `no 6-digit code found in: ${body.sms}`);

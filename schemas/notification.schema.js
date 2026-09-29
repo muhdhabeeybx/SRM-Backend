@@ -273,7 +273,20 @@ const sendTest = z.object({
   body: optionalString("Message", 2000),
 });
 
+/** The message ledger's filters (migration 0064). Days are Lagos calendar days. */
+const day = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-09-29");
+const messageLogQuery = pagination.extend({
+  from: day.optional(),
+  to: day.optional(),
+  channel: z.enum(["sms", "email", "whatsapp", "all"]).optional(),
+  audience: z.enum(["customer", "staff", "driver", "station", "contact", "unknown", "all"]).optional(),
+  category: z.enum(["transactional", "campaign", "otp", "all"]).optional(),
+  status: z.enum(["sent", "delivered", "failed", "all"]).optional(),
+  search: z.string().trim().max(120, "Search is too long").optional(),
+});
+
 module.exports = {
+  messageLogQuery,
   deliverySummary,
   CATEGORIES,
   PLATFORMS,

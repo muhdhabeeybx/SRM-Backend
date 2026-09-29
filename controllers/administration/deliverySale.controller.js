@@ -1,4 +1,5 @@
 const asyncHandler = require("express-async-handler");
+const stepNotices = require("../../services/stepNotices.service");
 const { deliverySaleRepo, deliveryCustomerRepo } = require("../../repositories");
 const { client } = require("../../config/db");
 const { allocationCodesFor } = require("../../lib/pfiScope");
@@ -126,6 +127,7 @@ const createDeliverySale = asyncHandler(async (req, res) => {
       base,
     });
     const total = sales.reduce((sum, s) => sum + Number(s.paymentAmount || 0), 0);
+    stepNotices.salesRecorded(sales);
     return res.status(201).json({
       success: true,
       message: `${sales.length} payment${sales.length === 1 ? "" : "s"} matched — ₦${total.toLocaleString()}`,
@@ -136,6 +138,9 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.create(
     bankAccountId ? { ...base, bankAccountId } : base,
   );
+  // A customer put on a truck, or money on it: the driver, the customer, a
+  // separate payer and finance hear. Never throws.
+  stepNotices.salesRecorded([sale]);
   res.status(201).json({
     success: true,
     message: "Delivery sale record created",
@@ -251,6 +256,13 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
 
   const updated = await deliverySaleRepo.update(sale.id, req.body);
 
+  // An edit that puts a new customer on the truck, or first puts money on it,
+  // is the same news as a new row saying so. Anything else is a correction.
+  const movedCustomer = updated?.customerId && Number(updated.customerId) !== Number(sale.customerId);
+  const firstMoney = Number(updated?.paymentAmount || 0) > 0 && !(Number(sale.paymentAmount || 0) > 0);
+  if (firstMoney) stepNotices.salesRecorded([updated]);
+  else if (movedCustomer) stepNotices.salesRecorded([{ ...updated, paymentAmount: 0 }]);
+
   res.json({
     success: true,
     message: "Delivery sale record updated",
@@ -278,6 +290,8 @@ const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
   const updated = await deliverySaleRepo.update(sale.id, {
     depositStatus: req.body.depositStatus,
   });
+  // Paid in full, and it was not before: the customer is told it is confirmed.
+  if (req.body.depositStatus === "paid" && sale.depositStatus !== "paid") stepNotices.depositConfirmed(updated);
 
   res.json({
     success: true,

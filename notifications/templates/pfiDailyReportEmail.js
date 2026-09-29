@@ -202,10 +202,9 @@ const c0 = (v) => (Number(v || 0) === 0 ? "—" : n0(v));
 /** A quantity that prints 0 as an em-dash, in the batch's own unit. */
 const q0 = (v, unit) => (Number(v || 0) === 0 ? "—" : qty(v, unit));
 
-/** A figure the data cannot support. Never a zero, never a negative. */
-const UNKNOWN = `<span style="color:${MUTED};">N/A</span>`;
 
 const MUTED_S = `color:${MUTED};`;
+const NOWRAP = "white-space:nowrap;";
 
 /** Green only when there is something there: a green em-dash reads as money. */
 const credit = (html) => ({ r: true, s: html === "—" ? "" : CREDIT_S });
@@ -244,6 +243,30 @@ const stockCell = (html) => cell(html, { ...KEY, r: true });
  * initial figure, "what happened today" needs the other two. The row reads
  * straight across — opening − sold today = closing.
  */
+const depotRow = (p) => {
+  const sold = q0(p.stock.soldToday, p.unit);
+  const value = m(p.orders.today.value);
+  const revenue = m(p.orders.toDate.paid);
+  return (
+    `<tr>` +
+    idCell(p.pfiNumber) +
+    cell(escapeHtml(up(p.location)) || "—") +
+    // An evacuation surplus is named under the initial figure rather
+    // than folded into it: initial is the batch as landed and never
+    // changes, and the surplus is why closing can exceed initial − sold.
+    stockCell(
+      qty(p.stock.starting, p.unit) +
+        (p.stock.surplus > 0 ? `<br><span style="font-size:11px">+ ${qty(p.stock.surplus, p.unit)} surplus</span>` : "")
+    ) +
+    stockCell(qty(p.stock.openingToday, p.unit)) +
+    cell(sold, credit(sold)) +
+    cell(qty(p.stock.remaining, p.unit), { r: true, s: KEY_S + BALANCE_S, bg: TINT }) +
+    cell(value, credit(value)) +
+    cell(revenue, credit(revenue)) +
+    `</tr>`
+  );
+};
+
 const depotSales = (pfis) =>
   section("Depot sales", "stock and orders, by PFI") +
   table(
@@ -251,29 +274,7 @@ const depotSales = (pfis) =>
       "PFI", "Location", "Initial stock", "Opening stock today", "Total sold today",
       "Closing stock today", "Sales value today", "Total PFI revenue",
     ],
-    pfis.map((p) => {
-      const sold = q0(p.stock.soldToday, p.unit);
-      const value = m(p.orders.today.value);
-      const revenue = m(p.orders.toDate.paid);
-      return (
-        `<tr>` +
-        idCell(p.pfiNumber) +
-        cell(escapeHtml(up(p.location)) || "—") +
-        // An evacuation surplus is named under the initial figure rather
-        // than folded into it: initial is the batch as landed and never
-        // changes, and the surplus is why closing can exceed initial − sold.
-        stockCell(
-          qty(p.stock.starting, p.unit) +
-            (p.stock.surplus > 0 ? `<br><span style="font-size:11px">+ ${qty(p.stock.surplus, p.unit)} surplus</span>` : "")
-        ) +
-        stockCell(qty(p.stock.openingToday, p.unit)) +
-        cell(sold, credit(sold)) +
-        cell(qty(p.stock.remaining, p.unit), { r: true, s: KEY_S + BALANCE_S, bg: TINT }) +
-        cell(value, credit(value)) +
-        cell(revenue, credit(revenue)) +
-        `</tr>`
-      );
-    })
+    pfis.map(depotRow)
   );
 
 // ─── Loading and exit gate ──────────────────────────────────────────────────
@@ -287,8 +288,8 @@ const depotSales = (pfis) =>
  * nothing for it.
  */
 const gateReport = (pfis) => {
-  const rows = pfis
-    .filter((p) => p.movements.trucksToDate > 0)
+  const moving = pfis.filter((p) => p.movements.trucksToDate > 0);
+  const rows = moving
     .map((p) => {
       const mv = p.movements;
       const loaded = q0(mv.litresLoadedToday, p.unit);
@@ -341,7 +342,28 @@ const gateReport = (pfis) => {
  * two up themselves. Labelled by category, because "General" as one number
  * answers nothing.
  */
-const expenseRow = (label, today, toDate) => {
+/**
+ * Where each of the day's requests has got to, one per line.
+ *
+ * A figure in REQUESTED TODAY says money was asked for, not whether anyone
+ * has signed it — which is the next thing a reader wants to know. The stage
+ * is in the approval chain's own words (lib/expenseChain.js), named after
+ * whoever has to act next. Paid reads green, as money out does everywhere
+ * else in this report; every open stage stays in ink, because a request
+ * waiting on the CFO is not a problem, only a fact.
+ */
+const expenseStatus = (items) =>
+  (items || []).length
+    ? items
+        .map((it) => {
+          const label = escapeHtml(it.statusLabel || it.status || "");
+          const stage = it.status === "paid" ? `<span style="${CREDIT_S}">${label}</span>` : label;
+          return `${m(it.amount)} &middot; ${stage}`;
+        })
+        .join("<br>")
+    : "—";
+
+const expenseRow = (label, today, toDate, items) => {
   const unpaid = Math.max(0, toDate.requested - toDate.paid);
   const reqToday = m(today.requested);
   const paidToday = m(today.paid);
@@ -351,6 +373,7 @@ const expenseRow = (label, today, toDate) => {
     idCell(label) +
     cell(reqToday, { ...KEY, r: true }) +
     cell(paidToday, { ...credit(paidToday), s: paidToday === "—" ? KEY_S : KEY_S + CREDIT_S, bg: TINT }) +
+    cell(expenseStatus(items), { s: "white-space:nowrap;" }) +
     cell(m(toDate.requested), { r: true }) +
     cell(paid, credit(paid)) +
     cell(m(unpaid), balance(m(unpaid))) +
@@ -365,13 +388,15 @@ const expenseRow = (label, today, toDate) => {
  * only the service knows that batch's number.
  */
 const expenses = (lines) => {
-  const rows = (lines || []).map((l) => expenseRow(l.label, l.today, l.toDate));
+  const all = lines || [];
+  const rows = all.map((l) => expenseRow(l.label, l.today, l.toDate, l.items));
   if (!rows.length) return "";
+  const unpaid = (l) => Math.max(0, l.toDate.requested - l.toDate.paid);
   return (
     section("Expenses", "raised or paid today") +
     table(
       [
-        "PFI/Category", "Requested today", "Paid today",
+        "PFI/Category", "Requested today", "Paid today", "Status",
         "Total requested", "Total paid", "Not yet paid",
       ],
       rows
@@ -400,11 +425,10 @@ const expenses = (lines) => {
  * commission rows, so the column can be checked against DEPOT SALES above it.
  */
 const commissions = (pfis) => {
-  const rows = pfis
-    .filter(
-      (p) =>
-        p.orders.today.litres > 0 || p.commission.today.due > 0 || p.commission.today.paid > 0
-    )
+  const moved = pfis.filter(
+    (p) => p.orders.today.litres > 0 || p.commission.today.due > 0 || p.commission.today.paid > 0
+  );
+  const rows = moved
     .map((p) => {
       const c = p.commission;
       const sold = q0(p.orders.today.litres, p.unit);
@@ -451,126 +475,140 @@ const commissions = (pfis) => {
  */
 const batchLabel = (code) => String(code || "").replace(/^PFI-/i, "PFI ");
 
+/**
+ * Every open batch, with the figures its PFI Tracking card shows.
+ *
+ * Summed by lib/deliveryBatches.js, a port of the dashboard's own batch
+ * arithmetic: a truck is sold when it carries money or went to a station,
+ * unsold while it is loaded and unpaid, and a load's value is what was billed
+ * on it. The labels are the card's own, so the two can be read side by side.
+ *
+ * Open means what it means on the station pages: not closed on Delivery
+ * Inventory, and its PFI not finished.
+ */
 const truckSales = (batches) => {
   if (!batches.length) return "";
+  const anyEmpty = batches.some((b) => b.otherTrucks > 0);
+  const rows = batches.map((b) => {
+    const value = m(b.salesValue);
+    const paid = m(b.paid);
+    const unpaid = m(b.unpaid);
+    return (
+      `<tr>` +
+      idCell(batchLabel(b.code)) +
+      cell(n0(b.trucks), { ...KEY, r: true }) +
+      cell(q0(b.volume, b.unit), { ...KEY, r: true }) +
+      cell(c0(b.soldTrucks), credit(c0(b.soldTrucks))) +
+      cell(q0(b.soldQty, b.unit), credit(q0(b.soldQty, b.unit))) +
+      cell(c0(b.unsoldTrucks), balance(c0(b.unsoldTrucks))) +
+      cell(q0(b.unsoldQty, b.unit), balance(q0(b.unsoldQty, b.unit))) +
+      (anyEmpty ? cell(c0(b.otherTrucks), { r: true }) : "") +
+      cell(value, credit(value)) +
+      cell(paid, credit(paid)) +
+      cell(unpaid, balance(unpaid)) +
+      `</tr>`
+    );
+  });
+  const unit = (b) => b.unit;
   return (
-    section("Truck sales", "active allocations") +
+    section("Truck sales", "open PFIs, as on PFI Tracking") +
     table(
       [
-        "PFI", "Trucks allocated", "Trucks sold", "Unsold trucks",
-        "Total sales value", "Amount received", "Balance to be paid",
+        "PFI", "Trucks allocated", "Volume loaded", "Trucks sold", "Volume sold",
+        "Trucks unsold", "Volume unsold", ...(anyEmpty ? ["Trucks empty"] : []),
+        "Sales value", "Amount paid", "Amount unpaid",
       ],
-      batches.map((b) => {
-        const value = m(b.salesValue);
-        const received = m(b.fundsReceived);
-        const bal = m(b.balance);
-        return (
-          `<tr>` +
-          idCell(batchLabel(b.code)) +
-          // A batch with no allocation rows has an UNKNOWN count, not a zero
-          // one: a confident 0 against a batch still selling is a worse answer
-          // than an honest blank.
-          cell(b.trucksAllocated ? n0(b.trucksAllocated) : UNKNOWN, { r: true }) +
-          cell(c0(b.trucksSold), { r: true }) +
-          // n0, not c0: in this column a zero means "all of them sold", which
-          // is the best news on the row and has to be readable as such. An
-          // em-dash here would sit beside the N/A that means "we do not know
-          // how many were allocated" and the two would be indistinguishable.
-          cell(b.unsoldTrucks === null ? UNKNOWN : n0(b.unsoldTrucks), {
-            r: true,
-            s: b.unsoldTrucks ? BALANCE_S : "",
-          }) +
-          cell(value, credit(value)) +
-          cell(received, credit(received)) +
-          cell(bal, balance(bal)) +
-          `</tr>`
-        );
-      })
+      rows
     )
   );
 };
 
-// ─── Filling stations, grouped by PFI ───────────────────────────────────────
+// ─── Stations, grouped by station ───────────────────────────────────────────
 
 /**
- * Grouped by batch, with the stations under it.
+ * One table per kind of station, one block of rows per station, one row per
+ * open PFI it has been restocked from.
  *
- * A station holds stock from several batches at once and draws each down
- * separately, so "Kano Filling Station" is not a row — it is a row PER BATCH.
- * Flat, that table repeated the same station name five times and the reader
- * had to sort it themselves to answer "how is 14B going". Under a batch
- * heading the question is answered by looking.
+ * Read the way the station's own page reads it (lib/stationAccounts.js, a
+ * port of the dashboard's station account): what arrived is the station's
+ * share of each truck, never less than it has sold; sold is what went through
+ * the pumps; banked is what was deposited. BALANCE is what was sold and has
+ * been neither banked nor spent on the station's own running — the money
+ * still at the station.
  *
- * Stations are customers, not places: a filling station is a row in
- * `delivery_customers` reached through the sale's customer_id. Grouping on the
- * customer retired a whole class of spelling problem the free-text `location`
- * had (JOS/JOSE, KADUNA/KADUAN) — and stopped DAMATURU and KADUNA, which are
- * cities, being listed as stations.
+ * Filling stations and LPG stations are one business in two products, so they
+ * share this layout and differ only in title and in unit, which is the
+ * batch's own: gas is sold by the kilogram.
  */
 const STATION_HEADERS = [
-  "Station", "Initial stock", "Opening stock today", "Volume sold today", "Total volume sold",
-  "Stock remaining", "Sales value today", "Total amount received", "Balance",
+  "Station", "PFI", "Received", "Sold today", "Total sold", "Stock left",
+  "Sales today", "Total sales", "Amount banked", "Balance",
 ];
 
-/**
- * Station volumes are litres, and that is an assumption worth naming.
- *
- * Unlike a depot batch, a station's figures are summed across `delivery_sales`
- * rows that carry no unit of their own — the allocation does, on
- * `delivery_inventory.pfi_product`, but the sale does not, and the two are
- * joined on a free-text code. Every station on the ledger sells PMS, so litres
- * is right today. The day one holds gas, this line is where it is wrong, and
- * the fix is to carry the unit through the allocation rather than to change
- * this constant.
- */
-const STATION_UNIT = "Litres";
+const stationRowCells = (st) => {
+  const u = st.unit || "Litres";
+  const soldToday = q0(st.soldToday, u);
+  const sold = q0(st.sold, u);
+  const left = qty(st.stockLeft, u);
+  const today = m(st.salesValueToday);
+  const value = m(st.salesValue);
+  const banked = m(st.banked);
+  const bal = m(st.balance);
+  return (
+    cell(escapeHtml(batchLabel(st.code)), { ...KEY, s: KEY_S + NOWRAP }) +
+    cell(qty(st.received, u), { ...KEY, r: true }) +
+    cell(soldToday, credit(soldToday)) +
+    cell(sold, credit(sold)) +
+    cell(left, { r: true, bg: TINT, s: KEY_S + (st.stockLeft ? BALANCE_S : "") }) +
+    cell(today, credit(today)) +
+    cell(value, credit(value)) +
+    cell(banked, credit(banked)) +
+    cell(bal, balance(bal))
+  );
+};
 
-const stationGroups = (stations) => {
-  if (!stations.length) return "";
+const stationTable = (title, rows) => {
+  if (!rows.length) return "";
 
-  const byCode = new Map();
-  for (const st of stations) {
-    if (!byCode.has(st.code)) byCode.set(st.code, []);
-    byCode.get(st.code).push(st);
+  const byStation = new Map();
+  for (const st of rows) {
+    if (!byStation.has(st.party)) byStation.set(st.party, []);
+    byStation.get(st.party).push(st);
   }
 
-  const groups = [...byCode.entries()]
-    .map(([code, rows]) => {
-      const body = rows.map((st) => {
-        const soldToday = q0(st.litresToday, STATION_UNIT);
-        const sold = q0(st.litres, STATION_UNIT);
-        const value = m(st.salesValueToday);
-        const received = m(st.fundsReceived);
-        const bal = m(st.balance);
-        return (
-          `<tr>` +
-          idCell(st.party) +
-          cell(st.allocatedLitres ? qty(st.allocatedLitres, STATION_UNIT) : UNKNOWN, { ...KEY, r: true }) +
-          // Opening is derived from what remains, so it is only as knowable as
-          // that is: a station that has sold more than was ever allocated to it
-          // has no honest opening figure, and prints none rather than a
-          // negative one.
-          cell(st.stockKnown ? qty(st.openingLitresToday, STATION_UNIT) : UNKNOWN, { ...KEY, r: true }) +
-          cell(soldToday, credit(soldToday)) +
-          cell(sold, credit(sold)) +
-          cell(st.stockKnown ? qty(st.remainingLitres, STATION_UNIT) : UNKNOWN, {
-            r: true,
-            bg: TINT,
-            s: KEY_S + (st.stockKnown && st.remainingLitres ? BALANCE_S : ""),
-          }) +
-          cell(value, credit(value)) +
-          cell(received, credit(received)) +
-          cell(bal, balance(bal)) +
-          `</tr>`
-        );
-      });
-      return group(batchLabel(code), `${rows.length} station${rows.length === 1 ? "" : "s"}`) +
-        table(STATION_HEADERS, body);
-    })
-    .join("");
+  const body = [...byStation.entries()].flatMap(([party, list]) =>
+    list.map(
+      (st, i) =>
+        `<tr>` +
+        // rowspan is an attribute every client honours, Outlook included, so
+        // the name spans its batches rather than repeating on each.
+        (i === 0
+          ? `<td bgcolor="${TINT}" rowspan="${list.length}" valign="top" style="${KEY_S}${NOWRAP}">` +
+            `${escapeHtml(up(party))}</td>`
+          : "") +
+        stationRowCells(st) +
+        `</tr>`
+    )
+  );
 
-  return section("Filling stations", "active stock, by PFI") + `</div>` + groups;
+  const stationCount = byStation.size;
+  const note = `${stationCount} station${stationCount === 1 ? "" : "s"}, open PFIs`;
+  const unitOfRow = (st) => st.unit || "Litres";
+
+  return (
+    section(title, note) +
+    table(
+      STATION_HEADERS,
+      body
+    )
+  );
 };
+
+const isLpg = (r) => r.customerType === "lpg_plant";
+
+const stationSections = (stations) =>
+  stationTable("Filling stations", stations.filter((r) => !isLpg(r))) +
+  stationTable("LPG stations", stations.filter(isLpg));
 
 // ─── Staff reports ──────────────────────────────────────────────────────────
 
@@ -653,8 +691,8 @@ const roleTable = ({ type, label, filed: filedCount, rows }) => {
       // is several KB of a document Gmail clips.
       return (
         `<tr>` +
-        cell(`<em>Not reported</em>`, { s: MUTED_S }) +
-        cell(escapeHtml(up(e.pfiNumber)) || "—", { s: MUTED_S }) +
+        cell(`<em>Not reported</em>`, { s: MUTED_S + NOWRAP }) +
+        cell(escapeHtml(up(e.pfiNumber)) || "—", { s: MUTED_S + NOWRAP }) +
         // Math.max, because a colspan of 0 is not a span — it would emit a
         // third cell into a two-column table. No role declares zero columns
         // today; a role that did would silently break the table.
@@ -674,13 +712,15 @@ const roleTable = ({ type, label, filed: filedCount, rows }) => {
       })
       .join("");
 
+    // Prices and customers are short lines that read wrong broken mid-line
+    // ("45,000 / Litres @ / ₦1,270"); remarks are prose and may wrap.
     const extras = extraCols
-      .map((c) => cell(filled(e[c.key]) ? c.render(e[c.key], e.unit) : "—"))
+      .map((c) => cell(filled(e[c.key]) ? c.render(e[c.key], e.unit) : "—", { s: c.key === "remarks" ? "" : NOWRAP }))
       .join("");
 
     return (
       `<tr>` +
-      cell(`<strong>${escapeHtml(e.submittedBy) || "—"}</strong>`) +
+      cell(`<strong>${escapeHtml(e.submittedBy) || "—"}</strong>`, { s: NOWRAP }) +
       cell(escapeHtml(up(e.pfiNumber)) || "—", KEY) +
       figures +
       extras +
@@ -727,6 +767,16 @@ const renderPfiDailyReportEmail = (d) => {
     `<p style="margin:0 0 4px;font-size:13px;line-height:1.6;">` +
     `Please find below the summary of sales and operations across all locations for ` +
     `<strong>${escapeHtml(date)}</strong>.</p>` +
+    // The sender's covering line, when there is one — set apart from the
+    // greeting so it reads as theirs, not as the system's.
+    (d.note
+      ? `<div style="margin:12px 0 0;padding:10px 12px;border-left:3px solid ${INK};background:${TINT};` +
+        `font-size:13px;line-height:1.55;">` +
+        (d.noteFrom
+          ? `<div style="font-size:11px;color:${MUTED};margin-bottom:4px;">Note from ${escapeHtml(d.noteFrom)}</div>`
+          : "") +
+        `${escapeHtml(d.note).replace(/\n/g, "<br>")}</div>`
+      : "") +
     /**
      * There is deliberately no figure between the greeting and DEPOT SALES.
      *
@@ -745,7 +795,7 @@ const renderPfiDailyReportEmail = (d) => {
     expenses(d.expenseLines) +
     commissions(pfis) +
     truckSales(d.truckSales || []) +
-    stationGroups(d.stations || []) +
+    stationSections(d.stations || []) +
     staffReports(d.staffReports) +
     `<p style="margin:34px 0 0;font-size:13px;color:${INK};">Best regards,<br/>Soroman System</p>` +
     `</div>`;
@@ -767,11 +817,12 @@ const renderPfiDailyReportEmail = (d) => {
     "",
     `Please find below the summary of sales and operations across all locations for ${date}.`,
     "",
+    ...(d.note ? [`${d.noteFrom ? `Note from ${d.noteFrom}: ` : ""}${d.note}`, ""] : []),
     `${s.activePfis || 0} active PFI(s), ${s.activeBatches || 0} truck-sales batch(es), ` +
-      `${s.activeStations || 0} filling station(s).`,
+      `${s.activeStations || 0} station(s).`,
     "",
     "Depot sales, loading and exit gate, expenses, commissions, truck sales,",
-    "filling stations and staff reports follow in the HTML version of this email.",
+    "stations and staff reports follow in the HTML version of this email.",
     "",
     "Best regards,",
     "Soroman System",

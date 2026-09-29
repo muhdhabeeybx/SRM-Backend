@@ -21,6 +21,7 @@ const { isWithinScope } = require("../../lib/scopeFilter");
 const { scopedPfiIds } = require("../../lib/pfiBankScope");
 const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../lib/pfiAssignmentContext");
 const smsService = require("../../services/sms.service");
+const stepNotices = require("../../services/stepNotices.service");
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status });
@@ -564,6 +565,10 @@ const activatePfi = asyncHandler(async (req, res) => {
     context: contextFromRequest(req, SOURCES.PFI_ACTIVATION, "Named as an officer when the PFI was released to trade"),
     note: req.body.note || "",
   });
+
+  // A trucking PFI's trucks were written just now: each driver hears he is
+  // loaded, and the truck sales desk that the batch is ready. Never throws.
+  if (updated.batch?.inventoryIds?.length) stepNotices.trucksLoaded(updated.batch.inventoryIds);
 
   res.json({
     success: true,

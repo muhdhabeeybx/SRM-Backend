@@ -81,6 +81,11 @@ router.get(
   admin.deliverySummary
 );
 router.get("/sms-balance", verifyStaff, admin.smsBalance);
+// Every message sent and what it cost (migration 0064). Before "/:id/…".
+const messageLogCtrl = require("../../controllers/administration/messageLog.controller");
+router.get("/message-log", verifyStaff, validate({ query: schemas.messageLogQuery }), messageLogCtrl.listMessages);
+router.get("/message-log/summary", verifyStaff, validate({ query: schemas.messageLogQuery }), messageLogCtrl.messageSummary);
+router.post("/message-log/sync", verifyStaff, messageLogCtrl.syncMessages);
 router.get("/campaigns", verifyStaff, validate({ query: schemas.listCampaigns }), admin.listCampaigns);
 router.get(
   "/campaigns/:id",

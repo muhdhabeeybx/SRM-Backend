@@ -16,6 +16,8 @@ const {
   commissionRepo,
 } = require("../repositories");
 const { isWithinScope } = require("../lib/scopeFilter");
+const { sellableQty } = require("../lib/pfiStock");
+const { isAllocationOrder } = require("../lib/allocationOrders");
 const walletService = require("./wallet.service");
 // Order payments are the money path (see db/migrations/0021). walletService
 // survives above only for the legacy holds that historical orders still carry
@@ -31,6 +33,7 @@ const { notify } = require("../notifications");
 const { findPfiForOrder } = require("./pfi.service");
 const { generateTicketForOrder } = require("./ticket.service");
 const orderStatus = require("./orderStatus.service");
+const stepNotices = require("./stepNotices.service");
 const commissionService = require("./commission.service");
 const { QUEUES, enqueue } = require("../config/queue");
 
@@ -202,6 +205,10 @@ function releasableQuantity(order) {
 function isOrderExpired(order, now = Date.now()) {
   return (
     !orderExpiryDisabled() &&
+    // A truck allocation's order waits for its payment however long it takes:
+    // lapsing it would hand its litres back to the cargo while the trucking
+    // PFI still holds them. See lib/allocationOrders.js.
+    !isAllocationOrder(order) &&
     order.status === "Pending" &&
     // Only a wholly unfunded order may lapse. Tested as "is Unpaid" rather
     // than "is not Paid" because a Part Paid order HAS been funded — money is
@@ -222,6 +229,7 @@ function isOrderExpired(order, now = Date.now()) {
  */
 function computeExpiresAt(order) {
   if (orderExpiryDisabled()) return null;
+  if (isAllocationOrder(order)) return null;
   // Part Paid counts as funded here, same as Paid: money is held against the
   // order, so there is no countdown left to show.
   if (order.status !== "Pending" || order.paymentStatus !== "Unpaid") return null;
@@ -254,15 +262,14 @@ async function withExpiresAt(orderOrOrders) {
  */
 async function expireAndAttach(order) {
   // If pending and wholly unfunded, check if deadline has passed. A Part Paid
-  // order is funded and must not lapse — see isOrderExpired.
-  if (!orderExpiryDisabled() && order.status === "Pending" && order.paymentStatus === "Unpaid") {
-    if (hasLapsed(order.createdAt)) {
-      try {
-        const expired = await expireOrder(order.id);
-        return { ...expired, expiresAt: null };
-      } catch {
-        // Already expired or concurrent update — fall through with original
-      }
+  // order is funded and must not lapse, and neither does a truck allocation's
+  // — isOrderExpired decides both.
+  if (isOrderExpired(order)) {
+    try {
+      const expired = await expireOrder(order.id);
+      return { ...expired, expiresAt: null };
+    } catch {
+      // Already expired or concurrent update — fall through with original
     }
   }
   return { ...order, expiresAt: computeExpiresAt(order) };
@@ -377,7 +384,29 @@ async function placeOrder({
    * `actor` is what ends up on the authorisation.
    */
   unpriced = null,
+  /**
+   * `{ pfiId, price }` — sell from THIS PFI at THIS price.
+   *
+   * For the order approving a truck allocation places on its parent cargo
+   * (services/pfiAllocation.service.js). The stock must come off the cargo the
+   * trucks were allocated from, not whichever batch at the depot happens to be
+   * oldest, and the price is the one the allocation was approved at, not the
+   * depot's board price — which resets to zero every night at 23:59.
+   *
+   * Staff only, like `unpriced`, and it also lets a delivery order carry its
+   * fleet trucks from the start: the allocation already named them.
+   */
+  pinned = null,
+  /**
+   * Send the customer nothing — no invoice, no payment SMS, no app notice.
+   * For the house customer, which is the company itself. Staff notices still go.
+   */
+  quiet = false,
 }) {
+  if (pinned && (actor?.type !== "staff" || !actor.staffId)) {
+    throw httpError(403, "Only a member of staff can place an order on a named PFI at an agreed price");
+  }
+
   if (idempotencyKey) {
     const existing = await orderRepo.findByIdempotencyKey(idempotencyKey);
     if (existing) return replayResult(existing.id);
@@ -415,7 +444,10 @@ async function placeOrder({
    * customer thinks they have spent and nobody has a record of.
    */
   let recent = null;
-  try {
+  // A pinned order is keyed by what it was placed for (its idempotency key),
+  // and two allocations of the same size approved a minute apart are two
+  // orders, not a double tap.
+  if (!pinned) try {
     recent = await orderRepo.findRecentDuplicate({
       customerId,
       depotId,
@@ -515,7 +547,11 @@ async function placeOrder({
    */
   let serverPrice = 0;
   let totalAmount = 0;
-  if (!unpriced) {
+  if (pinned) {
+    serverPrice = Number(pinned.price);
+    if (!(serverPrice > 0)) throw httpError(400, "An agreed price is required");
+    totalAmount = serverPrice * Number(quantity);
+  } else if (!unpriced) {
     const priceEntry = await depotRepo.getProductPrice(depotId, productId);
     if (!priceEntry || Number(priceEntry.currentPrice) <= 0) {
       throw httpError(400, "No price configured for this product at this depot");
@@ -537,7 +573,22 @@ async function placeOrder({
   // reserves nothing and the order carries no PFI. This used to throw
   // "Insufficient stock in depot", which made a freshly priced depot
   // unorderable even though the site offered it.
-  const { allocations } = await findPfiForOrder(depotId, productId, quantity);
+  let allocations;
+  if (pinned) {
+    const pfi = await pfiRepo.findById(pinned.pfiId);
+    if (!pfi) throw httpError(404, "PFI not found");
+    if (pfi.status !== "active") throw httpError(409, `${pfi.pfiNumber} is not trading`);
+    // Checked again, atomically, by reserveStock in the transaction below.
+    if (sellableQty(pfi) < Number(quantity)) {
+      throw httpError(
+        409,
+        `${pfi.pfiNumber} has ${sellableQty(pfi).toLocaleString()} left, not ${Number(quantity).toLocaleString()}`,
+      );
+    }
+    allocations = [{ pfi, quantity: Number(quantity) }];
+  } else {
+    ({ allocations } = await findPfiForOrder(depotId, productId, quantity));
+  }
 
   /**
    * The account the customer is told to pay into.
@@ -586,10 +637,10 @@ async function placeOrder({
   // gate and at ticketing). Delivery orders never carry trucks at order time
   // — their fleet is allocated at release.
   const declaredTrucks = Array.isArray(trucks) ? trucks : [];
-  if (deliveryType === "delivery" && declaredTrucks.length) {
+  if (deliveryType === "delivery" && declaredTrucks.length && !pinned) {
     throw httpError(400, "Delivery trucks are allocated at release, not at order");
   }
-  if (deliveryType === "pickup" && declaredTrucks.length) {
+  if (declaredTrucks.length) {
     const sum = declaredTrucks.reduce((s, t) => s + Number(t.quantity), 0);
     if (sum !== Number(quantity)) {
       throw httpError(
@@ -765,7 +816,9 @@ async function placeOrder({
         {
           orderId: created.id,
           truckIndex: i + 1,
-          truckId: null,
+          // Only a pinned delivery order names fleet trucks here; a pickup
+          // customer's own truck is in no registry.
+          truckId: pinned && t.truckId != null ? Number(t.truckId) : null,
           truckNumber: t.truckNumber || null,
           quantity: String(t.quantity),
           driverName: t.driverName || null,
@@ -780,7 +833,10 @@ async function placeOrder({
           entityId: load.id,
           action: "order_truck.allocated",
           actor,
-          metadata: { orderId: created.id, truckIndex: i + 1, truckNumber: load.truckNumber, quantity: String(t.quantity), via: "pickup-declaration" },
+          metadata: {
+            orderId: created.id, truckIndex: i + 1, truckNumber: load.truckNumber, quantity: String(t.quantity),
+            via: pinned ? "pfi-allocation" : "pickup-declaration",
+          },
         },
         tx
       );
@@ -818,6 +874,10 @@ async function placeOrder({
   // same decoration every other read path does.
   const reference = fullOrder.orderNumber;
 
+  // Finance on the order's PFI is asked to confirm its payment — priced or
+  // not, since an unpriced order is theirs to price. Never throws.
+  stepNotices.orderPlaced(order.id);
+
   /**
    * An unpriced order sends the customer nothing at creation.
    *
@@ -829,7 +889,7 @@ async function placeOrder({
    * The invoice goes out when the order is priced; until then the paper ticket
    * in the driver's hand is the only document the customer should hold.
    */
-  if (unpriced) {
+  if (unpriced || quiet) {
     try {
       notify("staff.order_placed", {
         to: { roles: rolesFor("orders_placed") },
@@ -843,7 +903,7 @@ async function placeOrder({
           unit: fullOrder.productUnit || "Liters",
           totalAmount: order.totalAmount,
           depotName: depot.name,
-          awaitingPrice: true,
+          ...(unpriced ? { awaitingPrice: true } : {}),
         },
       });
     } catch (notifyErr) {
@@ -859,7 +919,7 @@ async function placeOrder({
         accountName: virtualAccountName,
         emailSent: false,
         smsSent: false,
-        awaitingPrice: true,
+        ...(unpriced ? { awaitingPrice: true } : {}),
       },
     };
   }
@@ -1347,6 +1407,32 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
  * same unit. Shared by the staff endpoint and the
  * WhatsApp customer cancel — the actor in the audit row tells them apart.
  */
+/**
+ * A truck allocation's order cannot be cancelled while its trucking PFI
+ * exists: the cancel would put the litres back on the cargo while the
+ * trucking PFI still holds them. Undoing an allocation is two named acts —
+ * delete the trucking PFI (super admin), then cancel the order.
+ */
+async function refuseWhileTruckingPfiHoldsIt(orderId, tx) {
+  const order = await orderRepo.lockById(orderId, tx);
+  if (!isAllocationOrder(order)) return;
+  const result = await tx.execute(sql`
+    SELECT p.pfi_number AS "pfiNumber"
+      FROM pfi_truck_allocations a
+      JOIN pfis p ON p.id = a.sub_pfi_id
+     WHERE a.order_id = ${Number(orderId)}
+     LIMIT 1
+  `);
+  const held = (result.rows ?? result)[0];
+  if (held) {
+    throw httpError(
+      409,
+      `${order.orderNumber} is the sale of ${held.pfiNumber}'s litres to its trucks. ` +
+        `To undo the allocation, delete ${held.pfiNumber} first, then cancel this order.`,
+    );
+  }
+}
+
 async function cancelOrder({
   orderId,
   actor,
@@ -1356,6 +1442,7 @@ async function cancelOrder({
   userAgent = null,
 }) {
   return db.transaction(async (tx) => {
+    await refuseWhileTruckingPfiHoldsIt(orderId, tx);
     const order = await orderStatus.transition(orderId, "Cancelled", {
       tx,
       actor,
@@ -1389,6 +1476,9 @@ async function expireOrder(orderId, { tx } = {}) {
     // taking the row lock first also serialises this against a concurrent
     // payment rather than racing it.
     const before = await orderRepo.lockById(orderId, tx);
+    if (isAllocationOrder(before)) {
+      throw httpError(409, `${before.orderNumber} is a truck allocation's order and does not lapse`);
+    }
 
     const order = await orderStatus.transition(orderId, "Expired", {
       tx,

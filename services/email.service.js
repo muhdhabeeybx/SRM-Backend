@@ -40,7 +40,33 @@ const sendMail = async (payload) => {
     return { skipped: true };
   }
 
-  return resend.emails.send(payload);
+  // Every bespoke email (invoices, tickets, Dangote and LPG notices) leaves
+  // here, so here is where it joins the message ledger.
+  const messageLog = require("./messageLog.service");
+  try {
+    const result = await resend.emails.send(payload);
+    for (const address of to) {
+      await messageLog.record({
+        channel: "email",
+        provider: "resend",
+        providerMessageId: to.length === 1 ? result?.data?.id || "" : "",
+        recipient: address,
+        subject: payload.subject || "",
+        status: result?.error ? "failed" : "sent",
+        error: result?.error?.message || null,
+        tag: { type: payload.subject ? `email: ${String(payload.subject).slice(0, 56)}` : "email" },
+      });
+    }
+    return result;
+  } catch (err) {
+    for (const address of to) {
+      await messageLog.record({
+        channel: "email", provider: "resend", recipient: address,
+        subject: payload.subject || "", status: "failed", error: err.message, tag: { type: "email" },
+      });
+    }
+    throw err;
+  }
 };
 
 function escapeHtml(str) {

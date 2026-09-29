@@ -100,8 +100,15 @@ const hcell = (label, { r = false, s = "", bg = HEAD } = {}) =>
 const m = (val) => {
   const f = Number(val);
   if (!Number.isFinite(f) || f === 0) return "—";
-  return `₦${f.toLocaleString("en-NG", { maximumFractionDigits: 0 })}`;
+  return naira(f);
 };
+
+/**
+ * The sign goes before the currency: "-₦57,150,000", as it is written by
+ * hand and in every bank statement. "₦-57,150,000" reads as a typo.
+ */
+const naira = (f) =>
+  `${f < 0 ? "-" : ""}₦${Math.abs(f).toLocaleString("en-NG", { maximumFractionDigits: 0 })}`;
 
 /** Plain {:,.0f}-style formatting for stock figures, which print 0 rather than —. */
 const n0 = (val) => Number(val || 0).toLocaleString("en-NG", { maximumFractionDigits: 0 });
@@ -126,5 +133,5 @@ const plural = (count, singular, pluralForm = `${singular}s`) =>
 module.exports = {
   INK, MUTED, HEAD, HEAD_KEY, TINT, CREDIT, BALANCE, FONT_STACK,
   TABLE, TH_S, KEY_S, CREDIT_S, BALANCE_S,
-  cell, hcell, m, n0, ordinalDate, plainDate, plural,
+  cell, hcell, m, naira, n0, ordinalDate, plainDate, plural,
 };

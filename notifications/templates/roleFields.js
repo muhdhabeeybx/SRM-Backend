@@ -1,5 +1,5 @@
 const { escapeHtml } = require("./email");
-const { n0 } = require("./reportTable");
+const { n0, naira } = require("./reportTable");
 
 /**
  * What each desk reports, and how each figure is spelled.
@@ -67,7 +67,7 @@ const qty = (v, unit) => `${n0(v)} ${unitOf(unit)}`;
  */
 const FORMATTERS = {
   litres: (v, unit) => (v === null || v === undefined ? "—" : qty(v, unit)),
-  money: (v) => (v === null || v === undefined ? "—" : `₦${n0(v)}`),
+  money: (v) => (v === null || v === undefined ? "—" : naira(Number(v))),
   rate: (v, unit) =>
     v === null || v === undefined || Number(v) === 0 ? "—" : `₦${n0(v)} per ${rateWord(unit)}`,
   count: (v) => (v === null || v === undefined ? "—" : n0(v)),

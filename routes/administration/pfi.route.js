@@ -32,6 +32,14 @@ const {
   updatePfiNote,
   deletePfiNote,
 } = require("../../controllers/administration/pfi.controller");
+const {
+  listAllocations,
+  getPfiAllocations,
+  raiseAllocation,
+  approveAllocation,
+  rejectAllocation,
+  withdrawAllocation,
+} = require("../../controllers/administration/pfiAllocation.controller");
 
 // Stock across every PFI. Declared before "/:id" so it is not swallowed by it.
 router.get("/stock-summary", verifyStaff, getStockSummary);
@@ -41,6 +49,28 @@ router.post("/assign-orders", verifyStaff, assignOrdersToPfi);
 // What the full PFI report needs beyond the list — banks, people, activity,
 // notes — for every PFI in the caller's scope. Also before "/:id".
 router.get("/register", verifyStaff, getPfiRegister);
+
+// Trucks allocated off a cargo (migration 0063). Before "/:id", which would
+// otherwise take "allocations" for an id.
+router.get("/allocations", verifyStaff, validate({ query: misc.listPfiAllocations }), listAllocations);
+router.post(
+  "/allocations/:allocationId/approve",
+  verifyStaff,
+  validate({ params: misc.pfiAllocationParam, body: misc.decidePfiAllocation }),
+  approveAllocation,
+);
+router.post(
+  "/allocations/:allocationId/reject",
+  verifyStaff,
+  validate({ params: misc.pfiAllocationParam, body: misc.decidePfiAllocation }),
+  rejectAllocation,
+);
+router.post(
+  "/allocations/:allocationId/withdraw",
+  verifyStaff,
+  validate({ params: misc.pfiAllocationParam, body: misc.decidePfiAllocation }),
+  withdrawAllocation,
+);
 
 router.get("/", verifyStaff, validate({ query: misc.listPfis }), getPfis);
 router.post("/", verifyStaff, validate({ body: misc.createPfi }), createPfi);
@@ -90,6 +120,13 @@ router.post(
 );
 
 // The PFI file: everything about one PFI, for its page and its report.
+router.get("/:id/allocations", verifyStaff, validate({ params: misc.idParam }), getPfiAllocations);
+router.post(
+  "/:id/allocations",
+  verifyStaff,
+  validate({ params: misc.idParam, body: misc.raisePfiAllocation }),
+  raiseAllocation,
+);
 router.get("/:id/file", verifyStaff, validate({ params: misc.idParam }), getPfiFile);
 
 // Notes on the file — what happened, what went wrong, what was decided. See

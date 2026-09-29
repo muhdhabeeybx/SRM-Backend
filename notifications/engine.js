@@ -123,7 +123,7 @@ const render = (type, entry, data, { principal, contact }) => {
  */
 const defaultSmsText = (title, body) => {
   const text = [title, body].filter(Boolean).join(". ").replace(/\s+/g, " ").trim();
-  return text ? `Soroman: ${text}` : null;
+  return text || null;
 };
 
 // ─── Quiet hours ────────────────────────────────────────────────────────────
