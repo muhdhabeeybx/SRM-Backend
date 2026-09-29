@@ -305,6 +305,7 @@ const REFUND_SELECT = (scopeUser, where) => client`
     SELECT r.*, ${orderReferenceClient(client, "o", "c")} AS reference,
            o.company_name, c.name AS customer_name, c.phone AS customer_phone,
            o.pfi_id, pf.pfi_number, d.name AS depot_name, o.total_amount::numeric AS order_total,
+           o.created_at AS order_date,
            /* What the order holds beyond its value NOW — the same figure the
               pay step checks. A request larger than this cannot be paid: the
               order's payments changed after it was raised. */
@@ -394,6 +395,10 @@ const shapeRefund = (r) => ({
     depotName: r.depot_name || null,
     amount: round2(r.amount),
     orderTotal: round2(r.order_total),
+    /** When the order was placed — the refund desk's one table is dated by it. */
+    orderDate: r.order_date,
+    /** What the order holds now, net of refunds paid and money moved on. */
+    orderReceived: round2(Number(r.order_total) + Number(r.current_surplus)),
     /** What the order holds beyond its value now (never below 0). */
     currentSurplus: Math.max(0, round2(r.current_surplus)),
     /**
