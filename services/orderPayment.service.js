@@ -198,6 +198,13 @@ const recomputeOrder = async (orderId, tx) => {
     })
     .where(eq(orders.id, orderId));
 
+  /**
+   * A refund request this order can no longer cover is cancelled in the same
+   * transaction, with the reason recorded — see closeUncoveredRequests.
+   * Required here, not at the top: orderRefund.service requires this file.
+   */
+  await require("./orderRefund.service").closeUncoveredRequests(orderId, tx);
+
   return { ...s, paymentStatus, wasFullyPaid: order.paymentStatus === "Paid" };
 };
 

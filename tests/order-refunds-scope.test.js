@@ -5,6 +5,8 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 
 const refundService = require("../services/orderRefund.service");
+const { recomputeOrder } = require("../services/orderPayment.service");
+const { db } = require("../config/db");
 const { orderRepo } = require("../repositories");
 const { closeDb } = require("./helpers");
 const { client } = require("../config/db");
@@ -145,6 +147,38 @@ describe("overpayment refunds — scope, money already moved, stale requests, th
       (e) => e.status === 409,
     );
     await refundService.cancelRefund({ refundId: refund.id, reason: "Payments corrected" });
+  });
+
+  test("when the order's payments change, a request it no longer covers is cancelled on its own, with the reason", async () => {
+    const covered = await seedOrder({ depotId: depotA, total: 1_000_000, paid: 1_500_000 });
+    const keep = await refundService.requestRefund({
+      orderId: covered, amount: 100000, destinationBank: "GTBank", destinationName: "Keep Me", destinationNumber: "0123456789",
+    });
+    // A wrong match comes off and the right one goes on: ₦200,000 over now, not ₦500,000.
+    await client`UPDATE order_payments SET amount = 1200000 WHERE order_id = ${covered}`;
+    await db.transaction((tx) => recomputeOrder(covered, tx));
+    let [row] = await client`SELECT status FROM order_refunds WHERE id = ${keep.id}`;
+    assert.equal(row.status, "requested", "₦100,000 is still covered by ₦200,000 — left alone");
+
+    await client`UPDATE order_payments SET amount = 1000000 WHERE order_id = ${covered}`;
+    await db.transaction((tx) => recomputeOrder(covered, tx));
+    [row] = await client`SELECT status, cancel_reason, cancelled_by FROM order_refunds WHERE id = ${keep.id}`;
+    assert.equal(row.status, "cancelled", "nothing is over any more, so nothing is owed back");
+    assert.match(row.cancel_reason, /Cancelled automatically/);
+    assert.equal(row.cancelled_by, null, "the system did it, not a person");
+    const [log] = await client`SELECT actor_type, metadata FROM audit_logs
+      WHERE entity_type = 'order' AND entity_id = ${covered} AND action = 'order.refund_cancelled' ORDER BY id DESC LIMIT 1`;
+    assert.equal(log.actor_type, "system");
+    assert.equal(log.metadata.automatic, true);
+  });
+
+  test("paying a refund does not cancel it on the way through", async () => {
+    const order = await seedOrder({ depotId: depotA, total: 1_000_000, paid: 1_050_000 });
+    const refund = await refundService.requestRefund({
+      orderId: order, destinationBank: "GTBank", destinationName: "Paid Ok", destinationNumber: "0123456789",
+    });
+    const result = await refundService.markRefunded({ refundId: refund.id, paidFromAccountId: accountId });
+    assert.equal(result.refund.status, "refunded");
   });
 
   test("the refund's record carries the account, the PFI and every step", async () => {

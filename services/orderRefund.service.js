@@ -332,6 +332,53 @@ const REFUND_SELECT = (scopeUser, where) => client`
      ${scopeFilter(scopeUser, "o")}
      ${where}`;
 
+/**
+ * Cancel open refund requests the order can no longer cover — automatically,
+ * with the reason on record.
+ *
+ * Called at the end of every payment write (orderPayment.service
+ * recomputeOrder), so the moment a wrong match is removed or surplus moves on,
+ * a request for money the order no longer holds stops sitting on the refunds
+ * page as though somebody were owed it. SE11866 did exactly that: ₦60,750,000
+ * requested on 21 Sep, the wrong ₦250,950,000 match removed on 22 Sep, and the
+ * request still read "awaiting payment" a week later over an order holding ₦0.
+ *
+ * Only a request larger than what is left is cancelled; one still covered is
+ * left alone. A request being paid right now — its refund payment row already
+ * written, markRefunded's own recompute — is never touched.
+ *
+ * @returns {Promise<number[]>} the refund ids it cancelled
+ */
+async function closeUncoveredRequests(orderId, tx) {
+  const open = await tx
+    .select({ id: orderRefunds.id, amount: orderRefunds.amount })
+    .from(orderRefunds)
+    .where(and(
+      eq(orderRefunds.orderId, Number(orderId)),
+      eq(orderRefunds.status, "requested"),
+      sql`NOT EXISTS (SELECT 1 FROM order_payments op WHERE op.refund_id = ${orderRefunds.id})`,
+    ));
+  if (!open.length) return [];
+  const { surplus } = await realSurplus(orderId, tx);
+  const closed = [];
+  for (const r of open) {
+    if (Number(r.amount) <= surplus + 0.005) continue;
+    const why = surplus > 0.005
+      ? `Cancelled automatically: the order now holds ₦${surplus.toLocaleString("en-NG")} beyond its value, less than the ₦${Number(r.amount).toLocaleString("en-NG")} requested — its payments changed. Raise a new request for what is still owed.`
+      : "Cancelled automatically: the order no longer holds an overpayment — its payments changed after this was requested.";
+    await tx.update(orderRefunds).set({
+      status: "cancelled", cancelledAt: new Date(), cancelledBy: null, cancelReason: why, updatedAt: new Date(),
+    }).where(eq(orderRefunds.id, r.id));
+    await auditLogRepo.record({
+      entityType: "order", entityId: Number(orderId), action: "order.refund_cancelled",
+      actor: { type: "system" },
+      metadata: { refundId: r.id, amount: r.amount, reason: why, automatic: true, surplusNow: surplus },
+    }, tx);
+    closed.push(r.id);
+  }
+  return closed;
+}
+
 const lagosDayStart = (day) => client`(${day}::date::timestamp AT TIME ZONE 'Africa/Lagos')`;
 
 const listRefunds = async ({
@@ -719,6 +766,7 @@ const undoRefund = async ({ refundId, reason = "", staffId = null }) => {
 };
 
 module.exports = {
+  closeUncoveredRequests,
   RESURRECTED_PAYMENT_IDS_SQL,
   realSurplus,
   listRefundable,
