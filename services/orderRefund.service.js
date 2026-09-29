@@ -213,20 +213,35 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
              SUM(ABS(amount)) FILTER (WHERE source = 'transfer_out') AS transferred_out
         FROM order_payments GROUP BY order_id
     )
+    /*
+      Wallet-era moves, read ONCE and joined — see WALLET_MOVED_OUT_SQL for why
+      they count. Computed per order as a correlated subquery this scanned the
+      deposits table with a regex for every order that has a payment, and the
+      list took 31 seconds; the page timed out and showed no orders at all.
+    */
+    , moved_deposits AS (
+      SELECT dp.id, dp.amount::numeric AS amount,
+             (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int AS from_order_id
+        FROM deposits dp
+       WHERE dp.description ~ 'from order #[0-9]+'
+         AND EXISTS (SELECT 1 FROM order_deposit_allocations a WHERE a.deposit_id = dp.id)
+    )
     , mv AS (
-      SELECT o.id AS order_id, ${client.unsafe(WALLET_MOVED_OUT_SQL("o.id"))} AS moved_out
-        FROM orders o
-       WHERE o.id IN (SELECT order_id FROM p)
+      SELECT from_order_id AS order_id, SUM(amount) AS moved_out
+        FROM moved_deposits GROUP BY from_order_id
+    )
+    , mv_to AS (
+      SELECT md.from_order_id AS order_id,
+             json_agg(DISTINCT jsonb_build_object('id', o2.id, 'company', COALESCE(NULLIF(o2.company_name, ''), c2.company_name, ''))) AS moved_to
+        FROM moved_deposits md
+        JOIN order_deposit_allocations a ON a.deposit_id = md.id
+        JOIN orders o2 ON o2.id = a.order_id
+        LEFT JOIN customers c2 ON c2.id = o2.customer_id
+       GROUP BY md.from_order_id
     )
     SELECT o.id, ${orderReferenceClient(client, "o", "c")} AS reference,
            COALESCE(mv.moved_out, 0) AS moved_out,
-           (SELECT json_agg(DISTINCT jsonb_build_object('id', o2.id, 'company', COALESCE(NULLIF(o2.company_name, ''), c2.company_name, '')))
-              FROM deposits dp
-              JOIN order_deposit_allocations a ON a.deposit_id = dp.id
-              JOIN orders o2 ON o2.id = a.order_id
-              LEFT JOIN customers c2 ON c2.id = o2.customer_id
-             WHERE dp.description ~ 'from order #[0-9]+'
-               AND (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int = o.id) AS moved_to,
+           mv_to.moved_to,
            o.company_name, o.total_amount::numeric AS total,
            o.created_at, o.customer_id, c.name AS customer_name, c.phone AS customer_phone,
            c.company_name AS customer_company,
@@ -240,6 +255,7 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
       FROM orders o
       JOIN p ON p.order_id = o.id
       LEFT JOIN mv ON mv.order_id = o.id
+      LEFT JOIN mv_to ON mv_to.order_id = o.id
       LEFT JOIN customers c ON c.id = o.customer_id
       LEFT JOIN pfis pf ON pf.id = o.pfi_id
       LEFT JOIN depots d ON d.id = o.depot_id
