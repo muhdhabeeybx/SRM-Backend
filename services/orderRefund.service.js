@@ -6,7 +6,34 @@ const { recomputeOrder, httpError } = require("./orderPayment.service");
 const auditLogRepo = require("../repositories/auditLog.repository");
 const { DUPLICATE_LEGACY_IDS, DUPLICATE_LEGACY_IDS_SQL } = require("../repositories/cfoReport.repository");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
-const { pfiFilter } = require("../lib/pfiScope");
+const { generateOrderReference } = require("../utils/helpers");
+
+/**
+ * Which refunds a person may see — the rule every list in the app follows
+ * (lib/scopeFilter.js scopeCondition), applied through the order:
+ *
+ *   assigned PFIs   only those PFIs' orders — a PFI assignment is the whole answer
+ *   else depots     only orders placed at their depots
+ *   else            everything (unrestricted, or nothing assigned)
+ *
+ * This used to be PFI-only (lib/pfiScope pfiFilter), so staff scoped by depot
+ * saw every customer's refund and bank details in the company.
+ */
+const idsOf = (list) => (list || []).map(Number).filter(Number.isFinite);
+const scopeFilter = (user, alias = "o") => {
+  if (!user || user.canViewAllLocations) return client``;
+  const pfiIds = idsOf(user.scope?.pfiIds);
+  if (pfiIds.length) return client`AND ${client.unsafe(alias)}.pfi_id = ANY(${pfiIds}::int[])`;
+  const depotIds = idsOf(user.scope?.depotIds);
+  if (depotIds.length) return client`AND ${client.unsafe(alias)}.depot_id = ANY(${depotIds}::int[])`;
+  return client``;
+};
+
+/** An order outside the person's scope reads as not found, as it does on every list. */
+const assertOrderInScope = async (user, orderId) => {
+  const [row] = await client`SELECT o.id FROM orders o WHERE o.id = ${Number(orderId)} ${scopeFilter(user, "o")}`;
+  if (!row) throw httpError(404, "Order not found");
+};
 
 /**
  * Payments a person deleted that the 0021 backfill put back.
@@ -98,6 +125,28 @@ const actorFor = (staffId) => (staffId ? { type: "staff", staffId } : { type: "s
  * transaction where there is one, so a check and the write that follows it
  * see the same book.
  */
+/**
+ * Surplus this order handed to another order before transfers had payment
+ * rows — the wallet era, recorded only as a deposit described "… from order
+ * #1234" and allocated to the receiving order.
+ *
+ * The giving order kept its payment rows, so on them alone it still reads as
+ * overpaid by exactly what it gave away. The finance report reconstructs these
+ * as transfer_out legs (findFinanceReport); the refund desk did not, and on
+ * 2026-09-29 offered to refund ₦95,861,399 across 23 orders that had already
+ * passed that money on — every one of them square once the move is counted.
+ *
+ * Counted per deposit, not per allocation row, so a deposit split across two
+ * orders is not taken off twice. Taken off whether or not it lands the order
+ * exactly on its value: for a refund, money that left is money not to send.
+ */
+const WALLET_MOVED_OUT_SQL = (orderIdExpr) => `COALESCE((
+  SELECT SUM(dp.amount::numeric) FROM deposits dp
+   WHERE dp.description ~ 'from order #[0-9]+'
+     AND (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int = ${orderIdExpr}
+     AND EXISTS (SELECT 1 FROM order_deposit_allocations a WHERE a.deposit_id = dp.id)
+), 0)`;
+
 const realSurplus = async (orderId, trx = db) => {
   /*
    * Through the caller's transaction, deliberately. markRefunded locks the
@@ -116,15 +165,20 @@ const realSurplus = async (orderId, trx = db) => {
            COALESCE((SELECT SUM(op.amount) FROM order_payments op
                       WHERE op.order_id = o.id AND op.id IN (${dup})), 0) AS phantom,
            COALESCE((SELECT SUM(op.amount) FROM order_payments op
-                      WHERE op.order_id = o.id AND op.id IN (${back})), 0) AS resurrected
+                      WHERE op.order_id = o.id AND op.id IN (${back})), 0) AS resurrected,
+           ${sql.raw(WALLET_MOVED_OUT_SQL("o.id"))} AS moved_out
       FROM orders o WHERE o.id = ${Number(orderId)}`);
   const rows = result.rows ?? result;
   if (!rows.length) throw httpError(404, "Order not found");
-  const received = round2(rows[0].received);
+  const movedOut = round2(rows[0].moved_out);
+  // What the order holds once surplus handed to another order in the wallet
+  // era is taken off — see WALLET_MOVED_OUT_SQL.
+  const received = round2(rows[0].received - movedOut);
   const total = round2(rows[0].total);
   return {
     total,
     received,
+    movedOut,
     phantom: round2(rows[0].phantom),
     /** Deleted by a person, re-created by the backfill — not money we hold. */
     resurrected: round2(rows[0].resurrected),
@@ -159,7 +213,20 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
              SUM(ABS(amount)) FILTER (WHERE source = 'transfer_out') AS transferred_out
         FROM order_payments GROUP BY order_id
     )
+    , mv AS (
+      SELECT o.id AS order_id, ${client.unsafe(WALLET_MOVED_OUT_SQL("o.id"))} AS moved_out
+        FROM orders o
+       WHERE o.id IN (SELECT order_id FROM p)
+    )
     SELECT o.id, ${orderReferenceClient(client, "o", "c")} AS reference,
+           COALESCE(mv.moved_out, 0) AS moved_out,
+           (SELECT json_agg(DISTINCT jsonb_build_object('id', o2.id, 'company', COALESCE(NULLIF(o2.company_name, ''), c2.company_name, '')))
+              FROM deposits dp
+              JOIN order_deposit_allocations a ON a.deposit_id = dp.id
+              JOIN orders o2 ON o2.id = a.order_id
+              LEFT JOIN customers c2 ON c2.id = o2.customer_id
+             WHERE dp.description ~ 'from order #[0-9]+'
+               AND (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int = o.id) AS moved_to,
            o.company_name, o.total_amount::numeric AS total,
            o.created_at, o.customer_id, c.name AS customer_name, c.phone AS customer_phone,
            c.company_name AS customer_company,
@@ -168,26 +235,30 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
            COALESCE(p.transferred_in, 0) AS transferred_in,
            COALESCE(p.transferred_out, 0) AS transferred_out,
            r.id AS open_refund_id, r.amount AS open_refund_amount, r.requested_at AS open_refund_at,
-           sk.id AS skip_id, sk.amount AS skip_amount
+           sk.id AS skip_id, sk.amount AS skip_amount,
+           o.pfi_id, pf.pfi_number, d.name AS depot_name
       FROM orders o
       JOIN p ON p.order_id = o.id
+      LEFT JOIN mv ON mv.order_id = o.id
       LEFT JOIN customers c ON c.id = o.customer_id
+      LEFT JOIN pfis pf ON pf.id = o.pfi_id
+      LEFT JOIN depots d ON d.id = o.depot_id
       LEFT JOIN order_refunds r ON r.order_id = o.id AND r.status = 'requested'
       LEFT JOIN order_refunds sk ON sk.order_id = o.id AND sk.status = 'skipped'
-     WHERE COALESCE(p.received, 0) > o.total_amount::numeric + 0.005
-       -- Staff assigned to a PFI see only that PFI's orders. See lib/pfiScope.js.
-       ${pfiFilter(scopeUser, "o.pfi_id")}
+     WHERE COALESCE(p.received, 0) - COALESCE(mv.moved_out, 0) > o.total_amount::numeric + 0.005
+       -- Only orders inside the reader's scope — see scopeFilter above.
+       ${scopeFilter(scopeUser, "o")}
        /*
          An order set aside stays off the list only while the decision still
          describes it. If more money has landed since, the surplus no longer
          matches what somebody looked at and waived, so it comes back.
        */
        AND (sk.id IS NULL
-            OR COALESCE(p.received, 0) - o.total_amount::numeric > sk.amount::numeric + 0.005)
+            OR COALESCE(p.received, 0) - COALESCE(mv.moved_out, 0) - o.total_amount::numeric > sk.amount::numeric + 0.005)
        ${search ? client`AND (${orderReferenceClient(client, "o", "c")} ILIKE ${term}
                              OR o.order_number ILIKE ${term} OR c.name ILIKE ${term}
                              OR o.company_name ILIKE ${term} OR c.company_name ILIKE ${term})` : client``}
-     ORDER BY (COALESCE(p.received, 0) - o.total_amount::numeric) DESC
+     ORDER BY (COALESCE(p.received, 0) - COALESCE(mv.moved_out, 0) - o.total_amount::numeric) DESC
      LIMIT ${Math.min(1000, Number(limit) || 500)}`;
   return rows.map((r) => ({
     orderId: Number(r.id),
@@ -198,9 +269,15 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
     customerId: Number(r.customer_id),
     customerName: r.customer_name,
     customerPhone: r.customer_phone,
+    pfiId: r.pfi_id == null ? null : Number(r.pfi_id),
+    pfiNumber: r.pfi_number || null,
+    depotName: r.depot_name || null,
     orderValue: round2(r.total),
     received: round2(r.received),
-    surplus: round2(money(r.received) - money(r.total)),
+    /** Surplus handed to another order in the wallet era, already taken off `surplus`. */
+    movedOutEarlier: round2(r.moved_out),
+    movedOutTo: (r.moved_to || []).map((m) => generateOrderReference(m.company, m.id)),
+    surplus: round2(money(r.received) - money(r.moved_out) - money(r.total)),
     phantomExcluded: round2(r.phantom),
     resurrectedExcluded: round2(r.resurrected),
     createdAt: r.created_at,
@@ -216,11 +293,27 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
   }));
 };
 
-/** Every refund, newest first, with who asked and who paid. */
-const listRefunds = async ({ status = null, limit = 500, scopeUser = null } = {}) => {
-  const rows = await client`
+/**
+ * Every refund, newest first, with who asked, who paid, and which PFI it is on.
+ *
+ * `from`/`to` are Lagos calendar days and match the refund's latest event —
+ * paid, cancelled, or asked for — the same date the list is ordered by.
+ * `search` matches the order, the customer and the account the money goes to,
+ * which is how somebody holding a bank alert finds the refund it belongs to.
+ */
+const REFUND_SELECT = (scopeUser, where) => client`
     SELECT r.*, ${orderReferenceClient(client, "o", "c")} AS reference,
            o.company_name, c.name AS customer_name, c.phone AS customer_phone,
+           o.pfi_id, pf.pfi_number, d.name AS depot_name, o.total_amount::numeric AS order_total,
+           /* What the order holds beyond its value NOW — the same figure the
+              pay step checks. A request larger than this cannot be paid: the
+              order's payments changed after it was raised. */
+           (COALESCE((SELECT SUM(op.amount) FROM order_payments op
+                       WHERE op.order_id = o.id
+                         AND op.id NOT IN (${DUPLICATE_LEGACY_IDS})
+                         AND op.id NOT IN (${RESURRECTED_PAYMENT_IDS})), 0)
+             - ${client.unsafe(WALLET_MOVED_OUT_SQL("o.id"))}
+             - o.total_amount::numeric) AS current_surplus,
            ba.bank_name AS paid_from_bank, ba.account_name AS paid_from_name, ba.account_number AS paid_from_number,
            TRIM(COALESCE(rq.first_name,'') || ' ' || COALESCE(rq.surname,'')) AS requested_by_name,
            TRIM(COALESCE(pd.first_name,'') || ' ' || COALESCE(pd.surname,'')) AS paid_by_name,
@@ -232,12 +325,63 @@ const listRefunds = async ({ status = null, limit = 500, scopeUser = null } = {}
       LEFT JOIN staff rq ON rq.id = r.requested_by
       LEFT JOIN staff pd ON pd.id = r.paid_by
       LEFT JOIN staff cx ON cx.id = r.cancelled_by
+      LEFT JOIN pfis pf ON pf.id = o.pfi_id
+      LEFT JOIN depots d ON d.id = o.depot_id
      WHERE true
+     ${scopeFilter(scopeUser, "o")}
+     ${where}`;
+
+const lagosDayStart = (day) => client`(${day}::date::timestamp AT TIME ZONE 'Africa/Lagos')`;
+
+const listRefunds = async ({
+  status = null, pfiId = null, from = null, to = null, search = "", limit = 500, scopeUser = null,
+} = {}) => {
+  const term = `%${String(search || "").trim()}%`;
+  const at = client`COALESCE(r.paid_at, r.cancelled_at, r.requested_at)`;
+  const rows = await client`
+    ${REFUND_SELECT(scopeUser, client`
      ${status ? client`AND r.status = ${status}` : client``}
-     ${pfiFilter(scopeUser, "o.pfi_id")}
-     ORDER BY COALESCE(r.paid_at, r.cancelled_at, r.requested_at) DESC, r.id DESC
+     ${pfiId ? client`AND o.pfi_id = ${Number(pfiId)}` : client``}
+     ${from ? client`AND ${at} >= ${lagosDayStart(from)}` : client``}
+     ${to ? client`AND ${at} < ${lagosDayStart(to)} + interval '1 day'` : client``}
+     ${String(search || "").trim() ? client`AND (
+          ${orderReferenceClient(client, "o", "c")} ILIKE ${term} OR o.order_number ILIKE ${term}
+          OR c.name ILIKE ${term} OR o.company_name ILIKE ${term} OR c.phone ILIKE ${term}
+          OR r.destination_name ILIKE ${term} OR r.destination_number ILIKE ${term}
+          OR r.destination_bank ILIKE ${term} OR r.payment_reference ILIKE ${term})` : client``}`)}
+     ORDER BY ${at} DESC, r.id DESC
      LIMIT ${Math.min(1000, Number(limit) || 500)}`;
-  return rows.map((r) => ({
+  return rows.map(shapeRefund);
+};
+
+/** One refund in full, and every step it went through, from the audit log. */
+const getRefund = async ({ refundId, scopeUser = null }) => {
+  const [row] = await REFUND_SELECT(scopeUser, client`AND r.id = ${Number(refundId)}`);
+  if (!row) throw httpError(404, "Refund not found");
+  const history = await client`
+    SELECT a.action, a.created_at, a.metadata,
+           TRIM(COALESCE(s.first_name, '') || ' ' || COALESCE(s.surname, '')) AS actor_name
+      FROM audit_logs a
+      LEFT JOIN staff s ON s.id = a.actor_staff_id
+     WHERE a.entity_type = 'order'
+       AND a.entity_id = ${Number(row.order_id)}
+       AND a.action LIKE 'order.refund_%'
+       AND a.metadata->>'refundId' = ${String(row.id)}
+     ORDER BY a.created_at, a.id`;
+  return {
+    ...shapeRefund(row),
+    history: history.map((h) => ({
+      action: h.action.replace(/^order\.refund_/, ""),
+      at: h.created_at,
+      by: h.actor_name || null,
+      reason: h.metadata?.reason || "",
+      amount: h.metadata?.amount != null ? round2(h.metadata.amount) : null,
+      paymentReference: h.metadata?.paymentReference || "",
+    })),
+  };
+};
+
+const shapeRefund = (r) => ({
     id: Number(r.id),
     orderId: Number(r.order_id),
     orderNumber: r.reference,
@@ -245,7 +389,19 @@ const listRefunds = async ({ status = null, limit = 500, scopeUser = null } = {}
     customerId: Number(r.customer_id),
     customerName: r.customer_name,
     customerPhone: r.customer_phone,
+    pfiId: r.pfi_id == null ? null : Number(r.pfi_id),
+    pfiNumber: r.pfi_number || null,
+    depotName: r.depot_name || null,
     amount: round2(r.amount),
+    orderTotal: round2(r.order_total),
+    /** What the order holds beyond its value now (never below 0). */
+    currentSurplus: Math.max(0, round2(r.current_surplus)),
+    /**
+     * An open request the order can no longer cover — its payments changed
+     * after it was raised (a wrong match removed, surplus moved on). The pay
+     * step refuses it; the page says so instead of offering to pay it.
+     */
+    stale: r.status === "requested" && round2(r.current_surplus) + 0.005 < round2(r.amount),
     status: r.status,
     destinationBank: r.destination_bank,
     destinationName: r.destination_name,
@@ -262,8 +418,7 @@ const listRefunds = async ({ status = null, limit = 500, scopeUser = null } = {}
     cancelledAt: r.cancelled_at,
     cancelledByName: r.cancelled_by_name || null,
     cancelReason: r.cancel_reason,
-  }));
-};
+});
 
 /**
  * Raise a refund request. Changes nothing about the order.
@@ -563,6 +718,8 @@ module.exports = {
   realSurplus,
   listRefundable,
   listRefunds,
+  getRefund,
+  assertOrderInScope,
   requestRefund,
   skipOrder,
   restoreSkipped,

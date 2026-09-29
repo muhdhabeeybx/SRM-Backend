@@ -5,7 +5,8 @@ const { requireRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const s = require("../../schemas/orderRefund.schema");
 const {
-  getRefundable, getRefunds, createRefund, payRefund, cancelRefund, undoRefund,
+  getRefundable,
+  getRefund, getRefunds, createRefund, payRefund, cancelRefund, undoRefund,
   skipRefund, restoreSkipped,
 } = require("../../controllers/administration/orderRefund.controller");
 
@@ -19,6 +20,7 @@ const {
 
 router.get("/refundable", verifyStaff, validate({ query: s.listRefundable }), getRefundable);
 router.get("/", verifyStaff, validate({ query: s.listRefunds }), getRefunds);
+router.get("/:id", verifyStaff, validate({ params: s.idParam }), getRefund);
 
 router.post(
   "/",

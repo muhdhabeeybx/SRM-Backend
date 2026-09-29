@@ -10,8 +10,13 @@ const { z } = require("zod");
 
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-09-29");
 const listRefunds = z.object({
   status: z.enum(["requested", "refunded", "cancelled", "skipped"]).optional(),
+  pfiId: z.coerce.number().int().positive().optional(),
+  from: day.optional(),
+  to: day.optional(),
+  search: z.string().max(120).optional(),
   limit: z.coerce.number().int().positive().max(1000).optional(),
 });
 

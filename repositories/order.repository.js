@@ -949,6 +949,16 @@ const findFinanceReport = async ({
           SELECT COALESCE(SUM(-op.amount), 0) FROM order_payments op
           WHERE op.order_id = ${orders.id} AND op.source = 'transfer_out'
         )), 0)`,
+        /**
+         * Overpayment sent back to customers, unsigned. A new figure beside the
+         * audited ones, not a change to them: `totalReceived` has always
+         * netted refund rows, and this says how much of the difference was a
+         * refund rather than leaving it to be inferred.
+         */
+        totalRefunded: sql`COALESCE(SUM((
+          SELECT COALESCE(SUM(-op.amount), 0) FROM order_payments op
+          WHERE op.order_id = ${orders.id} AND op.source = 'refund'
+        )), 0)`,
         totalReceived: sql`COALESCE(SUM((
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         )), 0)`,
@@ -1457,6 +1467,7 @@ const findFinanceReport = async ({
       /** Movement between orders: netted, and the outgoing side unsigned. */
       totalNetTransfers: Number(totalsRow.totalNetTransfers),
       totalTransferredOut: Number(totalsRow.totalTransferredOut),
+      totalRefunded: Number(totalsRow.totalRefunded),
       /** What the listed orders hold once transfers are taken into account. */
       totalReceived: Number(totalsRow.totalReceived),
       /** What is left after both — zero on a fully settled window. */

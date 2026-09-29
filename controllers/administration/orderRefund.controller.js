@@ -1,11 +1,16 @@
 const asyncHandler = require("express-async-handler");
 const refundService = require("../../services/orderRefund.service");
 const { client } = require("../../config/db");
-const { assertOrderVisible } = require("../../lib/pfiScope");
 
 /**
- * A refund row's order, checked against the person's PFIs before anything is
- * done with it. A refund outside their PFI reads as not found.
+ * The refund desk's scope check: PFIs if assigned, else depots, else all — see
+ * scopeFilter in the service. Every read and every action goes through it.
+ */
+const assertOrderVisible = (user, orderId) => refundService.assertOrderInScope(user, orderId);
+
+/**
+ * A refund row's order, checked against the person's scope before anything is
+ * done with it. A refund outside it reads as not found.
  */
 const assertRefundVisible = async (user, refundId) => {
   const [row] = await client`SELECT order_id FROM order_refunds WHERE id = ${Number(refundId)}`;
@@ -34,10 +39,20 @@ const getRefundable = asyncHandler(async (req, res) => {
 const getRefunds = asyncHandler(async (req, res) => {
   const refunds = await refundService.listRefunds({
     status: req.query.status || null,
+    pfiId: req.query.pfiId || null,
+    from: req.query.from || null,
+    to: req.query.to || null,
+    search: req.query.search || "",
     limit: req.query.limit,
     scopeUser: req.user,
   });
   res.json({ success: true, data: { refunds } });
+});
+
+/** One refund, with the account to pay and every step it has been through. */
+const getRefund = asyncHandler(async (req, res) => {
+  const refund = await refundService.getRefund({ refundId: req.params.id, scopeUser: req.user });
+  res.json({ success: true, data: { refund } });
 });
 
 const createRefund = asyncHandler(async (req, res) => {
@@ -114,6 +129,6 @@ const restoreSkipped = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  getRefundable, getRefunds, createRefund, payRefund, cancelRefund, undoRefund,
+  getRefundable, getRefunds, getRefund, createRefund, payRefund, cancelRefund, undoRefund,
   skipRefund, restoreSkipped,
 };
