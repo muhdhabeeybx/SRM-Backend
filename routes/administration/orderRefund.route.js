@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
-const { requireRole } = require("../../middleware/verifyStaff");
+const { requireRole, enforceRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const s = require("../../schemas/orderRefund.schema");
 const {
@@ -34,7 +34,7 @@ router.post(
 router.patch(
   "/:id/pay",
   verifyStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to pay a refund" }),
+  enforceRole("finance", { message: "Only finance or a super admin can record a refund as paid" }),
   validate({ params: s.idParam, body: s.payRefund }),
   payRefund,
 );
@@ -51,7 +51,7 @@ router.patch(
 router.patch(
   "/:id/undo",
   verifyStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to undo a refund" }),
+  enforceRole("finance", { message: "Only finance or a super admin can undo a refund" }),
   validate({ params: s.idParam, body: s.reasonBody }),
   undoRefund,
 );

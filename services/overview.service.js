@@ -48,8 +48,25 @@ const PRODUCT_ALIASES = { Petrol: "PMS", Diesel: "AGO", "Cooking Gas": "LPG" };
  * are returned separately and labelled, never folded into an order figure.
  */
 const financeSummary = async ({ from, to }) => {
+  // Loaded here rather than at the top: the refund service reaches back into
+  // order code that loads this file, and the two only meet at call time.
+  const { RESURRECTED_PAYMENT_IDS_SQL } = require("./orderRefund.service");
+  const { DUPLICATE_LEGACY_IDS_SQL } = require("../repositories/cfoReport.repository");
+  const dup = sql.raw(DUPLICATE_LEGACY_IDS_SQL);
+  const back = sql.raw(RESURRECTED_PAYMENT_IDS_SQL);
   const [orders] = rowsOf(
     await db.execute(sql`
+      WITH moved_out AS (
+        -- Surplus handed to another order in the wallet era: a deposit
+        -- described "from order #N" that another order drew on, with no
+        -- transfer_out row on N to net it off. Read once, not per order.
+        SELECT (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int AS order_id,
+               SUM(dp.amount::numeric) AS amount
+          FROM deposits dp
+         WHERE dp.description ~ 'from order #[0-9]+'
+           AND EXISTS (SELECT 1 FROM order_deposit_allocations a WHERE a.deposit_id = dp.id)
+         GROUP BY 1
+      ), not_money AS (${dup} UNION ${back})
       SELECT
         COUNT(*)::int AS "orderCount",
         COUNT(*) FILTER (WHERE o.payment_status = 'Part Paid')::int AS "partPaidCount",
@@ -63,9 +80,19 @@ const financeSummary = async ({ from, to }) => {
         COALESCE(SUM(GREATEST(0, o.total_amount::numeric - (
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p WHERE p.order_id = o.id
         ))), 0) AS shortfall,
+        -- What the order still holds beyond its value: the same reading as
+        -- the refund desk (services/orderRefund.service.js realSurplus).
+        -- Transfers already net out through their transfer_out rows; what
+        -- does not is wallet-era surplus handed on (moved_out) and payment
+        -- rows that are not money — the 0021 duplicates and the payments that
+        -- migration re-created after someone removed them. Counting those
+        -- showed ₦890.8m held for July against ₦797.8m, and ₦161.7m for
+        -- August against ₦65.9m.
         COALESCE(SUM(GREATEST(0, (
-          SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p WHERE p.order_id = o.id
-        ) - o.total_amount::numeric)), 0) AS surplus
+          SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p
+           WHERE p.order_id = o.id AND p.id NOT IN (SELECT id FROM not_money)
+        ) - COALESCE((SELECT m.amount FROM moved_out m WHERE m.order_id = o.id), 0)
+          - o.total_amount::numeric)), 0) AS surplus
       FROM orders o
       WHERE o.created_at >= ${from} AND o.created_at <= ${to}
         AND o.payment_status IN ('Paid', 'Part Paid')

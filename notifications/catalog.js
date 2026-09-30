@@ -1604,6 +1604,49 @@ const CATALOG = {
   },
 
   /** data: orderId, reference, customerName, amountPaid */
+  /**
+   * A refund has been raised and is waiting to be sent — finance's to pay.
+   * data: refundId, orderId, orderNumber, customerName, amount, destinationName,
+   *       destinationBank, destinationNumber, requestedByName
+   */
+  "staff.refund_requested": {
+    audience: "staff",
+    category: "payments",
+    priority: "high",
+    channels: APP_ONLY,
+    title: (d) => `Refund to pay — ${formatMoney(d.amount, { decimals: 0 })}`,
+    body: (d) =>
+      `${d.requestedByName || "Someone"} requested a refund on ${d.orderNumber} to ${d.customerName || "the customer"}: ` +
+      `${formatMoney(d.amount, { decimals: 0 })} to ${d.destinationName} · ${d.destinationBank} ${d.destinationNumber}.`,
+    entity: (d) => ({ type: "order", id: d.orderId }),
+    data: (d) => ({ screen: "OverpaymentRefunds", refundId: d.refundId }),
+    actionUrl: () => adminLink("/overpayment-refunds"),
+    dedupe: (d) => (d.refundId ? `staff.refund_requested:${d.refundId}` : null),
+  },
+
+  /**
+   * What became of a refund, to whoever asked for it.
+   * data: refundId, orderId, orderNumber, amount, outcome ('paid' | 'cancelled'),
+   *       reason, paymentReference, actorName
+   */
+  "staff.refund_decided": {
+    audience: "staff",
+    category: "payments",
+    priority: "normal",
+    channels: APP_ONLY,
+    title: (d) => `Refund ${d.outcome === "paid" ? "sent" : "cancelled"} — ${d.orderNumber}`,
+    body: (d) =>
+      d.outcome === "paid"
+        ? `${formatMoney(d.amount, { decimals: 0 })} on ${d.orderNumber} was sent${d.actorName ? ` by ${d.actorName}` : ""}` +
+          `${d.paymentReference ? ` (ref ${d.paymentReference})` : ""}.`
+        : `The ${formatMoney(d.amount, { decimals: 0 })} refund on ${d.orderNumber} was cancelled` +
+          `${d.actorName ? ` by ${d.actorName}` : ""}${d.reason ? `: ${d.reason}` : "."}`,
+    entity: (d) => ({ type: "order", id: d.orderId }),
+    data: (d) => ({ screen: "OverpaymentRefunds", refundId: d.refundId }),
+    actionUrl: () => adminLink("/overpayment-refunds"),
+    dedupe: (d) => (d.refundId && d.outcome ? `staff.refund_decided:${d.refundId}:${d.outcome}` : null),
+  },
+
   "staff.payment_received": {
     audience: "staff",
     category: "payments",

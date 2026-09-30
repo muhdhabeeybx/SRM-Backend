@@ -4,6 +4,7 @@ const { fleetTruckRepo } = require("../../repositories");
 const fleetService = require("../../services/fleet.service");
 const { sendServiceResult } = require("../../utils/serviceResult");
 const { staffActor } = require("../../utils/actor");
+const { dayEdge, lagosToday, localDateStr } = require("../../lib/zonedDay");
 
 const getFleetTrucks = asyncHandler(async (req, res) => {
   const result = await fleetTruckRepo.findAll(req.query);
@@ -31,7 +32,7 @@ const updateFleetTruck = asyncHandler(async (req, res) => {
 const getComplianceWatchlist = asyncHandler(async (req, res) => {
   // Everything expiring in the next 30 days by default.
   const days = Math.min(365, Math.max(1, parseInt(req.query.days) || 30));
-  const byDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const byDate = localDateStr(new Date(Date.now() + days * 24 * 60 * 60 * 1000));
   const trucks = await fleetTruckRepo.findExpiringCompliance(byDate);
   res.json({ success: true, data: { byDate, trucks } });
 });

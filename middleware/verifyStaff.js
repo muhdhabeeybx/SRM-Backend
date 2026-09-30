@@ -102,6 +102,33 @@ function requireRole(...allowedRoles) {
 }
 
 /**
+ * Authorisation that is actually enforced — for the handful of actions that
+ * move money or change what a cargo is.
+ *
+ * requireRole above is deliberately open app-wide. That leaves the screen as
+ * the only thing between any signed-in member of staff and deleting a PFI,
+ * releasing one to trade, approving a price, confirming or removing a payment,
+ * or marking a refund paid — the API answered all of them for anybody. These
+ * few routes use this instead: the caller must hold one of the roles, and a
+ * super admin always may. Everyone who performed these acts on the live book
+ * in the 60 days before this (2026-09-29) holds a role that is allowed.
+ */
+function enforceRole(...allowedRoles) {
+  let message = "You do not have permission to do this";
+  const last = allowedRoles[allowedRoles.length - 1];
+  if (last && typeof last === "object" && last.message) {
+    message = last.message;
+    allowedRoles = allowedRoles.slice(0, -1);
+  }
+  const allowed = new Set([...allowedRoles, "super_admin"]);
+  return (req, res, next) => {
+    const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
+    if (roles.some((r) => allowed.has(r))) return next();
+    return res.status(403).json({ success: false, message });
+  };
+}
+
+/**
  * Authorise against the API permission table.
  *
  * Resolves the mount path from `req.baseUrl` — a router mounted at
@@ -133,5 +160,6 @@ const verifyStaff = [authenticateStaff, authoriseByRoute];
 module.exports = verifyStaff;
 module.exports.authenticateStaff = authenticateStaff;
 module.exports.requireRole = requireRole;
+module.exports.enforceRole = enforceRole;
 module.exports.ELEVATED_ROLES = ELEVATED_ROLES;
 module.exports.authoriseByRoute = authoriseByRoute;

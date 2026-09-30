@@ -1,6 +1,7 @@
 const { eq, and, desc, count, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { auditEvents } = require("../db/schema");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 const create = async (data) => {
   const [row] = await db.insert(auditEvents).values(data).returning();
@@ -26,8 +27,8 @@ const findAll = async ({
   if (entityType) conditions.push(eq(auditEvents.entityType, entityType));
   if (entityId) conditions.push(eq(auditEvents.entityId, String(entityId)));
   if (actorId) conditions.push(eq(auditEvents.actorId, actorId));
-  if (dateFrom) conditions.push(gte(auditEvents.createdAt, new Date(dateFrom)));
-  if (dateTo) conditions.push(lte(auditEvents.createdAt, new Date(dateTo)));
+  if (dateFrom) conditions.push(gte(auditEvents.createdAt, dayEdge(dateFrom, "start")));
+  if (dateTo) conditions.push(lte(auditEvents.createdAt, dayEdge(dateTo, "end")));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 

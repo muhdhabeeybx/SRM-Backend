@@ -1,6 +1,7 @@
 const { eq, and, or, ilike, asc, desc, count, gte, lte } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { offlineSales, offlineSaleItems, products } = require("../db/schema");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 // Whitelist, not passthrough: sort input never reaches SQL unvalidated.
 const SORTABLE = {
@@ -52,8 +53,8 @@ const findAll = async ({ status, search, reconciled, dateFrom, dateTo, sort, ord
       )
     );
   }
-  if (dateFrom) conditions.push(gte(offlineSales.createdAt, new Date(dateFrom)));
-  if (dateTo) conditions.push(lte(offlineSales.createdAt, new Date(dateTo)));
+  if (dateFrom) conditions.push(gte(offlineSales.createdAt, dayEdge(dateFrom, "start")));
+  if (dateTo) conditions.push(lte(offlineSales.createdAt, dayEdge(dateTo, "end")));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 

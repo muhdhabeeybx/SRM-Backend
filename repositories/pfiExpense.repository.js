@@ -23,6 +23,19 @@ const { OPEN_STATES } = require("../lib/expenseChain");
  */
 const SPEND = client`CASE WHEN e.status = 'paid' THEN COALESCE(e.amount_paid_ngn, e.amount_ngn) ELSE e.amount_ngn END`;
 
+/*
+ * VAT and WHT are stored in the invoice's own currency, like `amount`. In
+ * naira they are that times the rate — 1 for a naira invoice, NULL for a
+ * foreign one nobody has put a rate against, which SUM then leaves out exactly
+ * as it leaves amount_ngn out. The same rule as expenseNgn on the client, so
+ * the page's cards and the exports' totals agree.
+ */
+const TO_NGN = client`(CASE WHEN COALESCE(e.currency, 'NGN') = 'NGN' THEN 1 ELSE e.exchange_rate END)`;
+const VAT_NGN = client`(COALESCE(e.vat_amount, 0) * ${TO_NGN})`;
+const WHT_NGN = client`(COALESCE(e.wht_deduction, 0) * ${TO_NGN})`;
+const HAS_VAT = client`(COALESCE(e.vat_amount, 0) <> 0)`;
+const HAS_WHT = client`(COALESCE(e.wht_deduction, 0) <> 0)`;
+
 /**
  * Aggregates for many PFIs at once.
  *
@@ -422,6 +435,8 @@ const listExpenses = async ({
   plantId,
   vendorId,
   bank,
+  /** 'any' | 'vat' | 'wht' | 'none' — which rows carry tax. See TAXED below. */
+  tax,
   type,
   status,
   dateFrom,
@@ -520,6 +535,12 @@ const listExpenses = async ({
     base.push(client`e.delivery_customer_id = ${Number(stationId)}`);
   }
   if (plantId && plantId !== "all") base.push(client`e.lpg_station_id = ${Number(plantId)}`);
+  // Which rows carry tax. Finance files VAT and WHT off this register, so the
+  // question is "which expenses have any", not a threshold on the amount.
+  if (tax === "vat") base.push(HAS_VAT);
+  if (tax === "wht") base.push(HAS_WHT);
+  if (tax === "any") base.push(client`(${HAS_VAT} OR ${HAS_WHT})`);
+  if (tax === "none") base.push(client`NOT ${HAS_VAT} AND NOT ${HAS_WHT}`);
   if (dateFrom) base.push(client`e.expense_date >= ${dateFrom}`);
   if (dateTo) base.push(client`e.expense_date <= ${dateTo}`);
   // A malformed month is ignored rather than erroring — it arrives from a URL.
@@ -586,7 +607,13 @@ const listExpenses = async ({
         -- enough for the summary to say the total is partial; the per-currency
         -- residue is worked out on the client, which already holds the rows and
         -- can group them without adding dollars to euros to say so.
-        COUNT(*) FILTER (WHERE e.exchange_rate IS NULL)::int AS unconverted_count
+        COUNT(*) FILTER (WHERE e.exchange_rate IS NULL)::int AS unconverted_count,
+        -- VAT and WHT in naira, over the same set — and again for paid rows
+        -- alone, because WHT is only actually withheld when the vendor is paid.
+        COALESCE(SUM(${VAT_NGN}), 0)::text AS vat_total,
+        COALESCE(SUM(${WHT_NGN}), 0)::text AS wht_total,
+        COALESCE(SUM(${VAT_NGN}) FILTER (WHERE e.status = 'paid'), 0)::text AS vat_paid,
+        COALESCE(SUM(${WHT_NGN}) FILTER (WHERE e.status = 'paid'), 0)::text AS wht_paid
       FROM pfi_expenses e
       JOIN expense_categories c ON c.id = e.category_id
       LEFT JOIN pfis p ON p.id = e.pfi_id
@@ -636,6 +663,10 @@ const listExpenses = async ({
       generalTotal: Number(totals.general_total),
       paidTotal: Number(totals.paid_total),
       openTotal: Number(totals.open_total),
+      vatTotal: Number(totals.vat_total),
+      whtTotal: Number(totals.wht_total),
+      vatPaid: Number(totals.vat_paid),
+      whtPaid: Number(totals.wht_paid),
     },
     statusCounts: counts,
     banks: banks.map((b) => b.bank_paid_from),

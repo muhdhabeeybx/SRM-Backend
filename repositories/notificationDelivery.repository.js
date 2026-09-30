@@ -2,6 +2,7 @@ const { eq, and, or, desc, count, sql, lt, lte, gte, ilike, inArray } = require(
 const { db } = require("../config/db");
 const { notificationDeliveries } = require("../db/schema");
 const { REASON_SQL, REASON_CATALOG } = require("../utils/deliveryReason");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 /**
  * The outbound audit trail. Writes here must never break a send — this is
@@ -240,14 +241,12 @@ const logFilters = ({ channel, status, type, campaignId, reason, from, to, searc
   // the driver rejects a Date outright — "The 'string' argument must be of
   // type string ... Received an instance of Date". Same fault that made every
   // dated /api/commissions request a 500.
-  if (from) where.push(sql`nd.created_at >= ${new Date(from).toISOString()}`);
+  if (from) where.push(sql`nd.created_at >= ${dayEdge(from, "start").toISOString()}`);
   // `to` is a day, and a day includes the whole of it. Comparing against
   // midnight would silently exclude everything sent on the end date, which is
   // the day someone picking a range is most often asking about.
   if (to) {
-    const end = new Date(to);
-    end.setHours(23, 59, 59, 999);
-    where.push(sql`nd.created_at <= ${end.toISOString()}`);
+    where.push(sql`nd.created_at <= ${dayEdge(to, "end").toISOString()}`);
   }
   if (search) {
     // Name or destination — "who did this go to?" is asked both ways, by the

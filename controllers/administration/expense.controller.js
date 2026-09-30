@@ -435,6 +435,7 @@ const listExpenses = asyncHandler(async (req, res) => {
     vendorId: req.query.vendor,
     bank: req.query.bank,
     submitterId: req.query.submitter,
+    tax: req.query.tax,
     type: req.query.type,
     status: req.query.status,
     month: req.query.month,

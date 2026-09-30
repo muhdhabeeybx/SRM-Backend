@@ -13,13 +13,14 @@ const {
   getNotificationChoices,
   getPfiAssignments,
 } = require("../../controllers/administration/staff.controller");
-const { requireRole } = require("../../middleware/verifyStaff");
+const { requireRole, enforceRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const misc = require("../../schemas/misc.schema");
 
 router.use(verifyStaff);
 
-router.post("/", requireRole("super_admin"), validate({ body: misc.createStaff }), createAdmin);
+// Opening an account is a super admin's act — enforced, not just declared.
+router.post("/", enforceRole({ message: "Only a super admin can create a staff account" }), validate({ body: misc.createStaff }), createAdmin);
 
 // Self-service. Declared before "/:id" so "me" is never read as an id, and
 // deliberately ungated — every signed-in person owns their own profile. What
@@ -38,7 +39,7 @@ router.get("/:id/pfi-assignments", validate({ params: misc.idParam }), getPfiAss
 // block a normal staff member editing their own name/phone. See the comment in
 // staff.controller.js#updateAdmin.
 router.patch("/:id", validate({ params: misc.idParam, body: misc.updateStaff }), updateAdmin);
-router.delete("/:id", requireRole("super_admin"), validate({ params: misc.idParam }), deleteAdmin);
+router.delete("/:id", enforceRole({ message: "Only a super admin can delete a staff account" }), validate({ params: misc.idParam }), deleteAdmin);
 router.post("/:id/resend-invite", validate({ params: misc.idParam }), resendInvite);
 
 module.exports = router;

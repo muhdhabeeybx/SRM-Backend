@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
-const { requireRole } = require("../../middleware/verifyStaff");
+const { requireRole, enforceRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const depotSchemas = require("../../schemas/depot.schema");
 const {
@@ -38,13 +38,13 @@ router.get("/price-changes", verifyStaff, listPriceChanges);
 router.post(
   "/price-changes/:changeId/approve",
   verifyStaff,
-  requireRole("super_admin", "admin", { message: "Only an admin can approve a price change" }),
+  enforceRole("admin", { message: "Only an admin or a super admin can approve a price change" }),
   approvePriceChange
 );
 router.post(
   "/price-changes/:changeId/reject",
   verifyStaff,
-  requireRole("super_admin", "admin", { message: "Only an admin can reject a price change" }),
+  enforceRole("admin", { message: "Only an admin or a super admin can reject a price change" }),
   rejectPriceChange
 );
 

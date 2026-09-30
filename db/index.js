@@ -1,3 +1,4 @@
+require("../config/timezone");
 const { drizzle } = require("drizzle-orm/postgres-js");
 const postgres = require("postgres");
 
@@ -103,6 +104,17 @@ const client = postgres(connectionString, {
   connect_timeout: 10,     // seconds — give up connecting after 10 s
   max: 10,                 // connection-pool ceiling
   max_lifetime: 60 * 30,   // seconds — hard recycle every 30 min
+  /**
+   * Every connection thinks in Lagos time.
+   *
+   * The business trades on a Lagos day, and Postgres works out "which day" for
+   * `::date`, DATE(), date_trunc() and CURRENT_DATE from the session's zone —
+   * which was UTC, so an order placed at 00:30 in Lagos was counted on the day
+   * before on every per-day figure. Set once here rather than written into
+   * each query. Stored instants do not change: timestamptz is an instant, and
+   * this only decides how it is read as a calendar day.
+   */
+  connection: { TimeZone: process.env.REPORT_TIMEZONE || "Africa/Lagos" },
 });
 
 const db = drizzle(client, {

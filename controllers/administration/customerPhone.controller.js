@@ -4,6 +4,20 @@ const { customerRepo, customerPhoneRepo } = require("../../repositories");
 const { emitEvent } = require("../../services/events");
 const { staffActor } = require("../../utils/actor");
 const { toE164, classifyPhone } = require("../../utils/phone");
+const auditLogRepo = require("../../repositories/auditLog.repository");
+
+/**
+ * A number that signs in to an account is recorded in the audit log, not only
+ * on the event bus — who gave whom access to a customer has to be answerable
+ * months later.
+ */
+const audit = (req, customerId, action, metadata) =>
+  auditLogRepo.record({
+    entityType: "customer", entityId: customerId, action,
+    actor: { type: "staff", staffId: req.user?.id ?? null },
+    metadata,
+    ipAddress: req.ip, userAgent: req.headers?.["user-agent"],
+  }).catch((err) => console.error(`[customer] audit of ${action} failed:`, err.message));
 
 /**
  * The numbers one customer can be reached — and sign in — on.
@@ -89,6 +103,7 @@ const addPhone = asyncHandler(async (req, res) => {
     createdBy: req.user?.id || null,
   });
 
+  await audit(req, customer.id, "customer.phone_added", { phone: e164, label: created.label });
   emitEvent("customer.phone_added", {
     actor: staffActor(req),
     entityType: "customer",
@@ -129,6 +144,7 @@ const deletePhone = asyncHandler(async (req, res) => {
 
   await customerPhoneRepo.deleteById(phone.id);
 
+  await audit(req, phone.customerId, "customer.phone_removed", { phone: phone.phone });
   emitEvent("customer.phone_removed", {
     actor: staffActor(req),
     entityType: "customer",
@@ -165,6 +181,7 @@ const makePrimary = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "Number not found on this customer" });
   }
 
+  await audit(req, phone.customerId, "customer.phone_primary_changed", { phone: phone.phone });
   emitEvent("customer.phone_primary_changed", {
     actor: staffActor(req),
     entityType: "customer",

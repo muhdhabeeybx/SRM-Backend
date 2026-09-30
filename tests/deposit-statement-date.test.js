@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const { db } = require("../config/db");
 const { sql } = require("drizzle-orm");
 const { closeDb } = require("./helpers");
+const { localDateStr } = require("../lib/zonedDay");
 
 /**
  * The deposit date must be the date on the statement, always.
@@ -170,7 +171,9 @@ describe("deposit date is the statement date", () => {
     const [after] = rowsOf(
       await db.execute(sql`SELECT deposit_date FROM deposits WHERE id = ${dep.id}`)
     );
-    assert.equal(new Date(after.deposit_date).toISOString().slice(0, 10), "2026-01-09");
+    // Read as a Lagos day: the database casts a date to Lagos midnight now, so
+    // the UTC reading of the same instant is the evening before.
+    assert.equal(localDateStr(new Date(after.deposit_date)), "2026-01-09");
   });
 
   test("the backfill also recovers a date from paystack_details.paidAt", async () => {

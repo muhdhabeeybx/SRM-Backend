@@ -1,5 +1,6 @@
 const { cfoReportRepo, pfiSurplusRepo } = require("../repositories");
 const { REPORT_TZ } = require("./dailyCombinedReport.service");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 /**
  * The CFO report: what each PFI sold, what it has left, and whether the
@@ -94,7 +95,8 @@ const normaliseUnit = (unit) => {
 const dayKey = (value) => {
   if (!value) return null;
   if (typeof value === "string") return value.slice(0, 10);
-  return new Date(value).toISOString().slice(0, 10);
+  // An instant becomes the Lagos day it fell on, not the UTC one.
+  return localDateStr(new Date(value));
 };
 
 /**

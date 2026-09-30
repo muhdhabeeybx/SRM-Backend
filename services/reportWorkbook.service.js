@@ -1,6 +1,7 @@
 const ExcelJS = require("exceljs");
 const { client } = require("../db");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
+const { dayBounds: zonedDayBounds } = require("../lib/zonedDay");
 
 /**
  * The daily report workbook — the Node half of Django's `orders_report_*.xlsx`.
@@ -42,10 +43,9 @@ const shout = (v) => (typeof v === "string" ? v.toUpperCase() : v);
  * rather than a SQL error. `day` is kept alongside for the filename.
  */
 const dayBounds = (date) => {
-  const startDate = new Date(date);
-  startDate.setHours(0, 0, 0, 0);
-  const endDate = new Date(startDate);
-  endDate.setDate(endDate.getDate() + 1);
+  // The Lagos day, whatever zone the server runs in — setHours(0) used the
+  // host's clock, which is UTC in production.
+  const { start: startDate, end: endDate } = zonedDayBounds(new Date(date));
   return {
     start: startDate.toISOString(),
     end: endDate.toISOString(),

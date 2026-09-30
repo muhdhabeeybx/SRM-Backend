@@ -392,6 +392,9 @@ async function closeUncoveredRequests(orderId, tx) {
     }, tx);
     closed.push(r.id);
   }
+  // After this transaction commits, not inside it, so a rolled-back payment
+  // write never tells anybody their refund was cancelled.
+  if (closed.length) setTimeout(() => closed.forEach((id) => announceRefund(id, "cancelled")), 1500);
   return closed;
 }
 
@@ -496,6 +499,67 @@ const shapeRefund = (r) => ({
  * One open request per order; the database enforces it too, so two people
  * raising one at once cannot both succeed.
  */
+/**
+ * Tell the people a refund concerns. Never throws: the refund is already saved,
+ * and a notice that cannot be sent must not turn it into a failed request.
+ *
+ *   requested   finance on the order's PFI/depot — there is money to send
+ *   paid        whoever asked for it
+ *   cancelled   whoever asked for it, with the reason (automatic ones too)
+ */
+async function announceRefund(refundId, event) {
+  try {
+    const { notify } = require("../notifications");
+    const { rolesFor } = require("../notifications/staffChoices");
+    const [r] = await client`
+      SELECT r.id, r.order_id, r.amount, r.status, r.requested_by, r.destination_name, r.destination_bank,
+             r.destination_number, r.payment_reference, r.cancel_reason,
+             ${orderReferenceClient(client, "o", "c")} AS reference, c.name AS customer_name,
+             TRIM(COALESCE(rq.first_name,'') || ' ' || COALESCE(rq.surname,'')) AS requested_by_name,
+             TRIM(COALESCE(pd.first_name,'') || ' ' || COALESCE(pd.surname,'')) AS paid_by_name,
+             TRIM(COALESCE(cx.first_name,'') || ' ' || COALESCE(cx.surname,'')) AS cancelled_by_name
+        FROM order_refunds r
+        JOIN orders o ON o.id = r.order_id
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN staff rq ON rq.id = r.requested_by
+        LEFT JOIN staff pd ON pd.id = r.paid_by
+        LEFT JOIN staff cx ON cx.id = r.cancelled_by
+       WHERE r.id = ${Number(refundId)}`;
+    if (!r) return;
+    // Only what actually stuck: a cancel inside a payment write that rolled
+    // back leaves the refund requested, and nobody is told otherwise.
+    const expected = { requested: "requested", paid: "refunded", cancelled: "cancelled" }[event];
+    if (r.status !== expected) return;
+    const base = {
+      refundId: Number(r.id), orderId: Number(r.order_id), orderNumber: r.reference,
+      customerName: r.customer_name || "", amount: Number(r.amount),
+    };
+    if (event === "requested") {
+      notify("staff.refund_requested", {
+        to: { roles: rolesFor("refunds_to_pay") },
+        data: {
+          ...base,
+          destinationName: r.destination_name, destinationBank: r.destination_bank,
+          destinationNumber: r.destination_number, requestedByName: r.requested_by_name || "",
+        },
+      });
+    } else if (r.requested_by) {
+      notify("staff.refund_decided", {
+        to: { staffId: Number(r.requested_by) },
+        data: {
+          ...base,
+          outcome: event,
+          reason: event === "cancelled" ? r.cancel_reason || "" : "",
+          paymentReference: event === "paid" ? r.payment_reference || "" : "",
+          actorName: event === "paid" ? r.paid_by_name || "" : r.cancelled_by_name || "",
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`[refunds] could not announce refund ${refundId} ${event}:`, err.message);
+  }
+}
+
 const requestRefund = async ({
   orderId, amount = null, destinationBank, destinationName, destinationNumber, reason = "", staffId = null,
 }) => {
@@ -528,7 +592,7 @@ const requestRefund = async ({
   }
 
   try {
-    return await db.transaction(async (tx) => {
+    const created = await db.transaction(async (tx) => {
       const [refund] = await tx
         .insert(orderRefunds)
         .values({
@@ -555,6 +619,8 @@ const requestRefund = async ({
       );
       return refund;
     });
+    announceRefund(created.id, "requested");
+    return created;
   } catch (e) {
     if (String(e?.cause?.code || e?.code) === "23505") {
       throw httpError(409, `${order.orderNumber} already has a refund waiting to be paid. Pay or cancel that one first.`);
@@ -571,7 +637,13 @@ const requestRefund = async ({
  * and paying out more than the order holds would leave it short by money that
  * has already left. That is refused, and the desk re-raises at the new figure.
  */
-const markRefunded = async ({ refundId, paidFromAccountId, paymentReference = "", paidAt = null, staffId = null }) => {
+const markRefunded = async (args) => {
+  const result = await markRefundedTx(args);
+  announceRefund(result.refund.id, "paid");
+  return result;
+};
+
+const markRefundedTx = async ({ refundId, paidFromAccountId, paymentReference = "", paidAt = null, staffId = null }) => {
   return db.transaction(async (tx) => {
     const [refund] = await tx.select().from(orderRefunds)
       .where(eq(orderRefunds.id, Number(refundId))).for("update").limit(1);
@@ -726,7 +798,13 @@ const restoreSkipped = async ({ refundId, reason = "", staffId = null }) => {
 };
 
 /** Withdraw a request that has not been paid. Nothing about the order moves. */
-const cancelRefund = async ({ refundId, reason = "", staffId = null }) => {
+const cancelRefund = async (args) => {
+  const refund = await cancelRefundTx(args);
+  announceRefund(refund.id, "cancelled");
+  return refund;
+};
+
+const cancelRefundTx = async ({ refundId, reason = "", staffId = null }) => {
   const why = String(reason || "").trim();
   if (!why) throw httpError(400, "Say why the refund is being cancelled.");
   return db.transaction(async (tx) => {

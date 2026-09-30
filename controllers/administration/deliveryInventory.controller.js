@@ -1,6 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const stepNotices = require("../../services/stepNotices.service");
 const { deliveryInventoryRepo, pfiRepo, truckRepo } = require("../../repositories");
+const { lagosToday, localDateStr } = require("../../lib/zonedDay");
 
 /**
  * Trip costs are stripped for anybody who cannot open Delivery Costing.
@@ -108,7 +109,7 @@ const createDeliveryInventory = asyncHandler(async (req, res) => {
     customerName: customer_name || "",
     quantityAllocated: Number(quantity_allocated) || 0,
     rate: rate !== undefined && rate !== null && rate !== "" ? String(Number(rate) || 0) : "0",
-    dateAllocated: date_allocated || new Date().toISOString().split("T")[0],
+    dateAllocated: date_allocated || lagosToday(),
     loadingStatus: loading_status,
     location: location || "",
     notes: notes || "",

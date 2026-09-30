@@ -3,6 +3,7 @@ const { db } = require("../config/db");
 const { client } = require("../db");
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
 const { scopeCondition } = require("../lib/scopeFilter");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 const {
   commissions,
   depotProductCommissions,
@@ -146,12 +147,10 @@ const findAll = async ({
    * 500. gte/lte know the column is a timestamp and serialise it properly.
    */
   if (dateFrom) {
-    conditions.push(gte(commissions.createdAt, new Date(dateFrom)));
+    conditions.push(gte(commissions.createdAt, dayEdge(dateFrom, "start")));
   }
   if (dateTo) {
-    const end = new Date(dateTo);
-    end.setHours(23, 59, 59, 999);
-    conditions.push(lte(commissions.createdAt, end));
+    conditions.push(lte(commissions.createdAt, dayEdge(dateTo, "end")));
   }
   if (search) {
     const pattern = `%${search}%`;
@@ -542,11 +541,9 @@ const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
   if (customerId) conditions.push(eq(commissions.customerId, parseInt(customerId)));
   // Same as findAll above: a Date through sql`` has no column type behind it
   // and the driver rejects it, so the summary 500'd on the same requests.
-  if (dateFrom) conditions.push(gte(commissions.createdAt, new Date(dateFrom)));
+  if (dateFrom) conditions.push(gte(commissions.createdAt, dayEdge(dateFrom, "start")));
   if (dateTo) {
-    const end = new Date(dateTo);
-    end.setHours(23, 59, 59, 999);
-    conditions.push(lte(commissions.createdAt, end));
+    conditions.push(lte(commissions.createdAt, dayEdge(dateTo, "end")));
   }
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 

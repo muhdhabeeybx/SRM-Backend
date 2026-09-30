@@ -94,7 +94,7 @@ describe("depot price approval — set, then a second person releases", () => {
    * reinstated this fails, and whoever reinstates it is told that this
    * endpoint expected to be gated.
    */
-  test("the role gate is declarative today — approval is open to any staff", async () => {
+  test("finance cannot approve or reject a price — only an admin can", async () => {
     const [change] = await db
       .select()
       .from(depotPriceChanges)
@@ -103,7 +103,13 @@ describe("depot price approval — set, then a second person releases", () => {
       .post(`${API}/price-changes/${change.id}/reject`)
       .set("Authorization", `Bearer ${finance.accessToken}`)
       .send({ note: "wrong figure" });
-    assert.equal(res.status, 200, "requireRole does not refuse anybody at present");
+    assert.equal(res.status, 403, "the gate is enforced, not only declared");
+
+    const rejected = await request(app)
+      .post(`${API}/price-changes/${change.id}/reject`)
+      .set("Authorization", `Bearer ${admin.accessToken}`)
+      .send({ note: "wrong figure" });
+    assert.equal(rejected.status, 200);
 
     const live = await db
       .select()

@@ -21,7 +21,6 @@ const {
   dangoteOrderRequests,
   lpgOrderRequests,
   lpgStations,
-  orderTrucks,
 } = require("../../db/schema");
 const {
   eq,
@@ -31,7 +30,6 @@ const {
   inArray,
   notInArray,
   count,
-  countDistinct,
   sql,
   gte,
   lte,
@@ -67,6 +65,15 @@ const ORDER_FINISHED_STATUSES = ["Completed", "Cancelled", "Expired"];
 const TRUCK_IN_TRANSIT_DAYS = 7;
 
 /**
+ * A truck-sale load is often never marked offloaded — 66 of the 95 still
+ * "loaded" on 2026-09-29 were from August, each followed by a newer load on
+ * the same truck. One counts only while it is the truck's latest load and is
+ * no older than this; a sale trip runs for days, not the week an order load
+ * gets.
+ */
+const TRUCK_SALE_LIVE_DAYS = 21;
+
+/**
  * Plates are compared with punctuation and case stripped: the load ledger
  * writes them as the gate officer types them ("EN 46 XM") while the fleet
  * registry stores them closed up ("BWR800XB"), so a literal comparison
@@ -86,7 +93,7 @@ async function getDailyRevenueTrend(dateFrom, dateTo) {
   const from = new Date(dateFrom);
   const to = new Date(dateTo);
 
-  const [paidOrders, approvedOffline, deliveryRows] = await Promise.all([
+  const [paidOrders, approvedOffline, deliveryRows, receivedRows] = await Promise.all([
     db
       .select({
         date: sql`DATE(${orders.createdAt})`.mapWith(String),
@@ -130,32 +137,44 @@ async function getDailyRevenueTrend(dateFrom, dateTo) {
         )
       )
       .groupBy(deliverySales.dateLoaded),
+
+    // Money received on the day's orders — the dashboard's headline, drawn
+    // day by day. The same rows and the same exclusions as financeSummary's
+    // `received` (services/overview.service.js), so the line sums to the
+    // figure above it. Keyed by the Lagos day: the period starts at Lagos
+    // midnight, and a UTC date put each night's first hour on the day before.
+    db.execute(sql`
+      SELECT to_char(o.created_at AT TIME ZONE 'Africa/Lagos', 'YYYY-MM-DD') AS date,
+             COALESCE(SUM(p.amount), 0) AS total
+        FROM orders o
+        JOIN order_payments p
+          ON p.order_id = o.id AND p.source NOT IN ('transfer_in', 'transfer_out', 'refund')
+       WHERE o.created_at >= ${from.toISOString()}::timestamptz
+         AND o.created_at <= ${to.toISOString()}::timestamptz
+         AND o.payment_status IN ('Paid', 'Part Paid')
+       GROUP BY 1`),
   ]);
 
+  const EMPTY = { orders: 0, offline: 0, delivery: 0, received: 0 };
   const byDay = new Map();
-  for (const r of paidOrders) {
-    const key = String(r.date);
-    if (!byDay.has(key)) byDay.set(key, { orders: 0, offline: 0, delivery: 0 });
-    byDay.get(key).orders = num(r.total);
-  }
-  for (const r of approvedOffline) {
-    const key = String(r.date);
-    if (!byDay.has(key)) byDay.set(key, { orders: 0, offline: 0, delivery: 0 });
-    byDay.get(key).offline = num(r.total);
-  }
-  for (const r of deliveryRows) {
-    const key = String(r.date);
-    if (!byDay.has(key)) byDay.set(key, { orders: 0, offline: 0, delivery: 0 });
-    byDay.get(key).delivery = num(r.total);
-  }
+  const put = (date, field, total) => {
+    const key = String(date);
+    if (!byDay.has(key)) byDay.set(key, { ...EMPTY });
+    byDay.get(key)[field] = num(total);
+  };
+  for (const r of paidOrders) put(r.date, "orders", r.total);
+  for (const r of approvedOffline) put(r.date, "offline", r.total);
+  for (const r of deliveryRows) put(r.date, "delivery", r.total);
+  for (const r of receivedRows.rows ?? receivedRows) put(r.date, "received", r.total);
 
+  const lagosDay = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos" });
   const trend = [];
-  const cursor = new Date(from);
-  while (cursor <= to) {
-    const key = cursor.toISOString().slice(0, 10);
-    const row = byDay.get(key) || { orders: 0, offline: 0, delivery: 0 };
-    trend.push({ date: key, ...row });
-    cursor.setDate(cursor.getDate() + 1);
+  const seen = new Set();
+  for (let t = from.getTime(); t <= to.getTime(); t += 86_400_000) {
+    const key = lagosDay.format(new Date(t));
+    if (seen.has(key)) continue;
+    seen.add(key);
+    trend.push({ date: key, ...(byDay.get(key) || EMPTY) });
   }
   return trend;
 }
@@ -262,36 +281,46 @@ const getOverview = asyncHandler(async (req, res) => {
       //
       // The join is on the normalised plate, not order_trucks.truck_id: that
       // soft FK is null on every one of the 7,519 rows in the ledger, so a
-      // join through it counts nothing. countDistinct matters because one
-      // truck can carry several loads across concurrent orders.
-      const lastGateStamp = sql`COALESCE(${orderTrucks.securityExitedAt}, ${orderTrucks.loadedAt}, ${orderTrucks.securityEnteredAt}, ${orderTrucks.createdAt})`;
+      // join through it counts nothing. The UNION keeps one row per truck,
+      // however many loads it carries across concurrent orders.
       const [total, maintenance, inTransit] = await Promise.all([
         db.select({ c: count() }).from(trucks).where(eq(trucks.isActive, true)),
         db
           .select({ c: count() })
           .from(trucks)
           .where(and(eq(trucks.isActive, true), NEEDS_ATTENTION)),
-        db
-          .select({ c: countDistinct(trucks.id) })
-          .from(orderTrucks)
-          .innerJoin(orders, eq(orderTrucks.orderId, orders.id))
-          .innerJoin(
-            trucks,
-            sql`${normalisedPlate(trucks.plateNumber)} = ${normalisedPlate(orderTrucks.truckNumber)}`
-          )
-          .where(
-            and(
-              eq(trucks.isActive, true),
-              inArray(orderTrucks.status, TRUCK_WORKING_STATUSES),
-              notInArray(orders.status, ORDER_FINISHED_STATUSES),
-              sql`${lastGateStamp} > now() - (${TRUCK_IN_TRANSIT_DAYS} * interval '1 day')`
-            )
-          ),
+        // Working on an order load, or out on a truck sale. The two overlap
+        // heavily — a trucking PFI's truck-sale record usually sits on the
+        // same vehicle's order load — so they are unioned, not added.
+        db.execute(sql`
+          SELECT count(*)::int AS c FROM (
+            SELECT t.id
+              FROM order_trucks ot
+              JOIN orders o ON o.id = ot.order_id
+              JOIN fleet_trucks t ON ${normalisedPlate(sql`t.plate_number`)} = ${normalisedPlate(sql`ot.truck_number`)}
+             WHERE t.is_active
+               AND ot.status IN ${sql.raw(`('${TRUCK_WORKING_STATUSES.join("','")}')`)}
+               AND o.status NOT IN ${sql.raw(`('${ORDER_FINISHED_STATUSES.join("','")}')`)}
+               AND COALESCE(ot.security_exited_at, ot.loaded_at, ot.security_entered_at, ot.created_at)
+                   > now() - (${TRUCK_IN_TRANSIT_DAYS} * interval '1 day')
+            UNION
+            SELECT t.id
+              FROM delivery_inventory d
+              JOIN fleet_trucks t
+                ON t.id = d.truck_id OR ${normalisedPlate(sql`t.plate_number`)} = ${normalisedPlate(sql`d.truck_number`)}
+             WHERE t.is_active
+               AND d.loading_status = 'loaded'
+               AND d.created_at > now() - (${TRUCK_SALE_LIVE_DAYS} * interval '1 day')
+               AND NOT EXISTS (
+                 SELECT 1 FROM delivery_inventory later
+                  WHERE later.id <> d.id AND later.created_at > d.created_at
+                    AND ${normalisedPlate(sql`later.truck_number`)} = ${normalisedPlate(sql`d.truck_number`)})
+          ) working`),
       ]);
 
       const totalCount = total[0].c;
       const maintenanceCount = maintenance[0].c;
-      const inTransitCount = inTransit[0].c;
+      const inTransitCount = Number((inTransit.rows ?? inTransit)[0]?.c || 0);
       return {
         total: totalCount,
         maintenance: maintenanceCount,

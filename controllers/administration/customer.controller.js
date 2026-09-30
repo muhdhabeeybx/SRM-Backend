@@ -23,6 +23,30 @@ const lookupOnly = (c) => ({
 const asyncHandler = require("express-async-handler");
 const { customerRepo, customerPhoneRepo, orderRepo, depositRepo } = require("../../repositories");
 const { toE164 } = require("../../utils/phone");
+const auditLogRepo = require("../../repositories/auditLog.repository");
+
+const rolesOf = (req) => (Array.isArray(req.user?.roles) ? req.user.roles : []);
+const isSuper = (req) => rolesOf(req).includes("super_admin");
+const isAdmin = (req) => isSuper(req) || rolesOf(req).includes("admin");
+
+/**
+ * The money a customer record carries. Order-first payments moved the real
+ * ledger to order_payments, but these columns are still read (the customer
+ * page, the statement, the wallet-era reports), and until now any member of
+ * staff could set them with an ordinary edit. Only a super admin may change
+ * them now; a save that sends them back unchanged is not a change.
+ */
+const MONEY_FIELDS = ["balance", "deposit", "previousDeposit"];
+const moneyChanged = (field, before, after) => Number(before ?? 0) !== Number(after ?? 0);
+
+/** Who did what to a customer — nothing recorded staff edits before. */
+const audit = (req, customerId, action, metadata) =>
+  auditLogRepo.record({
+    entityType: "customer", entityId: customerId, action,
+    actor: { type: "staff", staffId: req.user?.id ?? null },
+    metadata,
+    ipAddress: req.ip, userAgent: req.headers?.["user-agent"],
+  }).catch((err) => console.error(`[customer] audit of ${action} failed:`, err.message));
 
 const getCustomers = asyncHandler(async (req, res) => {
   const {
@@ -84,6 +108,13 @@ const createCustomer = asyncHandler(async (req, res) => {
     return res.status(400).json({
       success: false,
       message: "Name and phone are required",
+    });
+  }
+
+  if (!isSuper(req) && MONEY_FIELDS.some((f) => Number(req.body[f] ?? 0) !== 0)) {
+    return res.status(403).json({
+      success: false,
+      message: "Only a super admin can open a customer with a balance or deposit",
     });
   }
 
@@ -159,6 +190,10 @@ const createCustomer = asyncHandler(async (req, res) => {
     previousDeposit: String(previousDeposit ?? 0),
   });
 
+  await audit(req, customer.id, "customer.created", {
+    name: customer.name, phone: customer.phone, companyName: customer.companyName,
+  });
+
   res.status(201).json({
     success: true,
     message: "Customer created successfully",
@@ -186,6 +221,29 @@ const updateCustomer = asyncHandler(async (req, res) => {
       success: false,
       message:
         "A valid phone number is required. International numbers must include a country code, e.g. +447400123456",
+    });
+  }
+
+  // The main number signs in and receives every SMS: changing it hands the
+  // account to whoever holds the new one, so it is an admin's act, as adding
+  // a number is (see the route). Money fields are a super admin's.
+  // Both sides normalised: 115 numbers on the book predate E.164, and a save
+  // that sends one back unchanged must not read as a new number.
+  const phoneChanging = req.body.phone !== undefined
+    && toE164(req.body.phone) !== (toE164(customer.phone) ?? customer.phone);
+  if (phoneChanging && !isAdmin(req)) {
+    return res.status(403).json({
+      success: false,
+      message: "Only an admin can change a customer's main number — it is the one they sign in on",
+    });
+  }
+  const moneyChanging = MONEY_FIELDS.filter(
+    (f) => req.body[f] !== undefined && moneyChanged(f, customer[f], req.body[f]),
+  );
+  if (moneyChanging.length && !isSuper(req)) {
+    return res.status(403).json({
+      success: false,
+      message: "Only a super admin can change a customer's balance or deposit",
     });
   }
 
@@ -221,6 +279,13 @@ const updateCustomer = asyncHandler(async (req, res) => {
   }
 
   const updated = await customerRepo.update(customer.id, updateData);
+
+  const changed = Object.keys(updateData).filter((f) => String(customer[f] ?? "") !== String(updateData[f] ?? ""));
+  if (changed.length) {
+    await audit(req, customer.id, "customer.updated", {
+      changes: Object.fromEntries(changed.map((f) => [f, { from: customer[f] ?? null, to: updateData[f] ?? null }])),
+    });
+  }
 
   res.json({
     success: true,
@@ -279,6 +344,9 @@ const deleteCustomer = asyncHandler(async (req, res) => {
   }
 
   await customerRepo.deleteById(customer.id);
+  await audit(req, customer.id, "customer.deleted", {
+    name: customer.name, phone: customer.phone, companyName: customer.companyName,
+  });
 
   res.json({ success: true, message: "Customer deleted successfully" });
 });

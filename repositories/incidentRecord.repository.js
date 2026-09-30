@@ -2,6 +2,7 @@ const { eq, and, or, ilike, asc, desc, count, gte, lte } = require("drizzle-orm"
 const { db } = require("../config/db");
 const { incidentRecords } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 // Whitelist, not passthrough: sort input never reaches SQL unvalidated.
 const SORTABLE = {
@@ -55,8 +56,8 @@ const findAll = async ({
       )
     );
   }
-  if (dateFrom) conditions.push(gte(incidentRecords.createdAt, new Date(dateFrom)));
-  if (dateTo) conditions.push(lte(incidentRecords.createdAt, new Date(dateTo)));
+  if (dateFrom) conditions.push(gte(incidentRecords.createdAt, dayEdge(dateFrom, "start")));
+  if (dateTo) conditions.push(lte(incidentRecords.createdAt, dayEdge(dateTo, "end")));
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
 

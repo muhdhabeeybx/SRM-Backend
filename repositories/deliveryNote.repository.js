@@ -1,6 +1,7 @@
 const { eq, and, desc, count } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { deliveryNotes, deliveryCustomers, orders } = require("../db/schema");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 const findById = async (id) => {
   const [row] = await db
@@ -103,7 +104,7 @@ const deleteById = async (id) => {
 };
 
 const generateNoteNumber = async () => {
-  const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const todayStr = lagosToday().replace(/-/g, "");
   const [{ total }] = await db
     .select({ total: count() })
     .from(deliveryNotes);

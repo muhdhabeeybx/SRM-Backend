@@ -15,6 +15,7 @@ const {
   offlineSales,
 } = require("../db/schema");
 const { fleetTruckRepo } = require("../repositories");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 // Read-only aggregation, SQL-side, over the same records the existing
 // screens use: delivery_sales is the delivery sales ledger (rows keyed in
@@ -25,8 +26,8 @@ const num = (value) => Number(value || 0);
 
 const dateConditions = (column, dateFrom, dateTo) => {
   const conditions = [];
-  if (dateFrom) conditions.push(gte(column, new Date(dateFrom)));
-  if (dateTo) conditions.push(lte(column, new Date(dateTo)));
+  if (dateFrom) conditions.push(gte(column, dayEdge(dateFrom, "start")));
+  if (dateTo) conditions.push(lte(column, dayEdge(dateTo, "end")));
   return conditions;
 };
 

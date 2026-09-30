@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
-const { authenticateStaff, requireRole } = verifyStaff;
+const { authenticateStaff, requireRole, enforceRole } = verifyStaff;
 const validate = require("../../middleware/validate");
 const orderSchemas = require("../../schemas/order.schema");
 const { getGateQueue } = require("../../controllers/administration/gateQueue.controller");
@@ -47,7 +47,7 @@ const {
 router.delete(
   "/:id",
   verifyStaff,
-  requireRole("super_admin", { message: "Only a super admin can delete an order" }),
+  enforceRole({ message: "Only a super admin can delete an order" }),
   validate({ params: orderSchemas.idParam }),
   deleteOrder
 );
@@ -154,7 +154,7 @@ router.get(
 router.post(
   "/:id/payments",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to confirm payment" }),
+  enforceRole("finance", "admin", { message: "Finance access required to confirm payment" }),
   validate({ params: orderSchemas.idParam, body: orderSchemas.confirmOrderPayment }),
   confirmOrderPayment
 );
@@ -181,7 +181,7 @@ router.get(
 router.delete(
   "/:id/payments/:paymentId",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required" }),
+  enforceRole("finance", "admin", { message: "Only finance or an admin can remove a payment" }),
   validate({ params: orderSchemas.paymentParam, body: orderSchemas.removeOrderPayment }),
   removeOrderPayment
 );
@@ -191,7 +191,7 @@ router.delete(
 router.post(
   "/:id/payments/transfer",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to move money between orders" }),
+  enforceRole("finance", "admin", { message: "Finance access required to move money between orders" }),
   validate({ params: orderSchemas.idParam, body: orderSchemas.transferOrderPayment }),
   transferOrderPayment
 );
@@ -199,7 +199,7 @@ router.post(
 router.delete(
   "/:id/payments/transfer/:transferId",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required" }),
+  enforceRole("finance", "admin", { message: "Only finance or an admin can reverse a transfer" }),
   validate({ params: orderSchemas.transferParam }),
   reverseOrderPaymentTransfer
 );
@@ -218,7 +218,7 @@ router.delete(
 router.post(
   "/:id/payments/:paymentId/review",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to review a payment" }),
+  enforceRole("finance", "admin", { message: "Finance access required to review a payment" }),
   validate({ params: orderSchemas.paymentParam, body: orderSchemas.reviewOrderPayment }),
   reviewOrderPayment
 );
@@ -226,7 +226,7 @@ router.post(
 router.post(
   "/:id/payments/transfer/:transferId/review",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to review a transfer" }),
+  enforceRole("finance", "admin", { message: "Finance access required to review a transfer" }),
   validate({ params: orderSchemas.transferParam, body: orderSchemas.reviewOrderPayment }),
   reviewOrderPaymentTransfer
 );

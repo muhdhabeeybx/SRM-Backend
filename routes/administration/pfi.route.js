@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
+const { enforceRole } = verifyStaff;
 const validate = require("../../middleware/validate");
 const misc = require("../../schemas/misc.schema");
 const {
@@ -77,13 +78,17 @@ router.post("/", verifyStaff, validate({ body: misc.createPfi }), createPfi);
 
 router.get("/:id", verifyStaff, validate({ params: misc.idParam }), getPfiById);
 router.patch("/:id", verifyStaff, validate({ params: misc.idParam, body: misc.updatePfi }), updatePfi);
-router.delete("/:id", verifyStaff, validate({ params: misc.idParam }), deletePfi);
+// Deleting a PFI takes its movements, locations and expense categories with
+// it and cannot be undone: a super admin's alone.
+router.delete("/:id", verifyStaff, enforceRole({ message: "Only a super admin can delete a PFI" }), validate({ params: misc.idParam }), deletePfi);
 
 // Releasing a PFI to trade. "/start" stays as the old name for anything still
 // calling it — it is the same handler, which now requires a bank account and
 // officers rather than flipping a status.
-router.post("/:id/start", verifyStaff, validate({ params: misc.idParam }), startPfi);
-router.post("/:id/activate", verifyStaff, validate({ params: misc.idParam }), activatePfi);
+// Releasing a PFI to trade names its bank account and officers: an admin's act.
+const ACTIVATE = enforceRole("admin", { message: "Only an admin or a super admin can release a PFI to trade" });
+router.post("/:id/start", verifyStaff, ACTIVATE, validate({ params: misc.idParam }), startPfi);
+router.post("/:id/activate", verifyStaff, ACTIVATE, validate({ params: misc.idParam }), activatePfi);
 router.post("/:id/finish", verifyStaff, validate({ params: misc.idParam }), finishPfi);
 router.get("/:id/summary", verifyStaff, validate({ params: misc.idParam }), getPfiSummary);
 // A delivery batch's two extra facts: where it may be sold, and what carried

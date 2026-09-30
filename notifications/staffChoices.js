@@ -85,6 +85,14 @@ const CHOICES = [
     orderScoped: true,
   },
   {
+    key: "refunds_to_pay",
+    label: "Refunds to pay",
+    description: "A refund of an overpayment is requested and waiting to be sent. Only orders within their PFIs or depots.",
+    types: ["staff.refund_requested"],
+    roles: ["finance", "super_admin"],
+    orderScoped: true,
+  },
+  {
     key: "requests_submitted",
     label: "Dangote and LPG requests",
     description: "A Dangote or LPG request is submitted.",
@@ -165,7 +173,7 @@ const CHOICES = [
     types: [
       "staff.daily_report_approved", "staff.daily_report_rejected",
       "staff.incident_updated", "staff.offline_sale_updated",
-      "staff.pfi_allocation_decided",
+      "staff.pfi_allocation_decided", "staff.refund_decided",
     ],
     personal: true,
   },

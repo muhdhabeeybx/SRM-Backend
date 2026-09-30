@@ -13,6 +13,7 @@ const {
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
 const { scopeCondition } = require("../lib/scopeFilter");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 /** The two payment sources that are a movement between orders, not money in. */
 const TRANSFER_SOURCES = new Set(["transfer_in", "transfer_out"]);
@@ -398,7 +399,7 @@ const findAll = async ({
   }
 
   if (dateFrom) {
-    conditions.push(gte(orders.createdAt, new Date(dateFrom)));
+    conditions.push(gte(orders.createdAt, dayEdge(dateFrom, "start")));
   }
 
   // "Payable" is not a status — it is an unpaid, pending order, i.e. one the
@@ -416,14 +417,8 @@ const findAll = async ({
   }
 
   if (dateTo) {
-    // Inclusive of the whole day: a bare "2026-08-06" parses as that date's
-    // UTC midnight, so comparing createdAt against it as-is excluded every
-    // order placed later that same day — a caller asking for "today" got
-    // nothing. Built as an explicit UTC string, same as dateFrom above, so
-    // the two boundaries don't drift against each other by the server's
-    // local timezone.
-    const end = /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? `${dateTo}T23:59:59.999Z` : dateTo;
-    conditions.push(lte(orders.createdAt, new Date(end)));
+    // Inclusive of the whole day, and the day is Lagos's — see dayEdge.
+    conditions.push(lte(orders.createdAt, dayEdge(dateTo, "end")));
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -884,12 +879,10 @@ const findFinanceReport = async ({
    * day. Widened to the last instant of the day so "today" means today.
    */
   if (dateFrom) {
-    const start = /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) ? `${dateFrom}T00:00:00.000Z` : dateFrom;
-    conditions.push(gte(orders.createdAt, new Date(start)));
+    conditions.push(gte(orders.createdAt, dayEdge(dateFrom, "start")));
   }
   if (dateTo) {
-    const end = /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? `${dateTo}T23:59:59.999Z` : dateTo;
-    conditions.push(lte(orders.createdAt, new Date(end)));
+    conditions.push(lte(orders.createdAt, dayEdge(dateTo, "end")));
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;

@@ -7,6 +7,7 @@ const staffChoices = require("../../notifications/staffChoices");
 const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../lib/pfiAssignmentContext");
 const pfiAssignments = require("../../services/pfiAssignments.service");
 const sessionService = require("../../services/session.service");
+const auditLogRepo = require("../../repositories/auditLog.repository");
 
 const REALM = "staff";
 
@@ -91,6 +92,14 @@ const createAdmin = asyncHandler(async (req, res) => {
       setPasswordUrl: `${process.env.CLIENT_URL}/set-password?token=${rawToken}`,
     },
   });
+
+  // Who opened this account, with which roles — nothing recorded it before.
+  await auditLogRepo.record({
+    entityType: "staff", entityId: admin.id, action: "staff.created",
+    actor: { type: "staff", staffId: req.user?.id ?? null },
+    metadata: { email: admin.email, name: [admin.firstName, admin.surname].filter(Boolean).join(" "), roles: admin.roles || [] },
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+  }).catch((err) => console.error("[staff] audit of account creation failed:", err.message));
 
   res.status(201).json({
     success: true,
@@ -445,6 +454,14 @@ const deleteAdmin = asyncHandler(async (req, res) => {
     contextFromRequest(req, SOURCES.ACCOUNT_DELETED, "The account was deleted"),
     (tx) => staffRepo.deleteById(req.params.id, tx),
   );
+
+  // The account is gone; the record of who closed it, and what it was, stays.
+  await auditLogRepo.record({
+    entityType: "staff", entityId: admin.id, action: "staff.deleted",
+    actor: { type: "staff", staffId: req.user?.id ?? null },
+    metadata: { email: admin.email, name: [admin.firstName, admin.surname].filter(Boolean).join(" "), roles: admin.roles || [] },
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+  }).catch((err) => console.error("[staff] audit of account deletion failed:", err.message));
 
   res.json({
     success: true,

@@ -4,6 +4,7 @@ const { db } = require("../config/db");
 const { orderTrucks, orders, customers, depots, products, pfis, staff } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { generateOrderReference } = require("../utils/helpers");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 // The gate is two people: one signs a truck in, another signs it out. Both
 // come from `staff`, so the table is joined twice under its own aliases —
@@ -127,12 +128,10 @@ const findGateMovements = async ({ dateFrom, dateTo, depotId, pfiId, search, sco
   // A bare yyyy-MM-dd is that day's UTC midnight; widened to the last instant
   // so "today" includes a truck that came in this afternoon.
   if (dateFrom) {
-    const start = /^\d{4}-\d{2}-\d{2}$/.test(dateFrom) ? `${dateFrom}T00:00:00.000Z` : dateFrom;
-    conditions.push(gte(orderTrucks.securityEnteredAt, new Date(start)));
+    conditions.push(gte(orderTrucks.securityEnteredAt, dayEdge(dateFrom, "start")));
   }
   if (dateTo) {
-    const end = /^\d{4}-\d{2}-\d{2}$/.test(dateTo) ? `${dateTo}T23:59:59.999Z` : dateTo;
-    conditions.push(lte(orderTrucks.securityEnteredAt, new Date(end)));
+    conditions.push(lte(orderTrucks.securityEnteredAt, dayEdge(dateTo, "end")));
   }
   if (search) {
     const term = `%${search}%`;

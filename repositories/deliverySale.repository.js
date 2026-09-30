@@ -1,6 +1,7 @@
 const { eq, and, or, ilike, desc, count, sql, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { deliverySales, deliveryCustomers, bankStatementLines } = require("../db/schema");
+const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
 const findById = async (id) => {
   const [row] = await db
@@ -378,7 +379,7 @@ const transferOverpayment = async ({ from, to, actor = "" }) => {
   }
 
   const groupId = `TRF-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`.toUpperCase();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = lagosToday();
   const label = (t) => [t.truckNumber, t.customerName].filter(Boolean).join(" · ");
   const fromLabel = label(from);
 
