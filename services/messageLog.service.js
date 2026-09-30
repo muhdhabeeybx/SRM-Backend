@@ -203,16 +203,24 @@ async function syncTermii({ full = false, maxPages = full ? 5000 : 60 } = {}) {
     }
     let pages = 0;
     let rows = 0;
+    let previousFirst = null;
     for (let page = 0; page < maxPages; page += 1) {
       const items = await fetchTermiiPage(page);
       if (!items.length) break;
+      // A provider that ignored the page number would hand back the same rows
+      // for ever; the same first message twice means the history is exhausted.
+      const first = items[0]?.message_id ?? items[0]?.id ?? null;
+      if (first != null && first === previousFirst) break;
+      previousFirst = first;
       rows += await upsertTermiiRows(items);
       pages += 1;
       if (stopBefore) {
         const newest = items.map((i) => termiiTime(i.created_at)).filter(Boolean).sort((a, b) => b - a)[0];
         if (newest && newest < stopBefore) break;
       }
-      if (items.length < PAGE_SIZE) break;
+      // No stopping on a short page: Termii caps a page at 100 whatever size is
+      // asked for, so "fewer than 200" was true of the very first page and the
+      // full history sync read 100 messages of ~12,000. An empty page is the end.
     }
     const classified = await classify();
     return { ok: true, pages, rows, classified };

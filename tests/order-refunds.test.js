@@ -7,7 +7,7 @@ const request = require("supertest");
 const app = require("../app");
 const refundService = require("../services/orderRefund.service");
 const orderPaymentService = require("../services/orderPayment.service");
-const { staffToken, closeDb } = require("./helpers");
+const { staffToken, closeDb, payRefundThroughExpense } = require("./helpers");
 const { client } = require("../config/db");
 
 /**
@@ -102,7 +102,7 @@ describe("overpayment refunds", () => {
   test("marking it paid clears the overpayment exactly", async (t) => {
     if (!ready) return t.skip("schema or fixtures unavailable");
     const [open] = await client`SELECT id FROM order_refunds WHERE order_id = ${orderId} AND status='requested'`;
-    const result = await refundService.markRefunded({
+    const result = await payRefundThroughExpense({
       refundId: Number(open.id), paidFromAccountId: accountId, paymentReference: "REF-1",
     });
     assert.equal(result.refund.status, "refunded");
@@ -127,7 +127,7 @@ describe("overpayment refunds", () => {
     if (!ready) return t.skip("schema or fixtures unavailable");
     const [paid] = await client`SELECT id FROM order_refunds WHERE order_id = ${orderId} AND status='refunded'`;
     await assert.rejects(
-      () => refundService.markRefunded({ refundId: Number(paid.id), paidFromAccountId: accountId }),
+      () => payRefundThroughExpense({ refundId: Number(paid.id), paidFromAccountId: accountId }),
       (e) => e.status === 409,
     );
   });
@@ -196,7 +196,7 @@ describe("overpayment refunds", () => {
       assert.equal((await refundService.realSurplus(donor)).surplus, 0);
 
       await assert.rejects(
-        () => refundService.markRefunded({ refundId: refund.id, paidFromAccountId: accountId }),
+        () => payRefundThroughExpense({ refundId: refund.id, paidFromAccountId: accountId }),
         (e) => e.status === 409,
         "paying this out would leave the order short by money that has already moved",
       );

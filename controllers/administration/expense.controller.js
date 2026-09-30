@@ -7,6 +7,14 @@ const {
   notifyExpenseStage, notifyExpenseComment,
 } = require("../../services/expenseNotifications.service");
 const { deleteFile, generateSignature } = require("../../services/upload.service");
+const refundService = require("../../services/orderRefund.service");
+
+/**
+ * The refund an expense pays, if it pays one (migration 0065). A refund's
+ * expense walks the ordinary chain from "With CFO", and every step that
+ * touches it keeps the refund in step — see services/orderRefund.service.js.
+ */
+const linkedRefund = (expenseId) => refundService.refundForExpense(expenseId).catch(() => null);
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status });
@@ -643,6 +651,27 @@ const updateExpense = asyncHandler(async (req, res) => {
   const gate = chain.canEditExpense(existing, req.user);
   if (!gate.ok) throw httpErr(gate.status, gate.message);
 
+  /*
+   * A refund's expense. Its amount, account and cargo are the refund's — a
+   * different figure would pay out something nobody requested — so only the
+   * customer's account details may be corrected, and they are copied onto the
+   * refund too. A cancelled refund's expense stays closed: reviving it would
+   * pay a refund that no longer exists.
+   */
+  const refund = await linkedRefund(existing.id);
+  if (refund) {
+    if (refund.status !== "requested" && !gate.postPayment) {
+      throw httpErr(409, refund.status === "cancelled"
+        ? "This refund was cancelled. Raise a new refund request on the Overpayment Refunds page."
+        : "This refund is paid and closed.");
+    }
+    const locked = ["amount", "currency", "exchange_rate", "exchangeRate", "category_id", "categoryId", "category", "pfi_id", "pfiId"];
+    const touched = locked.filter((k) => req.body[k] !== undefined && String(req.body[k]) !== String(existing[k] ?? req.body[k]));
+    if (touched.length) {
+      throw httpErr(400, "A refund's amount, account and PFI come from the refund request. Cancel it and raise a new one to change them.");
+    }
+  }
+
   const data = {};
 
   // The account and the cargo are re-resolved together: moving a line onto an
@@ -806,7 +835,8 @@ const updateExpense = asyncHandler(async (req, res) => {
     existing.status === chain.STATUS.REJECTED ||
     existing.status === chain.STATUS.CHANGES_REQUESTED;
   if (resubmitting) {
-    data.status = chain.STATUS.PENDING;
+    // A refund goes back to the CFO, where it started — not to verification.
+    data.status = refund ? chain.STATUS.VERIFIED : chain.STATUS.PENDING;
     data.review_note = "";
     data.reviewed_by = null;
     data.reviewed_at = null;
@@ -822,6 +852,21 @@ const updateExpense = asyncHandler(async (req, res) => {
   const postPayment = gate.postPayment === true;
 
   const updated = await pfiExpenseRepo.updateExpense(existing.id, data);
+
+  // The customer's account, corrected on the expense, is corrected on the
+  // refund too — the refund desk and the payment must name the same account.
+  if (refund && refund.status === "requested") {
+    const { db } = require("../../config/db");
+    const { orderRefunds } = require("../../db/schema");
+    const { eq } = require("drizzle-orm");
+    const patch = {};
+    if (data.payee_bank_name !== undefined) patch.destinationBank = String(updated.payee_bank_name || "");
+    if (data.payee_account_number !== undefined) patch.destinationNumber = String(updated.payee_account_number || "");
+    if (data.payee_account_name !== undefined) patch.destinationName = String(updated.payee_account_name || "");
+    if (Object.keys(patch).length) {
+      await db.update(orderRefunds).set({ ...patch, updatedAt: new Date() }).where(eq(orderRefunds.id, refund.id));
+    }
+  }
 
   // Only these fields are worth a diff; the rest is noise in the trail.
   const TRACKED = [
@@ -856,12 +901,12 @@ const updateExpense = asyncHandler(async (req, res) => {
     await pfiExpenseRepo.writeAudit({
       expenseId: existing.id,
       action: "submitted",
-      changes: { status: [existing.status, chain.STATUS.PENDING], note: "Corrected and resubmitted" },
+      changes: { status: [existing.status, data.status], note: "Corrected and resubmitted" },
       actorId,
       actorName,
     });
     notifyExpenseStage({
-      expense: updated, stage: chain.STATUS.PENDING, note: "Corrected and resubmitted", actorId, actorName,
+      expense: updated, stage: data.status, note: "Corrected and resubmitted", actorId, actorName,
     }).catch(() => {});
   }
 
@@ -911,6 +956,15 @@ const deleteExpense = asyncHandler(async (req, res) => {
     Number(existing.added_by ?? existing.recorded_by) === Number(req.user.id);
   if (!isOwner && !chain.canOversee(req.user)) {
     throw httpErr(403, "You can only delete a request you raised");
+  }
+  // A refund's expense leaves with its refund: cancelled from the refunds page
+  // (which withdraws it) or undone there first. Deleting it here would leave
+  // the refund waiting on an expense that no longer exists.
+  const refundOfIt = await linkedRefund(existing.id);
+  if (refundOfIt && refundOfIt.status !== "cancelled") {
+    throw httpErr(409, refundOfIt.status === "refunded"
+      ? "This expense paid a refund. Undo the refund on the Overpayment Refunds page first."
+      : "This expense pays a refund request. Cancel the request on the Overpayment Refunds page instead.");
   }
   if (!isDeletableStatus(existing.status, req.user)) {
     throw httpErr(
@@ -1170,6 +1224,25 @@ const reviewExpense = asyncHandler(async (req, res) => {
   // 400 that changes nothing rather than a rolled-back approval.
   const payment = check.transition.capturesPayment ? paymentFor(req.body, existing) : null;
 
+  /*
+   * A refund's expense. Paying it records the refund on the order in the same
+   * transaction (the balance goes to 0 on the finance report), and only if
+   * the order still holds the money — see payRefundExpense.
+   */
+  const refund = await linkedRefund(existing.id);
+  if (refund && to === chain.STATUS.PAID) {
+    const { expense } = await refundService.payRefundExpense({
+      expenseId: existing.id, payment, note, actorId, actorName,
+    });
+    notifyExpenseStage({ expense, stage: to, note, actorId, actorName }).catch(() => {});
+    const full = await pfiExpenseRepo.findExpenseFull(expense.id);
+    return res.json({
+      success: true,
+      message: "Refund paid — recorded on the order",
+      data: { expense: decorate([full], req.user)[0] },
+    });
+  }
+
   // Status, stamps and the audit row are one unit: a transition that is not
   // recorded may as well not have happened.
   const updated = await client.begin(async (tx) => {
@@ -1207,6 +1280,12 @@ const reviewExpense = asyncHandler(async (req, res) => {
     `;
     return row;
   });
+
+  // A rejected refund expense cancels the refund, with the same reason.
+  if (refund && to === chain.STATUS.REJECTED) {
+    await refundService.cancelForRejectedExpense({ expenseId: existing.id, note, actorId }).catch((err) =>
+      console.error("[expenses] could not cancel the refund of a rejected expense:", err.message));
+  }
 
   // After the transaction, and never allowed to undo it: a message that fails
   // to send must not roll back an approval that already happened.

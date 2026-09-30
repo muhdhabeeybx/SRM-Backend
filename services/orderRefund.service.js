@@ -334,9 +334,11 @@ const REFUND_SELECT = (scopeUser, where) => client`
            ba.bank_name AS paid_from_bank, ba.account_name AS paid_from_name, ba.account_number AS paid_from_number,
            TRIM(COALESCE(rq.first_name,'') || ' ' || COALESCE(rq.surname,'')) AS requested_by_name,
            TRIM(COALESCE(pd.first_name,'') || ' ' || COALESCE(pd.surname,'')) AS paid_by_name,
-           TRIM(COALESCE(cx.first_name,'') || ' ' || COALESCE(cx.surname,'')) AS cancelled_by_name
+           TRIM(COALESCE(cx.first_name,'') || ' ' || COALESCE(cx.surname,'')) AS cancelled_by_name,
+           ex.status::text AS expense_status, ex.reference_number AS expense_reference
       FROM order_refunds r
       JOIN orders o ON o.id = r.order_id
+      LEFT JOIN pfi_expenses ex ON ex.id = r.expense_id
       LEFT JOIN customers c ON c.id = r.customer_id
       LEFT JOIN bank_accounts ba ON ba.id = r.paid_from_account_id
       LEFT JOIN staff rq ON rq.id = r.requested_by
@@ -367,7 +369,7 @@ const REFUND_SELECT = (scopeUser, where) => client`
  */
 async function closeUncoveredRequests(orderId, tx) {
   const open = await tx
-    .select({ id: orderRefunds.id, amount: orderRefunds.amount })
+    .select({ id: orderRefunds.id, amount: orderRefunds.amount, expenseId: orderRefunds.expenseId })
     .from(orderRefunds)
     .where(and(
       eq(orderRefunds.orderId, Number(orderId)),
@@ -385,6 +387,7 @@ async function closeUncoveredRequests(orderId, tx) {
     await tx.update(orderRefunds).set({
       status: "cancelled", cancelledAt: new Date(), cancelledBy: null, cancelReason: why, updatedAt: new Date(),
     }).where(eq(orderRefunds.id, r.id));
+    await withdrawRefundExpense(tx, r.expenseId, why);
     await auditLogRepo.record({
       entityType: "order", entityId: Number(orderId), action: "order.refund_cancelled",
       actor: { type: "system" },
@@ -489,6 +492,19 @@ const shapeRefund = (r) => ({
     cancelledAt: r.cancelled_at,
     cancelledByName: r.cancelled_by_name || null,
     cancelReason: r.cancel_reason,
+    /**
+     * The expense that pays it (migration 0065) and where it stands in the
+     * chain. Null on refunds raised before refunds went through expenses —
+     * those are still paid from the refund desk.
+     */
+    expense: r.expense_id
+      ? {
+          id: Number(r.expense_id),
+          reference: r.expense_reference || null,
+          status: r.expense_status || null,
+          stageLabel: require("../lib/expenseChain").STATUS_LABELS[r.expense_status] || r.expense_status || null,
+        }
+      : null,
 });
 
 /**
@@ -560,6 +576,153 @@ async function announceRefund(refundId, event) {
   }
 }
 
+// ── Refunds paid through the expense chain (migration 0065) ────────────────
+//
+// Requesting a refund raises an expense for it, at "With CFO" — refunds skip
+// the Expenditure Officer's verification, and walk the rest of the ordinary
+// chain: CFO approval, final approval, the Expenditure Officer marking it paid.
+// Marking it paid is what records the refund on the order. The two records are
+// kept in step here: a rejected expense cancels the refund, a cancelled refund
+// withdraws the expense, and one is never paid without the other.
+
+const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
+
+/** The category refunds are raised under — flagged is_refund, never a cost. */
+async function refundCategoryId(tx) {
+  const [row] = rowsOf(await tx.execute(sql`SELECT id FROM expense_categories WHERE is_refund ORDER BY id LIMIT 1`));
+  if (!row) throw httpError(500, "The Customer Refund expense category is missing — migration 0065 has not been applied.");
+  return Number(row.id);
+}
+
+const staffName = async (tx, staffId) => {
+  if (!staffId) return "";
+  const [row] = rowsOf(await tx.execute(sql`
+    SELECT TRIM(COALESCE(first_name,'') || ' ' || COALESCE(surname,'')) AS name FROM staff WHERE id = ${Number(staffId)}`));
+  return row?.name || "";
+};
+
+/** One line on the expense's own trail, in the shape the expense pages read. */
+const expenseAudit = (tx, expenseId, action, changes, actorId, actorName) => tx.execute(sql`
+  INSERT INTO pfi_expense_audits (expense_id, action, changes, actor_id, actor_name)
+  VALUES (${Number(expenseId)}, ${action}, ${JSON.stringify(changes)}, ${actorId ?? null}, ${actorName || ""})`);
+
+/**
+ * The expense that pays a refund, raised with it in the same transaction.
+ *
+ * Booked to the order's PFI, so it is found under that PFI on the expenses
+ * page. It is never that PFI's cost: its category is flagged is_refund, and
+ * every PFI cost total leaves such expenses out (pfiExpense.repository
+ * aggregatesFor, pfiDailyReport). The customer's account is the payee.
+ */
+async function raiseRefundExpense(tx, { refund, order, staffId }) {
+  const [info] = rowsOf(await tx.execute(sql`
+    SELECT o.pfi_id, p.pfi_number, c.name AS customer_name,
+           COALESCE(NULLIF(o.company_name, ''), c.company_name, '') AS company
+      FROM orders o LEFT JOIN pfis p ON p.id = o.pfi_id LEFT JOIN customers c ON c.id = o.customer_id
+     WHERE o.id = ${order.id}`));
+  const name = await staffName(tx, staffId);
+  const reference = generateOrderReference(info?.company || "", order.id);
+  const description = [
+    `Overpayment refund — ${reference}${info?.pfi_number ? ` (${info.pfi_number})` : ""}`,
+    info?.customer_name ? `to ${info.customer_name}` : "",
+    refund.reason ? `· ${refund.reason}` : "",
+  ].filter(Boolean).join(" ");
+  const [expense] = rowsOf(await tx.execute(sql`
+    INSERT INTO pfi_expenses
+      (category_id, pfi_id, vendor, description, amount, currency, exchange_rate,
+       payee_bank_name, payee_account_number, payee_account_name,
+       status, added_by, recorded_by, entered_by)
+    VALUES
+      (${await refundCategoryId(tx)}, ${info?.pfi_id ?? null}, ${refund.destinationName}, ${description.slice(0, 2000)},
+       ${refund.amount}, 'NGN', 1,
+       ${refund.destinationBank}, ${refund.destinationNumber}, ${refund.destinationName},
+       'verified', ${staffId ?? null}, ${staffId ?? null}, ${name})
+    RETURNING *`));
+  await expenseAudit(tx, expense.id, "verified", {
+    status: [null, "verified"],
+    note: "Overpayment refund — goes straight to the CFO",
+    refundId: refund.id,
+    orderId: order.id,
+  }, staffId, name);
+  await tx.update(orderRefunds).set({ expenseId: expense.id, updatedAt: new Date() })
+    .where(eq(orderRefunds.id, refund.id));
+  return { expense, actorName: name };
+}
+
+/**
+ * Take a refund's expense out of the chain — the refund was cancelled.
+ * Rejected rather than deleted, so its trail says what happened. A paid
+ * expense is never touched: a paid refund is undone, not cancelled.
+ */
+async function withdrawRefundExpense(tx, expenseId, reason, actorId = null) {
+  if (!expenseId) return null;
+  const [row] = rowsOf(await tx.execute(sql`
+    UPDATE pfi_expenses
+       SET status = 'rejected', review_note = ${reason.slice(0, 2000)}, reviewed_by = ${actorId ?? null},
+           reviewed_at = now(), updated_at = now()
+     WHERE id = ${Number(expenseId)} AND status NOT IN ('paid', 'rejected') AND deleted_at IS NULL
+     RETURNING id, status`));
+  if (row) {
+    await expenseAudit(tx, expenseId, "rejected", { status: ["open", "rejected"], note: reason, refundCancelled: true },
+      actorId, actorId ? await staffName(tx, actorId) : "System");
+  }
+  return row || null;
+}
+
+/**
+ * The company account a payment left, from the "Bank · 0123456789" label the
+ * expense's Mark paid form writes. The refund row on the order needs the
+ * account itself, not its label.
+ */
+async function accountFromLabel(tx, label) {
+  const text = String(label || "");
+  const rows = rowsOf(await tx.execute(sql`
+    SELECT id, bank_name, account_name, account_number FROM bank_accounts
+     WHERE account_number <> '' AND position(account_number IN ${text}) > 0
+     ORDER BY length(account_number) DESC LIMIT 1`));
+  if (!rows[0]) throw httpError(400, "Choose one of the company's bank accounts as the account this refund was paid from.");
+  return { id: Number(rows[0].id), bankName: rows[0].bank_name, accountName: rows[0].account_name, accountNumber: rows[0].account_number };
+}
+
+/**
+ * Give an open refund raised before migration 0065 its expense, at "With
+ * CFO", exactly as a new request would get one — and tell the CFO desk the
+ * way a new request does. The requester is the expense's raiser.
+ *
+ * Refused for a request its order no longer covers: an expense for money that
+ * is not owed would walk the whole chain only to be refused at payment.
+ */
+const raiseExpenseForOpenRefund = async (refundId) => {
+  const created = await db.transaction(async (tx) => {
+    const [refund] = await tx.select().from(orderRefunds)
+      .where(eq(orderRefunds.id, Number(refundId))).for("update").limit(1);
+    if (!refund) throw httpError(404, "Refund not found");
+    if (refund.status !== "requested") throw httpError(409, "Only an open request gets an expense.");
+    if (refund.expenseId) throw httpError(409, "This refund already has its expense.");
+    const [order] = await tx.select({ id: orders.id, customerId: orders.customerId, orderNumber: orders.orderNumber })
+      .from(orders).where(eq(orders.id, refund.orderId)).limit(1);
+    const { surplus } = await realSurplus(order.id, tx);
+    if (round2(refund.amount) > surplus + 0.005) {
+      throw httpError(409, `The order now holds ₦${surplus.toLocaleString("en-NG")} beyond its value, less than the ₦${Number(refund.amount).toLocaleString("en-NG")} requested — cancel this request rather than send it for approval.`);
+    }
+    const raised = await raiseRefundExpense(tx, { refund, order, staffId: refund.requestedBy });
+    return { refund, ...raised };
+  });
+  const { notifyExpenseStage } = require("./expenseNotifications.service");
+  await notifyExpenseStage({
+    expense: created.expense, stage: "verified",
+    note: "Overpayment refund — goes straight to the CFO",
+    actorId: created.refund.requestedBy, actorName: created.actorName,
+  }).catch((err) => console.error("[refunds] CFO notice failed:", err.message));
+  return created.expense;
+};
+
+/** The refund an expense pays, if it pays one. */
+const refundForExpense = async (expenseId) => {
+  const [row] = await db.select().from(orderRefunds).where(eq(orderRefunds.expenseId, Number(expenseId))).limit(1);
+  return row || null;
+};
+
 const requestRefund = async ({
   orderId, amount = null, destinationBank, destinationName, destinationNumber, reason = "", staffId = null,
 }) => {
@@ -617,10 +780,22 @@ const requestRefund = async ({
         },
         tx,
       );
-      return refund;
+      const raised = await raiseRefundExpense(tx, { refund, order, staffId });
+      return { refund: { ...refund, expenseId: raised.expense.id }, ...raised };
     });
-    announceRefund(created.id, "requested");
-    return created;
+    // The CFO desk hears about it the way it hears about every expense at its
+    // stage — the refund desk's own "refund to pay" notice would only repeat it.
+    try {
+      const { notifyExpenseStage } = require("./expenseNotifications.service");
+      notifyExpenseStage({
+        expense: created.expense, stage: "verified",
+        note: "Overpayment refund — goes straight to the CFO",
+        actorId: staffId, actorName: created.actorName,
+      }).catch(() => {});
+    } catch (err) {
+      console.error("[refunds] could not notify the CFO desk:", err.message);
+    }
+    return created.refund;
   } catch (e) {
     if (String(e?.cause?.code || e?.code) === "23505") {
       throw httpError(409, `${order.orderNumber} already has a refund waiting to be paid. Pay or cancel that one first.`);
@@ -651,11 +826,26 @@ const markRefundedTx = async ({ refundId, paidFromAccountId, paymentReference = 
     if (refund.status !== "requested") {
       throw httpError(409, refund.status === "refunded" ? "This refund is already marked paid." : "This refund was cancelled.");
     }
+    // Paid through its expense, and only there: two ways to pay one refund is
+    // one way to pay it twice.
+    if (refund.expenseId) {
+      throw httpError(409, "This refund is paid through Expenses — the Expenditure Officer marks its expense paid once it is approved.");
+    }
 
     const [account] = await tx.select().from(bankAccounts)
       .where(eq(bankAccounts.id, Number(paidFromAccountId))).limit(1);
     if (!account) throw httpError(400, "Choose the bank account the refund was paid from.");
 
+    return recordRefundPayment(tx, refund, { account, paymentReference, paidAt, staffId });
+  });
+};
+
+/**
+ * The money has left: the refund row on the order, the recompute, the refund
+ * marked paid. Shared by the refund desk (older refunds) and the expense chain.
+ * The surplus is re-read with the order locked — see markRefunded.
+ */
+async function recordRefundPayment(tx, refund, { account, paymentReference = "", paidAt = null, staffId = null }) {
     const [order] = await tx.select({ id: orders.id, orderNumber: orders.orderNumber })
       .from(orders).where(eq(orders.id, refund.orderId)).for("update").limit(1);
 
@@ -709,7 +899,80 @@ const markRefundedTx = async ({ refundId, paidFromAccountId, paymentReference = 
     }, tx);
 
     return { refund: updated, payment, order: after };
+}
+
+/**
+ * The Expenditure Officer marks a refund's expense paid.
+ *
+ * One transaction for both records: the refund on the order and the expense
+ * marked paid either both happen or neither does. The order's surplus is
+ * re-checked first (recordRefundPayment) — a request its order no longer
+ * covers is refused here rather than paid.
+ *
+ * A refund is paid in full. The expense chain lets an ordinary payment settle
+ * for less than was approved, with a reason; a refund of part of what was
+ * requested would leave the rest looking owed and paid at once.
+ */
+const payRefundExpense = async ({ expenseId, payment, note = "", actorId = null, actorName = "" }) => {
+  const result = await db.transaction(async (tx) => {
+    const [refund] = await tx.select().from(orderRefunds)
+      .where(eq(orderRefunds.expenseId, Number(expenseId))).for("update").limit(1);
+    if (!refund) throw httpError(404, "No refund is paid by this expense.");
+    if (refund.status !== "requested") {
+      throw httpError(409, refund.status === "refunded" ? "This refund is already paid." : "This refund was cancelled, so its expense cannot be paid.");
+    }
+    if (Math.abs(Number(payment.amount_paid) - Number(refund.amount)) > 0.005) {
+      throw httpError(400, `A refund is paid in full: ₦${Number(refund.amount).toLocaleString("en-NG")} was approved.`);
+    }
+    const account = await accountFromLabel(tx, payment.bank_paid_from);
+    const paid = await recordRefundPayment(tx, refund, {
+      account, paymentReference: payment.payment_reference, paidAt: payment.payment_date, staffId: actorId,
+    });
+    const [expense] = rowsOf(await tx.execute(sql`
+      UPDATE pfi_expenses
+         SET status = 'paid', reviewed_by = ${actorId}, reviewed_at = now(), review_note = ${note || ""},
+             paid_by = ${actorId}, paid_at = now(), updated_at = now(),
+             bank_paid_from = ${payment.bank_paid_from}, amount_paid = ${payment.amount_paid},
+             payment_reference = ${payment.payment_reference || ""}, payment_date = ${payment.payment_date},
+             payment_method = ${payment.payment_method || ""}, payment_notes = ${payment.payment_notes || ""}
+       WHERE id = ${Number(expenseId)} AND status = 'admin_approved' AND deleted_at IS NULL
+       RETURNING *`));
+    if (!expense) throw httpError(409, "This expense is not approved for payment yet.");
+    await expenseAudit(tx, expenseId, "paid", {
+      status: ["admin_approved", "paid"], note,
+      amount_requested: refund.amount, amount_paid: payment.amount_paid,
+      bank_paid_from: payment.bank_paid_from, payment_date: payment.payment_date,
+      ...(payment.payment_reference ? { payment_reference: payment.payment_reference } : {}),
+      refundId: refund.id, orderId: refund.orderId,
+    }, actorId, actorName);
+    return { expense, refund: paid.refund, payment: paid.payment, order: paid.order };
   });
+  announceRefund(result.refund.id, "paid");
+  return result;
+};
+
+/**
+ * The refund's expense was rejected: the refund is cancelled with the same
+ * reason. Nothing about the order moves.
+ */
+const cancelForRejectedExpense = async ({ expenseId, note = "", actorId = null }) => {
+  const refund = await refundForExpense(expenseId);
+  if (!refund || refund.status !== "requested") return null;
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx.update(orderRefunds).set({
+      status: "cancelled", cancelledAt: new Date(), cancelledBy: actorId,
+      cancelReason: `Expense rejected: ${note}`.slice(0, 2000), updatedAt: new Date(),
+    }).where(and(eq(orderRefunds.id, refund.id), eq(orderRefunds.status, "requested"))).returning();
+    if (row) {
+      await auditLogRepo.record({
+        entityType: "order", entityId: refund.orderId, action: "order.refund_cancelled",
+        actor: actorFor(actorId), metadata: { refundId: refund.id, amount: refund.amount, reason: row.cancelReason, expenseId },
+      }, tx);
+    }
+    return row;
+  });
+  if (updated) announceRefund(updated.id, "cancelled");
+  return updated;
 };
 
 /**
@@ -819,6 +1082,7 @@ const cancelRefundTx = async ({ refundId, reason = "", staffId = null }) => {
     const [updated] = await tx.update(orderRefunds).set({
       status: "cancelled", cancelledAt: new Date(), cancelledBy: staffId, cancelReason: why.slice(0, 2000), updatedAt: new Date(),
     }).where(eq(orderRefunds.id, refund.id)).returning();
+    await withdrawRefundExpense(tx, refund.expenseId, `Refund request cancelled: ${why}`, staffId);
     await auditLogRepo.record({
       entityType: "order", entityId: refund.orderId, action: "order.refund_cancelled",
       actor: actorFor(staffId), metadata: { refundId: refund.id, amount: refund.amount, reason: why },
@@ -849,6 +1113,19 @@ const undoRefund = async ({ refundId, reason = "", staffId = null }) => {
     const [updated] = await tx.update(orderRefunds).set({
       status: "requested", paidAt: null, paidBy: null, paidFromAccountId: null, paymentReference: "", updatedAt: new Date(),
     }).where(eq(orderRefunds.id, refund.id)).returning();
+    // Marked paid by mistake: its expense goes back to awaiting payment, so
+    // the two still agree and it can be paid properly.
+    if (refund.expenseId) {
+      const [back] = rowsOf(await tx.execute(sql`
+        UPDATE pfi_expenses SET status = 'admin_approved', paid_by = NULL, paid_at = NULL,
+               review_note = ${`Refund undone: ${why}`.slice(0, 2000)}, reviewed_by = ${staffId ?? null},
+               reviewed_at = now(), updated_at = now()
+         WHERE id = ${Number(refund.expenseId)} AND status = 'paid' RETURNING id`));
+      if (back) {
+        await expenseAudit(tx, refund.expenseId, "admin_approved",
+          { status: ["paid", "admin_approved"], note: `Refund undone: ${why}` }, staffId, await staffName(tx, staffId));
+      }
+    }
 
     await auditLogRepo.record({
       entityType: "order", entityId: refund.orderId, action: "order.refund_undone",
@@ -860,6 +1137,10 @@ const undoRefund = async ({ refundId, reason = "", staffId = null }) => {
 };
 
 module.exports = {
+  raiseExpenseForOpenRefund,
+  payRefundExpense,
+  cancelForRejectedExpense,
+  refundForExpense,
   closeUncoveredRequests,
   RESURRECTED_PAYMENT_IDS_SQL,
   realSurplus,

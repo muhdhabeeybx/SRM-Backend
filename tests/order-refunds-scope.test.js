@@ -8,7 +8,7 @@ const refundService = require("../services/orderRefund.service");
 const { recomputeOrder } = require("../services/orderPayment.service");
 const { db } = require("../config/db");
 const { orderRepo } = require("../repositories");
-const { closeDb } = require("./helpers");
+const { closeDb, payRefundThroughExpense } = require("./helpers");
 const { client } = require("../config/db");
 
 /**
@@ -143,7 +143,7 @@ describe("overpayment refunds — scope, money already moved, stale requests, th
     assert.equal(row.stale, true, "the page must not offer to pay this");
     assert.equal(row.currentSurplus, 0);
     await assert.rejects(
-      () => refundService.markRefunded({ refundId: refund.id, paidFromAccountId: accountId }),
+      () => payRefundThroughExpense({ refundId: refund.id, paidFromAccountId: accountId }),
       (e) => e.status === 409,
     );
     await refundService.cancelRefund({ refundId: refund.id, reason: "Payments corrected" });
@@ -177,7 +177,7 @@ describe("overpayment refunds — scope, money already moved, stale requests, th
     const refund = await refundService.requestRefund({
       orderId: order, destinationBank: "GTBank", destinationName: "Paid Ok", destinationNumber: "0123456789",
     });
-    const result = await refundService.markRefunded({ refundId: refund.id, paidFromAccountId: accountId });
+    const result = await payRefundThroughExpense({ refundId: refund.id, paidFromAccountId: accountId });
     assert.equal(result.refund.status, "refunded");
   });
 
@@ -186,7 +186,7 @@ describe("overpayment refunds — scope, money already moved, stale requests, th
       orderId: pfiOrder, destinationBank: "Zenith", destinationName: "Scope Customer", destinationNumber: "0011223344",
       reason: "Overpaid by transfer",
     });
-    await refundService.markRefunded({ refundId: refund.id, paidFromAccountId: accountId, paymentReference: "RF-REF-1" });
+    await payRefundThroughExpense({ refundId: refund.id, paidFromAccountId: accountId, paymentReference: "RF-REF-1" });
 
     const one = await refundService.getRefund({ refundId: refund.id, scopeUser: onPfi() });
     assert.equal(one.destinationNumber, "0011223344");

@@ -47,6 +47,8 @@ const expenseCategories = pgTable(
     pfiId: integer("pfi_id").references(() => pfis.id, { onDelete: "cascade" }),
     // System categories are PFI-backed and cannot be renamed or deleted by hand.
     isSystemCategory: boolean("is_system_category").default(false).notNull(),
+    /** Customer refunds (migration 0065): money returned, never a cost. */
+    isRefund: boolean("is_refund").default(false).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

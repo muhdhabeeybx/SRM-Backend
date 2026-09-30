@@ -6,6 +6,10 @@ const {
   detailRows,
   callToAction,
   callout,
+  receiptHero,
+  receiptTable,
+  sectionTitle,
+  contactLine,
   layout,
 } = require("./templates/email");
 const { renderDailyReportEmail } = require("./templates/dailyReportEmail");
@@ -25,6 +29,7 @@ const {
   companyLongName,
   smsPrefix,
   smsPrefixLoud,
+  supportPhones,
   supportSentence,
 } = require("../config/brand");
 
@@ -125,7 +130,7 @@ const simpleEmail = ({ subtitle, heading, intro, rows = [], cta, note, tone, sub
  */
 const proseEmail = ({ subject, subtitle, heading, paragraphs = [], rows = [], cta, note, tone }) => {
   const text = (p) =>
-    `<p style="margin:0 0 16px;color:#475569;font-size:15px;line-height:1.6;">${escapeHtml(p)}</p>`;
+    `<p style="margin:0 0 16px;color:#44504a;font-size:16px;line-height:1.65;">${escapeHtml(p)}</p>`;
   return {
     subject,
     html: layout({
@@ -137,7 +142,6 @@ const proseEmail = ({ subject, subtitle, heading, paragraphs = [], rows = [], ct
         cta?.url ? callToAction(cta.url, cta.label) : "",
         note ? callout(escapeHtml(note), tone || "info") : "",
       ].join(""),
-      footNote: `${companyLongName()} • This is an automated notification.`,
     }),
   };
 };
@@ -145,34 +149,151 @@ const proseEmail = ({ subject, subtitle, heading, paragraphs = [], rows = [], ct
 /** "1,000 Litres" with the unit Django used in its order copy. */
 const unitLabel = (d) => d.unit || d.unitLabel || "Litres";
 
+/** "Pickup · Kano Depot" / "Delivery · 12 Bank Road, Kano" — or "" when unknown. */
+const collectionLine = (d) => {
+  const type = String(d.deliveryType || "").toLowerCase();
+  if (type === "pickup") return d.depotName ? `Pickup · ${d.depotName}` : "Pickup";
+  if (type === "delivery") {
+    const where = [d.deliveryAddress || d.address, d.state].filter(Boolean).join(", ");
+    return where ? `Delivery · ${where}` : "Delivery";
+  }
+  return "";
+};
+
 /**
- * The middle paragraph of the payment-confirmation email.
- *
- * Django branched on `release_type` and produced one of three sentences. The
- * third is not a fallback for a bug — an order can legitimately be confirmed
- * before the customer has settled on collection or delivery — so it stays as a
- * real branch rather than being collapsed into one of the others.
+ * "What happens next" on the payment receipt. Three branches, as Django had:
+ * pickup, delivery, and not yet settled — an order can legitimately be paid
+ * before the customer has chosen, so the last is a real case, not a fallback.
+ * Written for someone who has just parted with a large sum: say it is done,
+ * then say exactly what they do now.
  */
-const releaseSentence = (d) => {
+const nextStepAfterPayment = (d) => {
   const type = String(d.deliveryType || "").toLowerCase();
   const where = [d.deliveryAddress || d.address, d.state].filter(Boolean).join(", ");
 
-  if (type === "delivery" && where) {
-    return (
-      `Your order has been approved and scheduled for delivery to ${where}. ` +
-      "Our logistics team will contact you with dispatch and estimated delivery details shortly."
-    );
-  }
   if (type === "pickup" && d.depotName) {
     return (
-      "Your order has been approved and released for processing. " +
-      `You may proceed to ${d.depotName} for product loading in line with your schedule.`
+      `Your order has been released for loading at ${d.depotName}. ` +
+      "Bring your truck in whenever it suits your schedule, and we'll keep you posted as it is loaded."
+    );
+  }
+  if (type === "delivery" && where) {
+    return (
+      `Your order is scheduled for delivery to ${where}. ` +
+      "Our logistics team will be in touch shortly with dispatch details and an estimated arrival time."
     );
   }
   return (
-    "You may proceed to the selected Depot for product loading, or await delivery to " +
-    "the address provided during checkout, as applicable."
+    "Your order has been released. Head to your selected depot for loading, " +
+    "or look out for delivery to the address you gave at checkout."
   );
+};
+
+/**
+ * The payment receipt — the one email a customer forwards to their accounts
+ * desk, so it leads with the money and reads as a receipt: what was received,
+ * against which order, for what, and what happens next.
+ *
+ * Built directly on layout() rather than through proseEmail, whose single
+ * column of paragraphs is what made the old version read like an SMS pasted
+ * into a template.
+ */
+const paymentConfirmedEmail = (d) => {
+  const paid = Number(d.amountPaid ?? d.totalAmount);
+  const total = Number(d.totalAmount);
+  const received = formatMoney(paid);
+  const balance = Number.isFinite(paid) && Number.isFinite(total) && total - paid > 0.005 ? total - paid : 0;
+  const qty = d.quantity ? smsQuantity(d.quantity, unitLabel(d)) : "";
+  const url = portalLink(`/orders/${d.orderId}`);
+  const first = firstName(d.customerName);
+  const next = nextStepAfterPayment(d);
+  const orderRef = ref(d);
+
+  // The day the money was confirmed, in Lagos time — a server on UTC would
+  // otherwise date a late-evening payment to the next morning.
+  const paidOn = new Date(d.paidAt || Date.now()).toLocaleDateString("en-GB", {
+    timeZone: "Africa/Lagos",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+
+  const para = (html, extra = "") =>
+    `<p style="margin:0 0 32px;color:#44504a;font-size:16px;line-height:1.65;${extra}">${html}</p>`;
+
+  const html = layout({
+    subtitle: "Payment receipt",
+    preheader: `${received} received for order ${orderRef}. ${next}`,
+    hero: receiptHero({
+      label: balance ? "Part payment received" : "Payment received",
+      amount: received,
+      caption: `Order ${orderRef} · ${paidOn}`,
+    }),
+    heading: first ? `Thank you, ${first}.` : "Thank you for your payment.",
+    bodyHtml: [
+      para(
+        `Your payment for order <span style="color:#0f1a14;font-weight:600;">${escapeHtml(orderRef)}</span> ` +
+          "has been confirmed. Here's your receipt."
+      ),
+      receiptTable(
+        [
+          { label: "Order reference", value: orderRef },
+          { label: "Payment date", value: paidOn },
+          { label: "Product", value: d.product },
+          { label: "Quantity", value: qty },
+          { label: "Collection", value: collectionLine(d) },
+          ...(balance
+            ? [
+                { label: "Order total", value: formatMoney(total) },
+                { label: "Balance outstanding", value: formatMoney(balance) },
+              ]
+            : []),
+        ],
+        { title: "Receipt", total: { label: "Amount paid", value: received } }
+      ),
+      sectionTitle("What happens next"),
+      para(escapeHtml(next), "margin-bottom:28px;"),
+      url ? callToAction(url, "Track your order") : "",
+      contactLine(supportPhones(), { lead: "Need help with this order?" }),
+      para(
+        `Thank you for choosing ${escapeHtml(companyName())},<br>` +
+          `<span style="color:#0f1a14;font-weight:600;">${escapeHtml(companyLongName())}</span>`,
+        "margin-bottom:36px;"
+      ),
+    ].join(""),
+  });
+
+  const text = [
+    first ? `Thank you, ${first}.` : "Thank you for your payment.",
+    "",
+    `Your payment for order ${orderRef} has been confirmed. Here's your receipt.`,
+    "",
+    "RECEIPT",
+    `Order reference: ${orderRef}`,
+    `Payment date: ${paidOn}`,
+    d.product ? `Product: ${d.product}` : null,
+    qty ? `Quantity: ${qty}` : null,
+    collectionLine(d) ? `Collection: ${collectionLine(d)}` : null,
+    balance ? `Order total: ${formatMoney(total)}` : null,
+    balance ? `Balance outstanding: ${formatMoney(balance)}` : null,
+    `Amount paid: ${received}`,
+    "",
+    "WHAT HAPPENS NEXT",
+    next,
+    "",
+    url ? `Track your order: ${url}` : null,
+    "",
+    supportPhones().length ? `Need help with this order? Call us on ${supportPhones().join(" · ")}` : null,
+    "",
+    `Thank you for choosing ${companyName()},`,
+    companyLongName(),
+  ]
+    .filter((line) => line !== null)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return { subject: `Payment received for order ${orderRef}`, html, text };
 };
 
 // ─── Scheduled reports ──────────────────────────────────────────────────────
@@ -942,21 +1063,7 @@ const CATALOG = {
       `${d.depotName ? ` at ${d.depotName}` : ""}. ` +
       `Your order is confirmed. ${smsThanks()}`,
 
-    // Django: "Payment Confirmation & Order Processing – {order_reference}"
-    email: (d) =>
-      proseEmail({
-        subject: `Payment Confirmation & Order Processing – ${ref(d)}`,
-        subtitle: "Payment Confirmed",
-        heading: "We have received your payment",
-        paragraphs: [
-          `Dear ${d.customerName || "Customer"},`,
-          `We confirm receipt of ${formatMoney(d.amountPaid ?? d.totalAmount)} for Order Ref: ${ref(d)}.`,
-          releaseSentence(d),
-          supportSentence(),
-          "Thank you for your continued patronage.",
-        ],
-        cta: { url: portalLink(`/orders/${d.orderId}`), label: "View Order" },
-      }),
+    email: (d) => paymentConfirmedEmail(d),
   },
 
   /** data: orderId, orderNumber, reference, customerName, depotName, ticketNumber */

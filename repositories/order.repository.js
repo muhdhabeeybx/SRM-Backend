@@ -1633,6 +1633,13 @@ const findPayableOrders = async (scopeUser) => {
        * order is the one number here that must not be wrong.
        */
       pfiNumber: pfis.pfiNumber,
+      /**
+       * The PFI's id, not only its number. The confirm-payment dialog finds
+       * the accounts a PFI collects into by id, and without it here every
+       * order on this desk opened on "pick a bank account" from all of them,
+       * instead of on the PFI's own account with its statement already listed.
+       */
+      pfiId: orders.pfiId,
       customerPhone: customers.phone,
       amountPaid: sql`(
         SELECT COALESCE(SUM(op.amount), 0)

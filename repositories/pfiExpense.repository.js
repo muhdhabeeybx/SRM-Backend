@@ -82,6 +82,9 @@ const aggregatesFor = async (ids) => {
              COUNT(*) FILTER (WHERE e.status = ANY(${OPEN_STATES}))::int AS open_lines
       FROM pfi_expenses e
       WHERE e.pfi_id = ANY(${list}) AND e.deleted_at IS NULL
+        -- A customer refund sits under its PFI so it can be found there, but
+        -- it is money returned, never a cost of the cargo (migration 0065).
+        AND NOT EXISTS (SELECT 1 FROM expense_categories rc WHERE rc.id = e.category_id AND rc.is_refund)
       GROUP BY e.pfi_id
     `,
     // Invoiced value on every order whose payment is confirmed — the same
@@ -573,7 +576,8 @@ const listExpenses = async ({
 
   const [rows, [totals], [counts], banks, submitters] = await Promise.all([
     client`
-      SELECT e.*, ${GL_COLS}, c.is_system_category, p.pfi_number,
+      SELECT e.*, ${GL_COLS}, c.is_system_category, c.is_refund, p.pfi_number,
+             (SELECT r.id FROM order_refunds r WHERE r.expense_id = e.id LIMIT 1) AS refund_id,
              dc.name AS station_name, ls.name AS plant_name,
              sub.first_name || ' ' || sub.surname AS submitted_by_name,
              rev.first_name || ' ' || rev.surname AS reviewed_by_name,
@@ -595,11 +599,16 @@ const listExpenses = async ({
     client`
       SELECT
         COUNT(*)::int AS count,
-        COALESCE(SUM(${SPEND}), 0)::text AS total,
-        COALESCE(SUM(${SPEND}) FILTER (WHERE e.pfi_id IS NOT NULL), 0)::text AS pfi_total,
-        COALESCE(SUM(${SPEND}) FILTER (WHERE e.pfi_id IS NULL), 0)::text AS general_total,
-        COALESCE(SUM(${SPEND}) FILTER (WHERE e.status = 'paid'), 0)::text AS paid_total,
-        COALESCE(SUM(e.amount_ngn) FILTER (WHERE e.status = ANY(${OPEN_STATES})), 0)::text AS open_total,
+        -- Customer refunds (migration 0065) are money returned, not spent, so
+        -- every spending figure below leaves them out and they are totalled
+        -- on their own. They are still counted: they still need approving.
+        COALESCE(SUM(${SPEND}) FILTER (WHERE NOT c.is_refund), 0)::text AS total,
+        COALESCE(SUM(${SPEND}) FILTER (WHERE e.pfi_id IS NOT NULL AND NOT c.is_refund), 0)::text AS pfi_total,
+        COALESCE(SUM(${SPEND}) FILTER (WHERE e.pfi_id IS NULL AND NOT c.is_refund), 0)::text AS general_total,
+        COALESCE(SUM(${SPEND}) FILTER (WHERE e.status = 'paid' AND NOT c.is_refund), 0)::text AS paid_total,
+        COALESCE(SUM(e.amount_ngn) FILTER (WHERE e.status = ANY(${OPEN_STATES}) AND NOT c.is_refund), 0)::text AS open_total,
+        COALESCE(SUM(${SPEND}) FILTER (WHERE c.is_refund AND e.status <> 'rejected'), 0)::text AS refund_total,
+        COUNT(*) FILTER (WHERE c.is_refund)::int AS refund_count,
         -- How much of the set above the naira totals could NOT include.
         --
         -- A foreign invoice may be recorded without a rate, and then it has no
@@ -667,6 +676,9 @@ const listExpenses = async ({
       whtTotal: Number(totals.wht_total),
       vatPaid: Number(totals.vat_paid),
       whtPaid: Number(totals.wht_paid),
+      /** Customer refunds — money returned, kept out of every total above. */
+      refundTotal: Number(totals.refund_total),
+      refundCount: totals.refund_count,
     },
     statusCounts: counts,
     banks: banks.map((b) => b.bank_paid_from),
@@ -683,15 +695,28 @@ const listExpenses = async ({
 /** One expense with everything the detail view needs, in two queries. */
 const findExpenseFull = async (id) => {
   const [row] = await client`
-    SELECT e.*, ${GL_COLS}, c.is_system_category, p.pfi_number,
-           sub.first_name || ' ' || sub.surname AS submitted_by_name
+    SELECT e.*, ${GL_COLS}, c.is_system_category, c.is_refund, p.pfi_number,
+           sub.first_name || ' ' || sub.surname AS submitted_by_name,
+           -- The refund this expense pays (migration 0065), for the drawer to
+           -- say which order the money goes back on and where the refund stands.
+           r.id AS refund_id, r.order_id AS refund_order_id, r.status AS refund_status,
+           COALESCE(NULLIF(ro.company_name, ''), rc.company_name, '') AS refund_company,
+           rp.pfi_number AS refund_pfi_number
     FROM pfi_expenses e
+    LEFT JOIN order_refunds r ON r.expense_id = e.id
+    LEFT JOIN orders ro ON ro.id = r.order_id
+    LEFT JOIN customers rc ON rc.id = ro.customer_id
+    LEFT JOIN pfis rp ON rp.id = ro.pfi_id
     JOIN expense_categories c ON c.id = e.category_id
     LEFT JOIN pfis p ON p.id = e.pfi_id
     LEFT JOIN staff sub ON sub.id = COALESCE(e.added_by, e.recorded_by)
     WHERE e.id = ${Number(id)}
   `;
   if (!row) return null;
+  // The reference people know the order by ("RM12195"), not its stored number.
+  row.refund_order_reference = row.refund_order_id
+    ? require("../utils/helpers").generateOrderReference(row.refund_company, row.refund_order_id)
+    : null;
 
   const [attachments, history, comments] = await Promise.all([
     client`

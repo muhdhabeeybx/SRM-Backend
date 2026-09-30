@@ -292,3 +292,37 @@ module.exports = {
   seedLegacyHold,
   makeStatementLine,
 };
+
+
+/**
+ * Pay a refund the way the app does now: through its expense (migration 0065).
+ *
+ * The expense is moved straight to "Approved — awaiting payment" — the chain's
+ * approvals are tested in the expense suites, not here — and then marked paid,
+ * which is what records the refund on the order. A refund raised before
+ * refunds had expenses is paid from the refund desk as it always was.
+ */
+async function payRefundThroughExpense({ refundId, paidFromAccountId, paymentReference = "", staffId = null }) {
+  const refundService = require("../services/orderRefund.service");
+  const { client } = require("../config/db");
+  const [r] = await client`SELECT expense_id, amount FROM order_refunds WHERE id = ${Number(refundId)}`;
+  if (!r?.expense_id) {
+    return refundService.markRefunded({ refundId, paidFromAccountId, paymentReference, staffId });
+  }
+  await client`UPDATE pfi_expenses SET status = 'admin_approved'
+                WHERE id = ${r.expense_id} AND status IN ('verified', 'audit_approved')`;
+  const [a] = await client`SELECT bank_name, account_number FROM bank_accounts WHERE id = ${Number(paidFromAccountId)}`;
+  return refundService.payRefundExpense({
+    expenseId: r.expense_id,
+    payment: {
+      bank_paid_from: `${a?.bank_name || ""} · ${a?.account_number || ""}`,
+      amount_paid: String(r.amount),
+      payment_reference: paymentReference,
+      payment_date: new Date().toISOString(),
+      payment_method: "", payment_notes: "",
+    },
+    actorId: staffId,
+  });
+}
+
+module.exports.payRefundThroughExpense = payRefundThroughExpense;

@@ -6,6 +6,10 @@ const { allocationCodesFor } = require("../../lib/pfiScope");
 const { scopedStationIds, stationVisible } = require("../../lib/stationScope");
 const pfiBankScope = require("../../lib/pfiBankScope");
 
+/** The signed-in person's name, as the ledger writes it: "First Surname", else their email. */
+const actorName = (user) =>
+  user ? user.name || [user.firstName, user.surname].filter(Boolean).join(" ") || user.email || "" : "";
+
 /*
   ── Staff assigned to a PFI see its truck sales and no others ─────────────
 
@@ -109,7 +113,14 @@ const createDeliverySale = asyncHandler(async (req, res) => {
    * payment yet, a transfer between trucks, an expense — and it is left
    * exactly as it was.
    */
-  const { lineIds, bankAccountId, ...base } = req.body;
+  const { lineIds, bankAccountId, ...rest } = req.body;
+  /**
+   * Who recorded it comes from the session, never from the page. The page
+   * sent a name it read from browser storage and fell back to "Unknown" when
+   * that was empty — which it was for everybody after the login rework — so
+   * 600 rows since 24 August say "Unknown" instead of who keyed them.
+   */
+  const base = { ...rest, enteredBy: actorName(req.user) || rest.enteredBy || "" };
 
   // Only onto a batch of this person's PFI, and only from its accounts.
   const codes = await allocationCodesFor(req.user);
@@ -155,9 +166,7 @@ const createDeliverySale = asyncHandler(async (req, res) => {
  * an uploaded file could otherwise name anybody as its author.
  */
 const createDeliverySalesBulk = asyncHandler(async (req, res) => {
-  const actor = req.user
-    ? [req.user.firstName, req.user.surname].filter(Boolean).join(" ") || req.user.email || ""
-    : "";
+  const actor = actorName(req.user);
   const rows = req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" }));
 
   const codes = await allocationCodesFor(req.user);
@@ -254,7 +263,10 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "Sale record not found" });
   }
 
-  const updated = await deliverySaleRepo.update(sale.id, req.body);
+  // An edit is not a new author: whoever recorded the row stays on it. The
+  // page resends the whole row, "Unknown" and all, so it is dropped here.
+  const { enteredBy: _ignored, entered_by: _ignoredSnake, ...changes } = req.body;
+  const updated = await deliverySaleRepo.update(sale.id, changes);
 
   // An edit that puts a new customer on the truck, or first puts money on it,
   // is the same news as a new row saying so. Anything else is a correction.

@@ -94,6 +94,8 @@ const orderRefunds = pgTable(
     cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
     cancelledBy: integer("cancelled_by").references(() => staff.id, { onDelete: "set null" }),
     cancelReason: text("cancel_reason").notNull().default(""),
+    /** The expense that pays it (migration 0065). Null on refunds paid before that. */
+    expenseId: integer("expense_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

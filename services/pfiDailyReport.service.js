@@ -205,6 +205,8 @@ const buildPfiDailyReportData = async (date = new Date()) => {
      WHERE pfi_id IS NOT NULL
        AND deleted_at IS NULL
        AND status <> 'rejected'
+       -- Refunds sit under their PFI but are never its cost (migration 0065).
+       AND NOT EXISTS (SELECT 1 FROM expense_categories rc WHERE rc.id = pfi_expenses.category_id AND rc.is_refund)
      GROUP BY pfi_id`;
 
   /**
@@ -286,6 +288,8 @@ const buildPfiDailyReportData = async (date = new Date()) => {
      WHERE e.pfi_id IS NULL
        AND e.deleted_at IS NULL
        AND e.status <> 'rejected'
+       -- A customer refund is money returned, not overhead (migration 0065).
+       AND NOT COALESCE(c.is_refund, false)
      GROUP BY 1
      ORDER BY 1`;
 
@@ -743,6 +747,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       LEFT JOIN expense_categories c ON c.id = e.category_id
      WHERE e.deleted_at IS NULL
        AND e.status <> 'rejected'
+       AND NOT COALESCE(c.is_refund, false)
        AND ((e.expense_date >= ${startIso} AND e.expense_date < ${endIso})
          OR (e.paid_at      >= ${startIso} AND e.paid_at      < ${endIso}))
      ORDER BY e.amount_ngn DESC NULLS LAST, e.id`;

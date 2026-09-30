@@ -8,7 +8,7 @@ const { sql } = require("drizzle-orm");
 const refundService = require("../services/orderRefund.service");
 const { db, client } = require("../config/db");
 const { notifications } = require("../db/schema");
-const { closeDb, staffTokenWithRoles } = require("./helpers");
+const { closeDb, staffTokenWithRoles, payRefundThroughExpense } = require("./helpers");
 
 /**
  * A refund reaches the people it concerns: finance hears there is money to
@@ -58,16 +58,23 @@ describe("refund notices", () => {
     await closeDb();
   });
 
-  test("finance is told there is a refund to pay, with the account", async () => {
+  test("a refund raises its expense at the CFO, and whoever asked hears when it is paid", async () => {
     const refund = await refundService.requestRefund({
       orderId, destinationBank: "GTBank", destinationName: "Notice Customer", destinationNumber: "0123456789",
       staffId: requester.id,
     });
-    const hit = await waitFor("staff.refund_requested", refund.id, finance.id);
-    assert.ok(hit, "finance heard about it");
-    assert.match(hit.body, /Notice Customer · GTBank 0123456789/);
+    // The CFO desk is told through the expense chain now (expense.* notices),
+    // not by the refund desk's own "refund to pay".
+    const [row] = await client`
+      SELECT e.status::text AS status, e.payee_account_number, e.payee_account_name, e.pfi_id, c.is_refund
+        FROM order_refunds r JOIN pfi_expenses e ON e.id = r.expense_id JOIN expense_categories c ON c.id = e.category_id
+       WHERE r.id = ${refund.id}`;
+    assert.ok(row, "the refund has its expense");
+    assert.equal(row.status, "verified", "straight to the CFO");
+    assert.equal(row.payee_account_number, "0123456789");
+    assert.equal(row.is_refund, true);
 
-    await refundService.markRefunded({ refundId: refund.id, paidFromAccountId: accountId, paymentReference: "RN-REF", staffId: finance.id });
+    await payRefundThroughExpense({ refundId: refund.id, paidFromAccountId: accountId, paymentReference: "RN-REF", staffId: finance.id });
     const sent = await waitFor("staff.refund_decided", refund.id, requester.id);
     assert.ok(sent, "whoever asked heard it was sent");
     assert.match(sent.body, /was sent/);

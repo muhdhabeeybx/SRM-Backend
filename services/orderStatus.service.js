@@ -2,7 +2,7 @@ const { eq } = require("drizzle-orm");
 const { rolesFor } = require("../notifications/staffChoices");
 const { db } = require("../config/db");
 const { orders, customers } = require("../db/schema");
-const { auditLogRepo, customerRepo } = require("../repositories");
+const { auditLogRepo, customerRepo, depotRepo, productRepo } = require("../repositories");
 const { notify } = require("../notifications");
 const { generateOrderReference } = require("../utils/helpers");
 // Lazy: the step notices read orders through the same modules that load this one.
@@ -120,6 +120,15 @@ async function announce(order, toStatus, opts) {
       order.id
     );
 
+    // What was bought and where it leaves from. Without these the customer
+    // emails fell back to "proceed to the Depot, or await delivery, as
+    // applicable" — a sentence that tells a paying customer nothing. A failed
+    // lookup only makes the copy vaguer, so it must not cost the notification.
+    const [product, depot] = await Promise.all([
+      order.productId ? productRepo.findById(order.productId).catch(() => null) : null,
+      order.depotId ? depotRepo.findById(order.depotId).catch(() => null) : null,
+    ]);
+
     notify(type, {
       to: { customer },
       data: {
@@ -127,7 +136,13 @@ async function announce(order, toStatus, opts) {
         orderNumber: order.orderNumber,
         reference,
         customerName: customer.name,
+        product: product?.name,
+        unit: product?.unit,
         quantity: order.quantity,
+        depotName: depot?.name,
+        deliveryType: order.deliveryType,
+        deliveryAddress: order.deliveryAddress,
+        state: order.state,
         totalAmount: order.totalAmount,
         amountPaid: opts.metadata?.amountPaid ?? order.totalAmount,
         truckNumber: opts.metadata?.truckNumber,
