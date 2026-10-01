@@ -62,6 +62,19 @@ const assetUrl = (path) => {
 };
 const logoUrl = () => assetUrl("/logo-full.png");
 
+/**
+ * Bumped whenever an icon changes, and always on a new icon. ordersoroman.com
+ * sits behind Cloudflare, which caches for four hours, and the website answers
+ * an unknown path with its HTML page and a 200 — so an icon URL requested once
+ * before its deploy landed is cached as a web page and stays broken for hours.
+ * A fresh query string is a fresh cache key.
+ */
+const ICON_VERSION = "2";
+const iconUrl = (name) => {
+  const url = assetUrl(`/email/${name}.png`);
+  return url ? `${url}?v=${ICON_VERSION}` : "";
+};
+
 function escapeHtml(str) {
   return String(str ?? "").replace(
     /[&<>"']/g,
@@ -134,7 +147,7 @@ const em = (value) => `<span style="color:${BRAND.heading};font-weight:600;">${e
  */
 function hero({ tone = "success", label, value = "", caption = "" }) {
   const t = TONES[tone] || TONES.success;
-  const icon = assetUrl(`/email/${t.icon}.png`);
+  const icon = iconUrl(t.icon);
   return `
             <tr>
               <td class="pad" align="center" style="padding:44px 44px 40px;background-color:${t.bg};border-top:1px solid ${t.line};border-bottom:1px solid ${t.line};text-align:center;">
