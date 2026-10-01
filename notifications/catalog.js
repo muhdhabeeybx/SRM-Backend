@@ -1,16 +1,11 @@
 const {
   escapeHtml,
+  em,
   formatMoney,
   formatQuantity,
   formatDate,
-  detailRows,
-  callToAction,
-  callout,
-  receiptHero,
-  receiptTable,
-  sectionTitle,
-  contactLine,
-  layout,
+  lagosDate,
+  documentEmail,
 } = require("./templates/email");
 const { renderDailyReportEmail } = require("./templates/dailyReportEmail");
 const { renderPfiDailyReportEmail } = require("./templates/pfiDailyReportEmail");
@@ -97,57 +92,18 @@ const greet = (name, { formal = true } = {}) => {
 };
 const ref = (d) => d.reference || d.orderNumber || d.requestNumber || d.ticketNumber || "";
 
-/** The generic branded email used when a type has no bespoke document. */
-const simpleEmail = ({ subtitle, heading, intro, rows = [], cta, note, tone, subject }) => ({
-  subject: subject || heading,
-  html: layout({
-    subtitle,
-    heading,
-    intro,
-    bodyHtml: [
-      rows.length ? detailRows(rows) : "",
-      cta?.url ? callToAction(cta.url, cta.label) : "",
-      note ? callout(escapeHtml(note), tone || "info") : "",
-    ].join(""),
-    footNote: supportSentence() || "If you have any questions, please contact our support team.",
-  }),
-});
-
 /**
- * Paragraph copy, ported verbatim from the Django templates.
- *
- * Those bodies were authored as plain text and wrapped at send time. Rather
- * than re-flow them into detail tables — which would change wording customers
- * already recognise — the sentences are kept and rendered as paragraphs inside
- * the same branded shell every other notification uses.
- *
- * This is deliberately the ONLY renderer for ported copy. In Django three
- * templates (Order Delivered, Payment Failed, Low Stock) were authored as raw
- * HTML, so the sender detected `<html>` and passed them through unwrapped:
- * they arrived as bare Arial with a green or red `<h2>`, visibly a different
- * product from the rest of the mail. Porting them through here is what closes
- * that gap.
+ * Every email below is a documentEmail() — see notifications/templates/email.js
+ * for the blocks. Customer mail closes with the help line and the sign-off;
+ * staff mail does not, since staff are not the ones who ring support.
  */
-const proseEmail = ({ subject, subtitle, heading, paragraphs = [], rows = [], cta, note, tone }) => {
-  const text = (p) =>
-    `<p style="margin:0 0 16px;color:#44504a;font-size:16px;line-height:1.65;">${escapeHtml(p)}</p>`;
-  return {
-    subject,
-    html: layout({
-      subtitle,
-      heading,
-      bodyHtml: [
-        paragraphs.filter(Boolean).map(text).join(""),
-        rows.length ? detailRows(rows) : "",
-        cta?.url ? callToAction(cta.url, cta.label) : "",
-        note ? callout(escapeHtml(note), tone || "info") : "",
-      ].join(""),
-    }),
-  };
-};
+const customerClose = [{ type: "help" }, { type: "signoff" }];
 
 /** "1,000 Litres" with the unit Django used in its order copy. */
 const unitLabel = (d) => d.unit || d.unitLabel || "Litres";
+
+/** "45,000 Litres" in the house spelling, or "" without a quantity. */
+const orderQuantity = (d) => (d.quantity ? smsQuantity(d.quantity, unitLabel(d)) : "");
 
 /** "Pickup · Kano Depot" / "Delivery · 12 Bank Road, Kano" — or "" when unknown. */
 const collectionLine = (d) => {
@@ -194,53 +150,45 @@ const nextStepAfterPayment = (d) => {
  * desk, so it leads with the money and reads as a receipt: what was received,
  * against which order, for what, and what happens next.
  *
- * Built directly on layout() rather than through proseEmail, whose single
- * column of paragraphs is what made the old version read like an SMS pasted
- * into a template.
+ * Leads with the money in the hero band, so the figure a customer forwards to
+ * their accounts desk is the first thing on the page.
  */
 const paymentConfirmedEmail = (d) => {
   const paid = Number(d.amountPaid ?? d.totalAmount);
   const total = Number(d.totalAmount);
   const received = formatMoney(paid);
   const balance = Number.isFinite(paid) && Number.isFinite(total) && total - paid > 0.005 ? total - paid : 0;
-  const qty = d.quantity ? smsQuantity(d.quantity, unitLabel(d)) : "";
-  const url = portalLink(`/orders/${d.orderId}`);
   const first = firstName(d.customerName);
   const next = nextStepAfterPayment(d);
   const orderRef = ref(d);
+  const paidOn = lagosDate(d.paidAt || Date.now());
 
-  // The day the money was confirmed, in Lagos time — a server on UTC would
-  // otherwise date a late-evening payment to the next morning.
-  const paidOn = new Date(d.paidAt || Date.now()).toLocaleDateString("en-GB", {
-    timeZone: "Africa/Lagos",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
-
-  const para = (html, extra = "") =>
-    `<p style="margin:0 0 32px;color:#44504a;font-size:16px;line-height:1.65;${extra}">${html}</p>`;
-
-  const html = layout({
+  return documentEmail({
+    subject: `Payment received for order ${orderRef}`,
     subtitle: "Payment receipt",
     preheader: `${received} received for order ${orderRef}. ${next}`,
-    hero: receiptHero({
+    hero: {
+      tone: "success",
       label: balance ? "Part payment received" : "Payment received",
-      amount: received,
+      value: received,
       caption: `Order ${orderRef} · ${paidOn}`,
-    }),
+    },
     heading: first ? `Thank you, ${first}.` : "Thank you for your payment.",
-    bodyHtml: [
-      para(
-        `Your payment for order <span style="color:#0f1a14;font-weight:600;">${escapeHtml(orderRef)}</span> ` +
-          "has been confirmed. Here's your receipt."
-      ),
-      receiptTable(
-        [
+    blocks: [
+      {
+        type: "text",
+        html: `Your payment for order ${em(orderRef)} has been confirmed. Here's your receipt.`,
+        plain: `Your payment for order ${orderRef} has been confirmed. Here's your receipt.`,
+        last: true,
+      },
+      {
+        type: "table",
+        title: "Receipt",
+        rows: [
           { label: "Order reference", value: orderRef },
           { label: "Payment date", value: paidOn },
           { label: "Product", value: d.product },
-          { label: "Quantity", value: qty },
+          { label: "Quantity", value: orderQuantity(d) },
           { label: "Collection", value: collectionLine(d) },
           ...(balance
             ? [
@@ -249,51 +197,14 @@ const paymentConfirmedEmail = (d) => {
               ]
             : []),
         ],
-        { title: "Receipt", total: { label: "Amount paid", value: received } }
-      ),
-      sectionTitle("What happens next"),
-      para(escapeHtml(next), "margin-bottom:28px;"),
-      url ? callToAction(url, "Track your order") : "",
-      contactLine(supportPhones(), { lead: "Need help with this order?" }),
-      para(
-        `Thank you for choosing ${escapeHtml(companyName())},<br>` +
-          `<span style="color:#0f1a14;font-weight:600;">${escapeHtml(companyLongName())}</span>`,
-        "margin-bottom:36px;"
-      ),
-    ].join(""),
+        total: { label: "Amount paid", value: received },
+      },
+      { type: "next", text: next },
+      { type: "button", url: portalLink(`/orders/${d.orderId}`), label: "Track your order" },
+      { type: "help", lead: "Need help with this order?" },
+      { type: "signoff" },
+    ],
   });
-
-  const text = [
-    first ? `Thank you, ${first}.` : "Thank you for your payment.",
-    "",
-    `Your payment for order ${orderRef} has been confirmed. Here's your receipt.`,
-    "",
-    "RECEIPT",
-    `Order reference: ${orderRef}`,
-    `Payment date: ${paidOn}`,
-    d.product ? `Product: ${d.product}` : null,
-    qty ? `Quantity: ${qty}` : null,
-    collectionLine(d) ? `Collection: ${collectionLine(d)}` : null,
-    balance ? `Order total: ${formatMoney(total)}` : null,
-    balance ? `Balance outstanding: ${formatMoney(balance)}` : null,
-    `Amount paid: ${received}`,
-    "",
-    "WHAT HAPPENS NEXT",
-    next,
-    "",
-    url ? `Track your order: ${url}` : null,
-    "",
-    supportPhones().length ? `Need help with this order? Call us on ${supportPhones().join(" · ")}` : null,
-    "",
-    `Thank you for choosing ${companyName()},`,
-    companyLongName(),
-  ]
-    .filter((line) => line !== null)
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-  return { subject: `Payment received for order ${orderRef}`, html, text };
 };
 
 // ─── Scheduled reports ──────────────────────────────────────────────────────
@@ -308,17 +219,21 @@ const paymentConfirmedEmail = (d) => {
  * does not survive that round trip intact.
  */
 const reportEmail = ({ subject, heading, rows = [], emptyNote, d = {} }) => {
-  const mail = proseEmail({
+  const mail = documentEmail({
     subject,
-    subtitle: "Scheduled Report",
+    subtitle: "Scheduled report",
     heading,
-    paragraphs: [
-      "Dear Sir,",
-      emptyNote ||
-        "Please find the report for today attached. A summary is shown below.",
+    blocks: [
+      { type: "text", text: "Dear Sir," },
+      {
+        type: "text",
+        text: emptyNote || "Please find today's report attached. A summary is below.",
+        last: true,
+      },
+      { type: "table", title: "Summary", rows },
+      d.filename && { type: "note", tone: "info", title: "Attached", text: d.filename },
+      { type: "signoff", lines: ["Best regards,", `${companyName()} System`] },
     ],
-    rows,
-    note: d.filename ? `Attached: ${d.filename}` : null,
   });
   return {
     ...mail,
@@ -351,21 +266,41 @@ function expenseStages() {
     actionUrl: (d) => adminLink(`/expenses?expense=${d.expenseId}`),
   };
 
-  /** Every stage email is the same document with a different lead sentence. */
-  const mail = (d, { subject, heading, lead, rows, note, tone }) =>
-    proseEmail({
+  /**
+   * Every stage email is the same document with a different lead sentence.
+   * `status` is the short line in the hero band ("Awaiting your verification")
+   * and `state` its colour: waiting, done, sent back or rejected.
+   */
+  const mail = (d, { subject, heading, lead, rows, note, tone, status, state, payee }) =>
+    documentEmail({
       subject: `${subject} — ${expenseRef(d)}`,
       subtitle: "Expenses",
+      preheader: lead,
+      hero: {
+        tone: state || tone || "pending",
+        label: status || heading,
+        value: formatMoney(d.amount),
+        caption: [expenseRef(d), d.description || d.category].filter(Boolean).join(" · "),
+      },
       heading,
-      paragraphs: [lead],
-      rows: [
-        { label: "Reference", value: expenseRef(d) },
-        { label: "Amount", value: formatMoney(d.amount), strong: true },
-        ...(rows || []),
+      blocks: [
+        { type: "text", text: lead, last: true },
+        {
+          type: "table",
+          title: "Expense",
+          rows: [{ label: "Reference", value: expenseRef(d) }, ...(rows || [])],
+          total: { label: "Amount", value: formatMoney(d.amount) },
+        },
+        payee && {
+          type: "payTo",
+          accountNumber: d.payeeAccountNumber,
+          bank: d.payeeBankName,
+          accountName: d.payeeAccountName,
+          amount: formatMoney(d.amount),
+        },
+        note && { type: "note", tone: tone === "danger" || tone === "warning" ? tone : "info", text: note },
+        { type: "button", url: adminLink(`/expenses?expense=${d.expenseId}`), label: "Open expense" },
       ],
-      note,
-      tone,
-      cta: { url: adminLink(`/expenses?expense=${d.expenseId}`), label: "Open Expense" },
     });
 
   const payeeRows = (d) => [{ label: "Payee", value: payeeLine(d) }];
@@ -402,6 +337,8 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "New expense request awaiting verification",
+          status: "Awaiting your verification",
+          state: "pending",
           heading: "An expense request needs your verification",
           lead: "A new expense request needs your verification.",
           rows: [
@@ -423,6 +360,8 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "Expense verified — awaiting CFO approval",
+          status: "Awaiting your CFO approval",
+          state: "pending",
           heading: "An expense is awaiting your CFO approval",
           lead: `${who(d)} has verified an expense request. It now needs CFO approval.`,
           rows: payeeRows(d),
@@ -439,6 +378,8 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "Expense CFO-approved — awaiting final approval",
+          status: "Awaiting your final approval",
+          state: "pending",
           heading: "An expense is awaiting your final approval",
           lead: `${who(d)} (CFO) approved an expense for payment. It now needs your final approval.`,
           rows: payeeRows(d),
@@ -463,7 +404,9 @@ function expenseStages() {
       body: (d) => `${formatMoney(d.amount)} — ${what(d)}`,
       email: (d) =>
         mail(d, {
-          subject: `${expenseRef(d)} — ${PROGRESS[d.stage]?.title || "update"}`,
+          subject: PROGRESS[d.stage]?.title || "Your expense moved on",
+          status: PROGRESS[d.stage]?.title || "Moved to the next step",
+          state: "success",
           heading: PROGRESS[d.stage]?.title || "Your expense moved on",
           lead: PROGRESS[d.stage]?.lead(d) || "Your expense request has moved to its next step.",
           rows: payeeRows(d),
@@ -481,13 +424,11 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "Expense approved for payment",
+          status: "Approved for payment",
+          state: "success",
           heading: "This expense is approved for payment",
           lead: `${who(d)} (Admin) gave final approval. You can now make the payment and mark it paid.`,
-          rows: [
-            { label: "Pay to", value: d.payeeAccountName },
-            { label: "Bank", value: d.payeeBankName },
-            { label: "Account", value: d.payeeAccountNumber },
-          ],
+          payee: true,
         }),
       sms: (d) =>
         `${smsPrefix()}${expenseRef(d)} for ${what(d)} is approved for payment. Please pay it and mark it paid.`,
@@ -502,6 +443,8 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "Expense paid",
+          status: "Paid",
+          state: "success",
           heading: "This expense has been paid",
           lead: `${who(d)} marked this expense as paid. It now counts towards the PFI's cost.`,
           rows: [
@@ -520,6 +463,7 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "Expense rejected",
+          status: "Rejected",
           heading: "This expense request was rejected",
           lead: `${who(d)} rejected this expense request.`,
           rows: [{ label: "Reason", value: d.note }],
@@ -539,6 +483,7 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "Expense sent back for changes",
+          status: "Sent back for changes",
           heading: "This expense request was sent back",
           lead: `${who(d)} sent this expense request back for changes.`,
           rows: [{ label: "Reason", value: d.note }],
@@ -564,6 +509,8 @@ function expenseStages() {
       email: (d) =>
         mail(d, {
           subject: "New comment on an expense request",
+          status: "New comment",
+          state: "info",
           heading: `${who(d)} commented on this expense request`,
           lead: `${who(d)} left a comment on a request you are involved in.`,
           rows: [
@@ -944,16 +891,22 @@ const announcement = (category) => ({
   // Only reached when a caller overrides `channels` to include email/sms
   // (e.g. the messaging page) — the default APP_ONLY set above never
   // touches either of these.
-  // proseEmail, not simpleEmail: the messaging composer's body can be
-  // multi-line (e.g. an inserted price list), and simpleEmail's `intro` is
-  // one <p> that would collapse every line break into a single paragraph.
+  // One paragraph per line: the messaging composer's body can be multi-line
+  // (e.g. an inserted price list), and one <p> would run every line together.
   email: (d) =>
-    proseEmail({
+    documentEmail({
       subject: d.title || "Announcement",
-      subtitle: "Announcement",
+      subtitle: category === "marketing" ? "News" : "Announcement",
+      preheader: String(d.body || "").split("\n")[0],
       heading: d.title || "Announcement",
-      paragraphs: String(d.body || "").split("\n"),
-      cta: d.actionUrl ? { url: d.actionUrl, label: "Learn more" } : undefined,
+      blocks: [
+        ...String(d.body || "")
+          .split("\n")
+          .filter((line) => line.trim())
+          .map((line, i, all) => ({ type: "text", text: line, last: i === all.length - 1 })),
+        d.actionUrl && { type: "button", url: d.actionUrl, label: "Learn more" },
+        { type: "signoff" },
+      ],
     }),
   // Without this, the engine's defaultSmsText fallback sends
   // "{title}. {body}" — doubling up the title (composed for the email
@@ -988,29 +941,43 @@ const CATALOG = {
     dedupe: (d) => (d.orderId ? `order.created:${d.orderId}` : null),
 
     // Django: "Payment Request & Order Confirmation | Ref: {order_reference}"
-    email: (d) =>
-      proseEmail({
-        subject: `Payment Request & Order Confirmation | Ref: ${ref(d)}`,
-        subtitle: "Order Confirmation",
-        heading: "Thank you for your order",
-        paragraphs: [
-          `Dear ${d.customerName || "Customer"},`,
-          "Thank you for your order. Please find the summary below:",
+    email: (d) => {
+      const first = firstName(d.customerName);
+      const amount = formatMoney(d.totalAmount);
+      return documentEmail({
+        subject: `Order ${ref(d)} received — payment details inside`,
+        subtitle: "Order confirmation",
+        preheader: `Pay ${amount} to confirm order ${ref(d)}.`,
+        hero: { tone: "pending", label: "Amount to pay", value: amount, caption: `Order ${ref(d)} · ${lagosDate()}` },
+        heading: first ? `Thank you for your order, ${first}.` : "Thank you for your order.",
+        blocks: [
+          {
+            type: "text",
+            html: `We've received order ${em(ref(d))}. To confirm it, pay the amount below into the account shown.`,
+            plain: `We've received order ${ref(d)}. To confirm it, pay the amount below into the account shown.`,
+            last: true,
+          },
+          {
+            type: "table",
+            title: "Order summary",
+            rows: [
+              { label: "Order reference", value: ref(d) },
+              { label: "Product", value: d.product },
+              { label: "Quantity", value: orderQuantity(d) },
+              { label: "Collection", value: collectionLine(d) },
+            ],
+            total: { label: "Amount to pay", value: amount },
+          },
+          { type: "payTo", accountNumber: d.accountNumber, bank: d.bankName, accountName: d.accountName },
+          {
+            type: "next",
+            text: "As soon as our finance team confirms your transfer, we'll email your receipt and release your order.",
+          },
+          { type: "button", url: portalLink(`/orders/${d.orderId}`), label: "Track your order" },
+          ...customerClose,
         ],
-        rows: [
-          { label: "Order Reference", value: ref(d) },
-          { label: "Product", value: d.product },
-          { label: "Quantity", value: formatQuantity(d.quantity, unitLabel(d)) },
-          { label: "Total Amount Payable", value: formatMoney(d.totalAmount), strong: true },
-          { label: "Bank Name", value: d.bankName },
-          { label: "Account Name", value: d.accountName },
-          { label: "Account Number", value: d.accountNumber },
-        ],
-        note:
-          "Kindly proceed with payment using the details above to enable immediate processing. " +
-          "Once payment is confirmed, your order will be processed promptly.",
-        cta: { url: portalLink(`/orders/${d.orderId}`), label: "View Order" },
-      }),
+      });
+    },
 
     // Django build_short_sms("order_created") — kept near 160 chars for credit cost.
     // No fallback bank details: Django fell back to a hardcoded account, which on
@@ -1122,22 +1089,47 @@ const CATALOG = {
       `${smsThanks()} We look forward to serving you again.`,
 
     // Django: "Order Successfully Completed – {order_reference}"
-    email: (d) =>
-      proseEmail({
-        subject: `Order Successfully Completed – ${ref(d)}`,
-        subtitle: "Order Complete",
-        heading: "Your order is complete",
-        paragraphs: [
-          `Dear ${d.customerName || "Customer"},`,
-          `Your order (Ref: ${ref(d)}) has been successfully completed.`,
-          "In accordance with your selected option, the product has either been loaded at the " +
-            `designated ${companyName()} depot or delivered to your specified address.`,
-          `Thank you for your prompt payment and continued trust in ${companyLongName()}.`,
-          supportSentence(),
-          "We look forward to serving you again.",
+    email: (d) => {
+      const first = firstName(d.customerName);
+      const type = String(d.deliveryType || "").toLowerCase();
+      const where = [d.deliveryAddress || d.address, d.state].filter(Boolean).join(", ");
+      const done =
+        type === "pickup" && d.depotName
+          ? `has been fully loaded at ${d.depotName}`
+          : type === "delivery" && where
+            ? `has been delivered to ${where}`
+            : "is complete";
+      return documentEmail({
+        subject: `Order ${ref(d)} is complete`,
+        subtitle: "Order complete",
+        preheader: `Order ${ref(d)} ${done}.`,
+        hero: { tone: "success", label: "Order complete", value: orderQuantity(d), caption: `Order ${ref(d)} · ${lagosDate()}` },
+        heading: first ? `All done, ${first}.` : "Your order is complete.",
+        blocks: [
+          {
+            type: "text",
+            html: `Order ${em(ref(d))} ${escapeHtml(done)}. Thank you for your prompt payment and for trusting us with it.`,
+            plain: `Order ${ref(d)} ${done}. Thank you for your prompt payment and for trusting us with it.`,
+            last: true,
+          },
+          {
+            type: "table",
+            title: "Order summary",
+            rows: [
+              { label: "Order reference", value: ref(d) },
+              { label: "Product", value: d.product },
+              { label: "Quantity", value: orderQuantity(d) },
+              { label: "Collection", value: collectionLine(d) },
+              { label: "Completed", value: lagosDate() },
+            ],
+          },
+          { type: "button", url: portalLink(`/orders/${d.orderId}`), label: "View your order" },
+          { type: "help" },
+          { type: "text", text: "We look forward to serving you again." },
+          { type: "signoff" },
         ],
-        cta: { url: portalLink(`/orders/${d.orderId}`), label: "View Order" },
-      }),
+      });
+    },
   },
 
   /** data: orderId, reference, customerName, reason */
@@ -1178,7 +1170,7 @@ const CATALOG = {
     audience: "customer",
     category: "tickets",
     priority: "high",
-    channels: APP_ONLY, // the QR-code email + SMS are ticket.service's bespoke pair
+    channels: APP_ONLY, // ticket.service sends the SMS; the payment receipt is the email
     title: (d) =>
       d.deliveryType === "delivery" ? `Order ${ref(d)} confirmed` : `Pickup ticket ${d.ticketNumber} ready`,
     body: (d) =>
@@ -1478,13 +1470,22 @@ const CATALOG = {
     data: (d) => ({ screen: "Licenses", licenseId: d.licenseId }),
     actionUrl: () => portalLink("/licenses"),
     dedupe: (d) => (d.licenseId ? `license.approved:${d.licenseId}` : null),
-    email: (d) =>
-      simpleEmail({
-        subtitle: "Licence Verification",
-        heading: "Your licence has been approved",
-        intro: `${greet(d.customerName)}we've verified your ${d.licenseType || "licence"}. No further action is needed.`,
-        cta: { url: portalLink("/licenses"), label: "View Licences" },
-      }),
+    email: (d) => {
+      const first = firstName(d.customerName);
+      const doc = d.licenseType || "licence";
+      return documentEmail({
+        subject: `Your ${doc} has been approved`,
+        subtitle: "Licence verification",
+        preheader: `We've verified your ${doc}. Nothing else is needed.`,
+        hero: { tone: "success", label: "Licence approved", caption: doc },
+        heading: first ? `Good news, ${first}.` : "Good news.",
+        blocks: [
+          { type: "text", text: `We've verified your ${doc}. There's nothing else you need to do.`, last: true },
+          { type: "button", url: portalLink("/licenses"), label: "View your licences" },
+          ...customerClose,
+        ],
+      });
+    },
   },
 
   /** data: customerName, licenseId, licenseType, reason */
@@ -1501,15 +1502,24 @@ const CATALOG = {
     data: (d) => ({ screen: "Licenses", licenseId: d.licenseId }),
     actionUrl: () => portalLink("/licenses"),
     dedupe: (d) => (d.licenseId ? `license.rejected:${d.licenseId}` : null),
-    email: (d) =>
-      simpleEmail({
-        subtitle: "Licence Verification",
-        heading: "Your licence could not be verified",
-        intro: `${greet(d.customerName)}we were unable to verify your ${d.licenseType || "licence"}.`,
-        note: d.reason || "Please upload a clearer copy from your account.",
-        tone: "warning",
-        cta: { url: portalLink("/licenses"), label: "Upload Again" },
-      }),
+    email: (d) => {
+      const first = firstName(d.customerName);
+      const doc = d.licenseType || "licence";
+      return documentEmail({
+        subject: `Your ${doc} needs another look`,
+        subtitle: "Licence verification",
+        preheader: `We couldn't verify your ${doc}. Please upload it again.`,
+        hero: { tone: "warning", label: "Licence not verified", caption: doc },
+        heading: first ? `${first}, we need another copy.` : "We need another copy.",
+        blocks: [
+          { type: "text", text: `We weren't able to verify your ${doc}.` },
+          { type: "note", tone: "warning", title: "Reason", text: d.reason || "The copy we received wasn't clear enough to read." },
+          { type: "text", text: "Upload a clear copy from your account and we'll review it again.", last: true },
+          { type: "button", url: portalLink("/licenses"), label: "Upload again" },
+          ...customerClose,
+        ],
+      });
+    },
   },
 
   /** data: customerName, status */
@@ -1524,13 +1534,27 @@ const CATALOG = {
     data: () => ({ screen: "Home" }),
     actionUrl: () => portalLink("/"),
     dedupe: (d) => (d.customerId ? `account.activated:${d.customerId}` : null),
-    email: (d) =>
-      simpleEmail({
-        subtitle: "Account Activated",
-        heading: "Welcome to Soroman",
-        intro: `${greet(d.customerName)}your account is active and you can now place orders.`,
-        cta: { url: portalLink("/"), label: "Start Ordering" },
-      }),
+    email: (d) => {
+      const first = firstName(d.customerName);
+      return documentEmail({
+        subject: `Welcome to ${companyName()} — your account is active`,
+        subtitle: "Account activated",
+        preheader: "Your account is approved. You can place orders now.",
+        hero: { tone: "success", label: "Your account is active" },
+        heading: first ? `Welcome to ${companyName()}, ${first}.` : `Welcome to ${companyName()}.`,
+        blocks: [
+          {
+            type: "text",
+            text:
+              "Your account has been approved. You can now place orders and follow each one " +
+              "from payment to the depot gate.",
+            last: true,
+          },
+          { type: "button", url: portalLink("/"), label: "Place an order" },
+          ...customerClose,
+        ],
+      });
+    },
   },
 
   /**
@@ -1685,28 +1709,40 @@ const CATALOG = {
 
     // Django: "New Order Received – Payment Processing Required ({order_reference})"
     email: (d) =>
-      proseEmail({
-        subject: `New Order Received – Payment Processing Required (${ref(d)})`,
+      documentEmail({
+        subject: `New order ${ref(d)} — expect a payment of ${formatMoney(d.totalAmount)}`,
         subtitle: "Finance",
-        heading: "A new order requires payment verification",
-        paragraphs: [
-          "Dear Finance Team,",
-          "A new order has been received and requires payment verification before processing.",
+        preheader: `${d.customerName || "A customer"} placed order ${ref(d)}. Watch for the transfer.`,
+        hero: { tone: "pending", label: "Payment expected", value: formatMoney(d.totalAmount), caption: `Order ${ref(d)}` },
+        heading: "A new order is awaiting payment",
+        blocks: [
+          {
+            type: "text",
+            text:
+              "Watch the account below and confirm the payment on the dashboard as soon as it " +
+              "reflects, so the order can be released straight away.",
+            last: true,
+          },
+          {
+            type: "table",
+            title: "Order",
+            rows: [
+              { label: "Reference", value: ref(d) },
+              { label: "Customer", value: d.customerName },
+              { label: "Product", value: d.product },
+              { label: "Quantity", value: orderQuantity(d) },
+            ],
+            total: { label: "Expected amount", value: formatMoney(d.totalAmount) },
+          },
+          {
+            type: "payTo",
+            title: "Customer pays into",
+            accountNumber: d.accountNumber,
+            bank: d.bankName,
+            accountName: d.accountName,
+          },
+          { type: "button", url: adminLink(`/orders/${d.orderId}`), label: "Open order" },
         ],
-        rows: [
-          { label: "Reference", value: ref(d) },
-          { label: "Customer", value: d.customerName },
-          { label: "Product", value: d.product },
-          { label: "Quantity", value: formatQuantity(d.quantity, unitLabel(d)) },
-          { label: "Total Amount", value: formatMoney(d.totalAmount), strong: true },
-          { label: "Bank", value: d.bankName },
-          { label: "Account Name", value: d.accountName },
-          { label: "Account Number", value: d.accountNumber },
-        ],
-        note:
-          "Kindly monitor the designated account and confirm receipt on the dashboard once " +
-          "payment reflects, to enable immediate processing.",
-        cta: { url: adminLink(`/orders/${d.orderId}`), label: "Open Order" },
       }),
   },
 
@@ -1770,28 +1806,32 @@ const CATALOG = {
 
     // Django: "Payment Confirmed – {order_reference}"
     email: (d) =>
-      proseEmail({
-        subject: `Payment Confirmed – ${ref(d)}`,
-        subtitle: "Release Desk",
-        heading: `Payment has been confirmed for order ${ref(d)}`,
-        rows: [
-          { label: "Product", value: d.product },
-          { label: "Quantity", value: formatQuantity(d.quantity, unitLabel(d)) },
-          { label: "Amount", value: formatMoney(d.amountPaid ?? d.totalAmount), strong: true },
-          { label: "Customer", value: d.customerName },
-          // Django printed one line or the other depending on the route the
-          // order takes; detailRows drops whichever is empty.
-          { label: "Depot", value: d.depotName },
+      documentEmail({
+        subject: `Payment confirmed — order ${ref(d)} is released`,
+        subtitle: "Release desk",
+        preheader: `Order ${ref(d)} is paid and released. Arrange loading or delivery.`,
+        hero: {
+          tone: "success",
+          label: "Payment confirmed",
+          value: formatMoney(d.amountPaid ?? d.totalAmount),
+          caption: `Order ${ref(d)}`,
+        },
+        heading: "Order released for loading",
+        blocks: [
           {
-            label: "Delivery",
-            value: [d.deliveryAddress || d.address, d.state].filter(Boolean).join(", "),
+            type: "table",
+            title: "Order",
+            rows: [
+              { label: "Reference", value: ref(d) },
+              { label: "Customer", value: d.customerName },
+              { label: "Product", value: d.product },
+              { label: "Quantity", value: orderQuantity(d) },
+              { label: "Collection", value: collectionLine(d) },
+            ],
           },
+          { type: "next", title: "Next step", text: "Arrange loading or delivery for this order." },
+          { type: "button", url: adminLink(`/orders/${d.orderId}`), label: "Open order" },
         ],
-        paragraphs: [
-          "Order is approved and released.",
-          "Kindly proceed with loading/delivery arrangements accordingly.",
-        ],
-        cta: { url: adminLink(`/orders/${d.orderId}`), label: "Open Order" },
       }),
   },
 
@@ -1886,19 +1926,23 @@ const CATALOG = {
     // One alert per day however many times the job retries.
     dedupe: (d) => `staff.report_send_failed:${String(d.at || "").slice(0, 10)}`,
     email: (d) =>
-      simpleEmail({
-        subject: "ACTION NEEDED — the daily report did not send",
+      documentEmail({
+        subject: "Action needed — the daily report did not send",
         subtitle: "Scheduled reports",
+        preheader: "Tonight's 23:50 daily report did not send. It will retry automatically.",
+        hero: { tone: "danger", label: "Daily report not sent", caption: d.at || "" },
         heading: "Tonight's daily report failed to send",
-        intro:
-          "The scheduled 23:50 send did not complete. It will be retried automatically, " +
-          "but if this alert repeats the report needs a look.",
-        rows: [
-          { label: "Reason", value: d.reason },
-          { label: "Time", value: d.at },
+        blocks: [
+          {
+            type: "text",
+            text:
+              "The scheduled 23:50 send did not complete. It will be retried automatically, " +
+              "but if this alert repeats the report needs a look.",
+            last: true,
+          },
+          { type: "table", rows: [{ label: "Reason", value: d.reason }, { label: "Time", value: d.at }] },
+          { type: "note", tone: "danger", title: "To send it by hand", text: "Run npm run report:daily once the cause is fixed." },
         ],
-        note: "Run `npm run report:daily` to send it by hand once the cause is fixed.",
-        tone: "danger",
       }),
     sms: (d) => {
       // The reason comes from an exception message and may or may not end in a
@@ -2042,15 +2086,25 @@ const CATALOG = {
     title: () => "Set your password",
     body: () => "An account has been created for you on the Soroman Dashboard.",
     email: (d) =>
-      simpleEmail({
-        subtitle: "Account Setup",
-        heading: `Welcome, ${firstName(d.firstName) || "there"}!`,
-        intro:
-          "An account has been created for you on the Soroman Dashboard. " +
-          "To get started, please set your password using the button below.",
-        cta: { url: d.setPasswordUrl, label: "Set Your Password" },
-        note: "This link will expire in 24 hours. If you did not expect this email, please ignore it.",
-        tone: "warning",
+      documentEmail({
+        subject: `Set up your ${companyName()} Dashboard account`,
+        subtitle: "Account setup",
+        preheader: "Your dashboard account is ready. Set your password to get started.",
+        hero: { tone: "info", label: "Your dashboard account is ready" },
+        heading: `Welcome, ${firstName(d.firstName) || "there"}.`,
+        blocks: [
+          {
+            type: "text",
+            text: `An account has been created for you on the ${companyName()} Dashboard. Set your password to get started.`,
+            last: true,
+          },
+          { type: "button", url: d.setPasswordUrl, label: "Set your password" },
+          {
+            type: "note",
+            tone: "info",
+            text: "This link expires in 24 hours. If you weren't expecting this email, you can ignore it.",
+          },
+        ],
       }),
   },
 
@@ -2065,17 +2119,25 @@ const CATALOG = {
     title: () => "Reset your password",
     body: () => "We received a request to reset your password.",
     email: (d) =>
-      simpleEmail({
-        subtitle: "Password Reset",
-        heading: `Hello, ${firstName(d.firstName) || "there"}!`,
-        intro:
-          "We received a request to reset your password. " +
-          "Click the button below to set a new one.",
-        cta: { url: d.resetUrl, label: "Reset Your Password" },
-        note:
-          "This link will expire in 1 hour. If you did not request a password reset, " +
-          "please ignore this email — your password will remain unchanged.",
-        tone: "warning",
+      documentEmail({
+        subject: `Reset your ${companyName()} Dashboard password`,
+        subtitle: "Password reset",
+        preheader: "Use the link inside to choose a new password. It expires in 1 hour.",
+        hero: { tone: "info", label: "Reset your password" },
+        heading: `Hi ${firstName(d.firstName) || "there"},`,
+        blocks: [
+          {
+            type: "text",
+            text: `We received a request to reset the password for your ${companyName()} Dashboard account.`,
+            last: true,
+          },
+          { type: "button", url: d.resetUrl, label: "Choose a new password" },
+          {
+            type: "note",
+            tone: "info",
+            text: "This link expires in 1 hour. If you didn't ask to reset your password, ignore this email — your password won't change.",
+          },
+        ],
       }),
   },
 
@@ -2107,21 +2169,31 @@ const CATALOG = {
     data: (d) => ({ screen: "OrderDetail", orderId: d.orderId }),
     actionUrl: (d) => portalLink(`/orders/${d.orderId}`),
     dedupe: (d) => (d.orderId ? `order.delivered:${d.orderId}` : null),
-    email: (d) =>
-      proseEmail({
-        subject: `Order ${ref(d)} Delivered Successfully`,
-        subtitle: "Delivery Complete",
-        heading: "Order delivered",
-        paragraphs: [
-          `Dear ${d.customerName || "Customer"},`,
-          `This is to confirm that your order ${ref(d)} has been delivered successfully` +
-            `${d.deliveryAddress ? ` to ${d.deliveryAddress}` : " to your address"}.`,
-          "Please inspect the product upon delivery. If there are any concerns, please let us " +
-            "know within 24 hours.",
-          "We appreciate your business and look forward to serving you again.",
+    email: (d) => {
+      const first = firstName(d.customerName);
+      const where = d.deliveryAddress ? ` to ${d.deliveryAddress}` : "";
+      return documentEmail({
+        subject: `Order ${ref(d)} has been delivered`,
+        subtitle: "Delivery complete",
+        preheader: `Order ${ref(d)} has been delivered${where}.`,
+        hero: { tone: "success", label: "Order delivered", caption: `Order ${ref(d)} · ${lagosDate()}` },
+        heading: first ? `Delivered, ${first}.` : "Your order has been delivered.",
+        blocks: [
+          {
+            type: "text",
+            html: `Order ${em(ref(d))} has been delivered${escapeHtml(where)}.`,
+            plain: `Order ${ref(d)} has been delivered${where}.`,
+          },
+          {
+            type: "text",
+            text: "Please inspect the product on arrival. If anything isn't right, let us know within 24 hours.",
+            last: true,
+          },
+          { type: "button", url: portalLink(`/orders/${d.orderId}`), label: "View your order" },
+          ...customerClose,
         ],
-        cta: { url: portalLink(`/orders/${d.orderId}`), label: "View Order" },
-      }),
+      });
+    },
   },
 
   /** data: orderId, reference, customerName, reason */
@@ -2137,22 +2209,27 @@ const CATALOG = {
     entity: (d) => ({ type: "order", id: d.orderId }),
     data: (d) => ({ screen: "OrderDetail", orderId: d.orderId }),
     actionUrl: (d) => portalLink(`/orders/${d.orderId}`),
-    email: (d) =>
-      proseEmail({
-        subject: `Payment Not Successful – Order ${ref(d)}`,
-        subtitle: "Payment Failed",
-        heading: "Payment failed",
-        paragraphs: [
-          `Dear ${d.customerName || "Customer"},`,
-          `We attempted to process your payment for Order ${ref(d)}, but it was not successful.`,
-          "Please try again using another method, or contact our support team for help. " +
-            "Your order will remain pending until payment is confirmed.",
-          "Thank you for your understanding.",
+    email: (d) => {
+      const first = firstName(d.customerName);
+      return documentEmail({
+        subject: `Payment not completed — order ${ref(d)}`,
+        subtitle: "Payment",
+        preheader: `Your payment for order ${ref(d)} didn't go through.`,
+        hero: { tone: "danger", label: "Payment not completed", caption: `Order ${ref(d)}` },
+        heading: first ? `${first}, your payment didn't go through.` : "Your payment didn't go through.",
+        blocks: [
+          {
+            type: "text",
+            html: `We weren't able to process your payment for order ${em(ref(d))}. Your order stays pending until a payment is confirmed.`,
+            plain: `We weren't able to process your payment for order ${ref(d)}. Your order stays pending until a payment is confirmed.`,
+            last: !d.reason,
+          },
+          d.reason && { type: "note", tone: "danger", title: "Reason", text: d.reason },
+          { type: "button", url: portalLink(`/orders/${d.orderId}`), label: "Try again" },
+          ...customerClose,
         ],
-        note: d.reason || null,
-        tone: "danger",
-        cta: { url: portalLink(`/orders/${d.orderId}`), label: "Retry Payment" },
-      }),
+      });
+    },
   },
 
   /** data: productName, location, stockQuantity, minimumRequired */
@@ -2175,22 +2252,34 @@ const CATALOG = {
         ? `stock.low:${d.productId}:${d.location || ""}:${new Date().toISOString().slice(0, 10)}`
         : null,
     email: (d) =>
-      proseEmail({
-        subject: `Low Stock Alert – ${d.productName || "Product"}`,
+      documentEmail({
+        subject: `Low stock — ${d.productName || "a product"}${d.location ? ` at ${d.location}` : ""}`,
         subtitle: "Inventory",
-        heading: "Low stock alert",
-        paragraphs: [
-          "Dear Team,",
-          `Please be informed that ${d.productName || "a product"} has dropped below the ` +
-            `minimum stock level${d.location ? ` at ${d.location}` : ""}.`,
+        preheader: `${d.productName || "A product"} is below its minimum level. Please arrange a restock.`,
+        hero: {
+          tone: "warning",
+          label: "Low stock",
+          value: smsQuantity(d.stockQuantity, d.unit),
+          caption: [d.productName, d.location].filter(Boolean).join(" · "),
+        },
+        heading: "Stock is below the minimum level",
+        blocks: [
+          {
+            type: "text",
+            text:
+              `${d.productName || "A product"} has dropped below its minimum stock level` +
+              `${d.location ? ` at ${d.location}` : ""}. Please arrange a restock to avoid any disruption.`,
+            last: true,
+          },
+          {
+            type: "table",
+            rows: [
+              { label: "Current level", value: smsQuantity(d.stockQuantity, d.unit) },
+              { label: "Minimum required", value: smsQuantity(d.minimumRequired, d.unit) },
+            ],
+          },
+          { type: "button", url: adminLink("/products"), label: "Open inventory" },
         ],
-        rows: [
-          { label: "Current Level", value: formatQuantity(d.stockQuantity, d.unit) },
-          { label: "Minimum Required", value: formatQuantity(d.minimumRequired, d.unit) },
-        ],
-        note: "Kindly take the necessary steps to restock as soon as possible to avoid any disruption.",
-        tone: "warning",
-        cta: { url: adminLink("/products"), label: "Open Inventory" },
       }),
   },
 
@@ -2384,5 +2473,5 @@ module.exports = {
   categoriesFor,
   defaultPreferencesFor,
   // Exported for the engine's renderers and for tests.
-  helpers: { greet, firstName, ref, simpleEmail, adminLink, portalLink },
+  helpers: { greet, firstName, ref, documentEmail, adminLink, portalLink },
 };
