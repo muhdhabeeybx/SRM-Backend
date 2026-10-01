@@ -59,7 +59,18 @@ const MAX_SOURCES = 20;
 
 /** Orders that still describe a real sale. Cancelled and Expired do not. */
 const LIVE_STATUSES = ["Pending", "Paid", "Released", "Loading", "Completed"];
-const STAGE_RANK = { Pending: 0, Paid: 1, Released: 2, Loading: 3, Completed: 4 };
+const STAGE_RANK = { Pending: 0, Expired: 0, Paid: 1, Released: 2, Loading: 3, Completed: 4 };
+
+/**
+ * What may take part in a merge: every live stage, and an Expired order too.
+ *
+ * An expired order is an unpaid one that lapsed — a real sale the customer
+ * still wants, usually re-placed as a fresh order beside it. Folding it in
+ * brings its quantity and value onto the survivor, and the survivor is never
+ * left Expired: an expired order counts as Pending when the stage is worked
+ * out (combinedStatus), and expired_at is cleared. Cancelled stays out.
+ */
+const MERGEABLE_STATUSES = [...LIVE_STATUSES, "Expired"];
 
 /**
  * The last day of the audited finance report. Orders whose first payment is
@@ -206,8 +217,8 @@ const ownBlockers = (order, facts) => {
     out.push(`${ref} has already been merged into another order.`);
     return out;
   }
-  if (!LIVE_STATUSES.includes(order.status)) {
-    out.push(`${ref} is ${order.status.toLowerCase()} — only live orders can be merged.`);
+  if (!MERGEABLE_STATUSES.includes(order.status)) {
+    out.push(`${ref} is ${order.status.toLowerCase()} — only live or expired orders can be merged.`);
     return out;
   }
   if (isAllocationOrder(order)) {
@@ -215,9 +226,6 @@ const ownBlockers = (order, facts) => {
   }
   if (order.pricingStatus === "pending") {
     out.push(`${ref} has no price yet, so there is no unit price to match. Price it first.`);
-  }
-  if (orderService().isOrderExpired(order)) {
-    out.push(`${ref} has passed its payment deadline and is about to lapse.`);
   }
   if (facts?.phantoms > 0) {
     out.push(
@@ -525,7 +533,7 @@ const mergeOverview = async (orderId) => {
           AND o.delivery_type::text = ${order.deliveryType}
           AND o.pfi_id IS NOT DISTINCT FROM ${order.pfiId ?? null}::int
           AND o.price = ${order.price}::numeric
-          AND o.status::text IN ${idListText(LIVE_STATUSES)}
+          AND o.status::text IN ${idListText(MERGEABLE_STATUSES)}
           AND o.merged_into_order_id IS NULL
           AND o.id <> ${id}
         ORDER BY o.created_at
@@ -707,6 +715,8 @@ const mergeOrders = async ({ targetOrderId, sourceOrderIds, reason = "", staffId
         released_by = ${result.releasedBy ?? null}::int,
         loading_started_at = ${result.loadingStartedAt ? result.loadingStartedAt.toISOString() : null}::timestamptz,
         completed_at = ${result.completedAt ? result.completedAt.toISOString() : null}::timestamptz,
+        -- A merge never leaves the survivor Expired (see MERGEABLE_STATUSES).
+        expired_at = NULL,
         updated_at = now()
       WHERE id = ${targetId}`);
 

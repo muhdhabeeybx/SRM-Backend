@@ -352,4 +352,24 @@ describe("order merge", () => {
     await client.unsafe(file);
     assert.deepEqual(await count(), before);
   });
+
+  test("an expired order can be merged, and the merged order is never left expired", async () => {
+    const live = await makeOrder("EX1", { status: "Pending" });
+    const lapsed = await makeOrder("EX2", { status: "Expired" });
+    await client`UPDATE orders SET expired_at = now() WHERE id = ${lapsed}`;
+    await mergeService.mergeOrders({ targetOrderId: live, sourceOrderIds: [lapsed], reason: "re-placed after it lapsed" });
+    const [o] = await client`SELECT quantity, status::text AS status, expired_at FROM orders WHERE id = ${live}`;
+    assert.equal(Number(o.quantity), QTY * 2);
+    assert.equal(o.status, "Pending");
+    assert.equal(o.expired_at, null);
+
+    // And the other way round: an expired order as the one kept.
+    const keptLapsed = await makeOrder("EX3", { status: "Expired" });
+    await client`UPDATE orders SET expired_at = now() WHERE id = ${keptLapsed}`;
+    const fresh = await makeOrder("EX4", { status: "Pending" });
+    await mergeService.mergeOrders({ targetOrderId: keptLapsed, sourceOrderIds: [fresh], reason: "merge onto the old one" });
+    const [k] = await client`SELECT status::text AS status, expired_at FROM orders WHERE id = ${keptLapsed}`;
+    assert.equal(k.status, "Pending", "revived, not expired");
+    assert.equal(k.expired_at, null);
+  });
 });
