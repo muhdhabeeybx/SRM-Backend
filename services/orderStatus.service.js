@@ -160,6 +160,13 @@ async function announce(order, toStatus, opts) {
           orderNumber: order.orderNumber,
           reference,
           customerName: customer.name,
+          product: product?.name,
+          unit: product?.unit,
+          quantity: order.quantity,
+          depotName: depot?.name,
+          deliveryType: order.deliveryType,
+          deliveryAddress: order.deliveryAddress,
+          state: order.state,
           amountPaid: opts.metadata?.amountPaid ?? order.totalAmount,
         },
       });
