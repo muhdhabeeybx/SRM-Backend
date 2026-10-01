@@ -1,7 +1,6 @@
 const QRCode = require("qrcode");
 const { db } = require("../config/db");
 const { orderRepo, ticketRepo, customerRepo } = require("../repositories");
-const { sendTicketEmail } = require("./email.service");
 const { sendTicketSummarySMS } = require("./sms.service");
 const { notify } = require("../notifications");
 
@@ -110,14 +109,10 @@ const generateTicketForOrder = async (orderIdOrDoc) => {
       virtualAccountBank: order.virtualAccountBank || "",
     };
 
-    if (customer.email) {
-      try {
-        await sendTicketEmail(customer.email, ticketData);
-      } catch (emailErr) {
-        console.error("Failed to send ticket email:", emailErr.message);
-      }
-    }
-
+    // No ticket email: it arrived at the same moment as the payment receipt
+    // (order.paid), which already carries the order, the amount and the next
+    // step, so the customer was getting two emails about one payment. The SMS
+    // and the in-app notice below stay.
     if (customer.phone) {
       try {
         await sendTicketSummarySMS(customer.phone, ticketData);
@@ -126,10 +121,8 @@ const generateTicketForOrder = async (orderIdOrDoc) => {
       }
     }
 
-    // The QR-code email and its SMS above are untouched. This adds the inbox
-    // row and push so the ticket is reachable in the app rather than only in
-    // whichever inbox the customer read it from — the catalog entry is
-    // APP_ONLY so nothing here is sent twice.
+    // The inbox row and push, so the ticket is reachable in the app. The
+    // catalog entry is APP_ONLY so nothing here is sent twice.
     notify("ticket.issued", {
       to: { customer },
       data: {
