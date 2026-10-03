@@ -438,6 +438,16 @@ const optInvoiceMoney = (label = "Amount") =>
     .optional()
     .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : String(v)));
 
+/** Invoice lines no tax applies to — logistics and the like. See migration 0066. */
+const untaxedItems = z
+  .array(
+    z.object({
+      description: z.string().max(255, "Item description is too long").optional().nullable(),
+      amount: z.union([z.number(), z.string(), z.null()]).optional(),
+    }),
+  )
+  .max(100, "Too many untaxed items");
+
 /**
  * An ISO 4217 code. Upper-cased on the way in, so a requester typing "usd"
  * does not trip the database's own three-upper-case-letters constraint.
@@ -549,6 +559,12 @@ const expenseBase = {
   // a "50" typed into a percent field is a decimal point away from a disaster.
   wht_rate: optPercent("WHT rate"),
   whtRate: optPercent("WHT rate"),
+  // Kept back from the vendor and paid to the tax office — migration 0066.
+  vat_withheld: z.boolean().optional(),
+  vatWithheld: z.boolean().optional(),
+  // Invoice lines no tax applies to. Checked line by line in the controller.
+  untaxed_items: untaxedItems.optional().nullable(),
+  untaxedItems: untaxedItems.optional().nullable(),
   bank_code: optionalString("Bank code", 20),
   bankCode: optionalString("Bank code", 20),
   expense_date: optionalString("Expense date", 40),

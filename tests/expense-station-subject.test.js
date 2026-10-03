@@ -7,7 +7,7 @@ const request = require("supertest");
 const app = require("../app");
 const { db } = require("../config/db");
 const { sql } = require("drizzle-orm");
-const { staffToken, closeDb } = require("./helpers");
+const { staffToken, staffTokenWithRoles, closeDb } = require("./helpers");
 
 /**
  * An expense raised for a filling station or an LPG plant.
@@ -370,6 +370,83 @@ describe("a bill split across stations", () => {
       .send({ category_id: category2, amount: 1000, station_ids: [a], plant_ids: [plantId] });
     assert.equal(res.status, 400);
     assert.match(res.body.message, /not both/i);
+  });
+});
+
+/**
+ * A station's page is that station's record.
+ *
+ * Outside the finance chain the register shows you what you raised, and that
+ * is right for the register. It was wrong on a station's page, which read
+ * the same register and so showed each person a different station: the
+ * manager saw none of the vendor bills finance had raised for it. Asked with
+ * view=subject, a query pinned to stations or plants returns everyone's rows
+ * — and only such a query does.
+ */
+describe("a station's page sees every expense raised for it", () => {
+  let colleague;
+  let ownerToken;
+  let raisedId;
+  let generalId;
+
+  before(async () => {
+    ownerToken = await staffToken(request, app);
+    colleague = (await staffTokenWithRoles(["sales"], `station-view-${RUN}@soroman.test`)).accessToken;
+    if (!categoryId || !stationId) return;
+    const res = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ category_id: categoryId, amount: 12000, description: `Seen ${RUN}`, station_id: stationId });
+    raisedId = res.body?.data?.expense?.id;
+    if (raisedId) created.push(raisedId);
+    const general = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ category_id: categoryId, amount: 7000, description: `Overhead ${RUN}` });
+    generalId = general.body?.data?.expense?.id;
+    if (generalId) created.push(generalId);
+  });
+
+  const list = (query) => request(app)
+    .get(EXPENSES)
+    .query(query)
+    .set("Authorization", `Bearer ${colleague}`);
+  const ids = (res) => (res.body?.data?.expenses || []).map((e) => Number(e.id));
+
+  test("the register alone still shows a colleague only their own", async (t) => {
+    if (!raisedId) return t.skip("no seeded category or filling station here");
+    const res = await list({ station: stationId });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(!ids(res).includes(Number(raisedId)));
+    assert.equal(res.body.data.scope, "own");
+  });
+
+  test("the station view shows them everyone's, and says it can't be opened", async (t) => {
+    if (!raisedId) return t.skip("no seeded category or filling station here");
+    const res = await list({ station: stationId, view: "subject" });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(ids(res).includes(Number(raisedId)));
+    assert.equal(res.body.data.scope, "subject");
+    const row = res.body.data.expenses.find((e) => Number(e.id) === Number(raisedId));
+    // Listed, but the full request — payee account, attachments — is not theirs.
+    assert.equal(row.can_open, false);
+  });
+
+  test("every station at once, for the directory, is the same rule", async (t) => {
+    if (!raisedId) return t.skip("no seeded category or filling station here");
+    const res = await list({ type: "station", view: "subject" });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(ids(res).includes(Number(raisedId)));
+  });
+
+  test("view=subject never opens general spend", async (t) => {
+    if (!generalId) return t.skip("no seeded category here");
+    const res = await list({ view: "subject" });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(!ids(res).includes(Number(generalId)));
+    assert.equal(res.body.data.scope, "own");
+    const typed = await list({ view: "subject", type: "general" });
+    assert.ok(!ids(typed).includes(Number(generalId)));
   });
 });
 });

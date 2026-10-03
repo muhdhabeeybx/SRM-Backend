@@ -11,6 +11,7 @@ const {
   deleteCategory,
   autoPopulateCategories,
   listExpenses,
+  taxReport,
   createExpense,
   updateExpense,
   deleteExpense,
@@ -34,6 +35,8 @@ router.delete("/categories/:id", authenticateStaff, requireChartRole, validate({
 
 // --- expenses -------------------------------------------------------------
 router.get("/", authenticateStaff, listExpenses);
+// VAT and WHT for a period. Before "/:id" so "tax-report" is not read as an id.
+router.get("/tax-report", authenticateStaff, taxReport);
 router.get("/:id", authenticateStaff, validate({ params: misc.idParam }), getExpense);
 // The only path by which status moves.
 // Before "/:id/attachments" so "upload-signature" is not read as an expense id.

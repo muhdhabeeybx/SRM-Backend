@@ -173,15 +173,54 @@ const money = (val) => {
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
 };
 
+/**
+ * The invoice lines no tax applies to — logistics, a reimbursed cost — as sent.
+ *
+ * Returns null when the caller did not send them, so an edit that never
+ * mentions them leaves the row's own alone. A line with neither a description
+ * nor an amount is a blank row the form left behind and is dropped; a line
+ * with an amount but no description is kept, because the money is the fact.
+ * See migration 0066.
+ */
+const untaxedFrom = (body) => {
+  if (!sent(body, "untaxed_items", "untaxedItems")) return null;
+  const raw = pick(body, "untaxed_items", "untaxedItems");
+  if (raw !== null && !Array.isArray(raw)) throw httpErr(400, "Untaxed items must be a list");
+  const items = [];
+  for (const line of raw || []) {
+    const description = String(line?.description ?? "").trim().slice(0, 255);
+    const amount = money(line?.amount);
+    if (!description && !amount) continue;
+    if (amount === null || amount < 0) {
+      throw httpErr(400, `Untaxed item "${description || "unnamed"}" needs an amount of 0 or more`);
+    }
+    items.push({ description, amount });
+  }
+  const total = Math.round(items.reduce((s, it) => s + it.amount * 100, 0)) / 100;
+  return { items, total };
+};
+
+/** The VAT-withheld flag, if sent. Undefined leaves the row's own alone. */
+const vatWithheldFrom = (body) => {
+  const v = body.vat_withheld !== undefined ? body.vat_withheld : body.vatWithheld;
+  return v === undefined || v === null ? undefined : v === true || v === "true";
+};
+
 const invoiceFigures = (body) => {
   const exVat = money(body.amount_ex_vat ?? body.amountExVat);
   let vat = money(body.vat_amount ?? body.vatAmount);
   let invoice = money(body.invoice_amount ?? body.invoiceAmount);
   const rate = money(body.wht_rate ?? body.whtRate);
   let wht = money(body.wht_deduction ?? body.whtDeduction);
+  const untaxed = untaxedFrom(body);
+  const extra = untaxed ? untaxed.total : 0;
+  const withheld = vatWithheldFrom(body);
 
   if (exVat !== null && vat === null) vat = Math.round(exVat * gl.VAT_RATE * 100) / 100;
-  if (exVat !== null && invoice === null) invoice = Math.round((exVat + (vat || 0)) * 100) / 100;
+  // The invoice's face value: the taxed part, its VAT, and every untaxed line.
+  if (invoice === null && (exVat !== null || extra > 0)) {
+    invoice = Math.round(((exVat || 0) + (vat || 0) + extra) * 100) / 100;
+  }
   // A rate with no amount is resolved here so the two can never disagree.
   // Withholding is computed on the ex-VAT value, never the gross.
   if (rate !== null && wht === null && exVat !== null) {
@@ -194,11 +233,13 @@ const invoiceFigures = (body) => {
     invoice_amount: invoice === null ? null : String(invoice),
     wht_deduction: String(wht ?? 0),
     wht_rate: rate === null ? null : String(rate),
+    ...(untaxed ? { untaxed_items: untaxed.items, untaxed_amount: String(untaxed.total) } : {}),
+    ...(withheld !== undefined ? { vat_withheld: withheld } : {}),
   };
 };
 
 /** The plain text fields, read in either casing. */
-const pick = (body, snake, camel) => body[snake] ?? body[camel];
+const pick =(body, snake, camel) => body[snake] ?? body[camel];
 
 /** Was this field actually sent, in either casing? Distinct from "is truthy". */
 const sent = (body, snake, camel) => body[snake] !== undefined || body[camel] !== undefined;
@@ -238,11 +279,16 @@ const recomputeInvoiceFigures = (existing, body) => {
       ? null
       : Math.round(exVat * gl.VAT_RATE * 100) / 100;
 
+  // Sent lines replace the row's; otherwise the row's own total carries.
+  const untaxed = untaxedFrom(body);
+  const extra = untaxed ? untaxed.total : (money(existing.untaxed_amount) || 0);
+  const withheld = vatWithheldFrom(body);
+
   const invoice = sent(body, "invoice_amount", "invoiceAmount")
     ? money(pick(body, "invoice_amount", "invoiceAmount"))
-    : exVat === null
+    : exVat === null && extra === 0
       ? null
-      : Math.round((exVat + (vat || 0)) * 100) / 100;
+      : Math.round(((exVat || 0) + (vat || 0) + extra) * 100) / 100;
 
   // Withholding is computed on the ex-VAT value, never the gross.
   const wht = sent(body, "wht_deduction", "whtDeduction")
@@ -257,6 +303,8 @@ const recomputeInvoiceFigures = (existing, body) => {
     invoice_amount: invoice === null ? null : String(invoice),
     wht_deduction: String(wht ?? 0),
     wht_rate: rate === null ? null : String(rate),
+    ...(untaxed ? { untaxed_items: untaxed.items, untaxed_amount: String(untaxed.total) } : {}),
+    ...(withheld !== undefined ? { vat_withheld: withheld } : {}),
   };
 };
 
@@ -431,6 +479,19 @@ const listExpenses = asyncHandler(async (req, res) => {
   // The "My Requests" page asks for this explicitly, so even an oversight
   // role — who can otherwise see everyone's spend — gets just their own.
   const mine = req.query.mine === "true" || req.query.mine === "1";
+  // A station's or plant's own page asks for everything raised FOR it, by
+  // whoever raised it — the page is that subject's record, and showing each
+  // viewer only their own requests made the same station read differently to
+  // every person who opened it. Only when the query is pinned to station or
+  // plant expenses, so this can never widen into general spend or salaries.
+  // The location scope below still applies: staff assigned stations see
+  // their stations' costs and no one else's.
+  const forSubject =
+    req.query.view === "subject" &&
+    (["station", "plant"].includes(req.query.type) ||
+      (req.query.station && req.query.station !== "all") ||
+      (req.query.plant && req.query.plant !== "all"));
+  const seeAll = !mine && (oversight || forSubject);
 
   const result = await pfiExpenseRepo.listExpenses({
     search: req.query.search,
@@ -451,7 +512,7 @@ const listExpenses = asyncHandler(async (req, res) => {
     dateTo: parseDate(req.query.dateTo),
     page: req.query.page,
     limit: req.query.limit,
-    onlySubmitterId: oversight && !mine ? null : req.user?.id ?? -1,
+    onlySubmitterId: seeAll ? null : req.user?.id ?? -1,
     scopeUser: req.user,
   });
 
@@ -462,12 +523,39 @@ const listExpenses = asyncHandler(async (req, res) => {
       expenses: decorate(result.expenses, req.user),
       // Tells the page whose entries are on screen, rather than leaving someone
       // wondering why a colleague's row is missing.
-      scope: oversight && !mine ? "all" : "own",
+      scope: !seeAll ? "own" : oversight ? "all" : "subject",
       // Seeing everyone's requests and being able to action them are separate
       // questions — `audit` reads the queue without acting on it.
       can_review: chain.canOversee(req.user),
       statuses: Object.entries(chain.STATUS_LABELS).map(([value, label]) => ({ value, label })),
     },
+  });
+});
+
+/**
+ * VAT and WHT for a period, to pay the tax office in one go.
+ *
+ * Seen by the same people as the register: oversight roles see everyone's
+ * rows, anyone else only what they raised. See pfiExpenseRepo.taxReport.
+ */
+const taxReport = asyncHandler(async (req, res) => {
+  const isDay = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const from = isDay(req.query.from) ? req.query.from : null;
+  const to = isDay(req.query.to) ? req.query.to : null;
+  if (!from || !to) throw httpErr(400, "Choose the period — from and to, as YYYY-MM-DD");
+  if (from > to) throw httpErr(400, "The period ends before it starts");
+  const basis = req.query.basis === "raised" ? "raised" : "paid";
+
+  const oversight = chain.canSeeAllExpenses(req.user);
+  const result = await pfiExpenseRepo.taxReport({
+    from, to, basis,
+    onlySubmitterId: oversight ? null : req.user?.id ?? -1,
+    scopeUser: req.user,
+  });
+
+  res.json({
+    success: true,
+    data: { ...result, from, to, basis, scope: oversight ? "all" : "own", vat_rate: gl.VAT_RATE },
   });
 });
 
@@ -538,6 +626,12 @@ const createExpense = asyncHandler(async (req, res) => {
   const exVatShares = exVatRaw === undefined || exVatRaw === null || exVatRaw === ""
     ? null
     : splitEvenly(Number(exVatRaw), subjects.length);
+  // Each untaxed line is divided the same way, line by line, so every row
+  // keeps the bill's lines and its own share of each.
+  const untaxed = untaxedFrom(req.body);
+  const untaxedShares = untaxed
+    ? untaxed.items.map((it) => splitEvenly(it.amount, subjects.length))
+    : null;
 
   const created = [];
   for (const [i, subject] of subjects.entries()) {
@@ -553,6 +647,10 @@ const createExpense = asyncHandler(async (req, res) => {
           vat_amount: undefined, vatAmount: undefined,
           invoice_amount: undefined, invoiceAmount: undefined,
           wht_deduction: undefined, whtDeduction: undefined,
+          untaxed_items: untaxed
+            ? untaxed.items.map((it, k) => ({ description: it.description, amount: untaxedShares[k][i] }))
+            : undefined,
+          untaxedItems: undefined,
         });
     const payment = directToPaid
       ? paymentFor(req.body, { amount: String(share), currency: money_.currency })
@@ -814,7 +912,8 @@ const updateExpense = asyncHandler(async (req, res) => {
   const touchesInvoice = [
     "amount_ex_vat", "amountExVat", "vat_amount", "vatAmount",
     "invoice_amount", "invoiceAmount", "wht_deduction", "whtDeduction",
-    "wht_rate", "whtRate",
+    "wht_rate", "whtRate", "untaxed_items", "untaxedItems",
+    "vat_withheld", "vatWithheld",
   ].some((k) => req.body[k] !== undefined);
   // Recomputed against the row as it stands, not from the patch alone — see
   // recomputeInvoiceFigures. Correcting the ex-VAT figure moves the VAT, the
@@ -875,10 +974,13 @@ const updateExpense = asyncHandler(async (req, res) => {
     "amount", "bank_paid_from", "receipt_reference",
     "tin_number", "invoice_number", "amount_ex_vat", "vat_amount",
     "invoice_amount", "wht_deduction", "wht_rate",
+    "vat_withheld", "untaxed_items", "untaxed_amount",
   ];
+  // JSON for the untaxed lines, which String() would read as "[object Object]".
+  const asText = (v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : String(v ?? ""));
   const diff = {};
   for (const f of TRACKED) {
-    if (data[f] !== undefined && String(existing[f] ?? "") !== String(updated[f] ?? "")) {
+    if (data[f] !== undefined && asText(existing[f]) !== asText(updated[f])) {
       diff[f] = [existing[f], updated[f]];
     }
   }
@@ -1023,6 +1125,11 @@ const decorate = (rows, user) =>
       total_steps: chain.TOTAL_STEPS,
       available_actions: actions,
       action_blocked_reason: reason,
+      // A station's page lists rows its viewer may not open in full — the
+      // payee's account and the attachments stay with the chain and the
+      // person who raised it. Said per row so the page never offers a click
+      // that ends in a 403.
+      can_open: chain.canSeeExpense(e, user),
     };
   });
 
@@ -1410,6 +1517,7 @@ module.exports = {
   deleteCategory,
   autoPopulateCategories,
   listExpenses,
+  taxReport,
   createExpense,
   updateExpense,
   deleteExpense,

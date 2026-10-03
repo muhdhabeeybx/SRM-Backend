@@ -163,7 +163,11 @@ const pfiExpenses = pgTable(
     /** VAT charged. Defaults to 7.5% of ex-VAT but is editable — not every vendor charges it. */
     vatAmount: decimal("vat_amount", { precision: 15, scale: 2 }),
     invoiceAmount: decimal("invoice_amount", { precision: 15, scale: 2 }),
-    /** Withholding tax kept back: invoice amount − WHT is what the vendor receives. */
+    /**
+     * Withholding tax kept back. What the vendor receives is invoice − WHT on
+     * old rows, and amount before VAT − WHT + untaxed items on rows with
+     * `vatWithheld` set.
+     */
     whtDeduction: decimal("wht_deduction", { precision: 15, scale: 2 }).default("0").notNull(),
     /**
      * The rate that produced it, as a percentage. Null when the amount was
@@ -171,6 +175,19 @@ const pfiExpenses = pgTable(
      * mis-keyed 2%, and only the rate tells anyone which.
      */
     whtRate: decimal("wht_rate", { precision: 5, scale: 2 }),
+    /**
+     * The VAT was kept back from the vendor and is ours to pay to the tax
+     * office, like the WHT. False on every row raised before migration 0066,
+     * when the vendor was paid the VAT — the tax report must not remit those.
+     */
+    vatWithheld: boolean("vat_withheld").default(false).notNull(),
+    /**
+     * Invoice lines no tax applies to — logistics, a reimbursed cost — paid
+     * to the vendor in full: [{ description, amount }]. `untaxedAmount` is
+     * their sum. Both are in `currency`. See migration 0066.
+     */
+    untaxedItems: jsonb("untaxed_items").default([]).notNull(),
+    untaxedAmount: decimal("untaxed_amount", { precision: 15, scale: 2 }).default("0").notNull(),
 
     // ── Settlement ────────────────────────────────────────────────────────
     // Filled by the Expenditure Officer at the moment of payment, not by the

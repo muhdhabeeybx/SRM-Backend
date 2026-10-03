@@ -419,6 +419,33 @@ const listExpensesForPfi = async (pfiId) => {
  * The expenses page: filterable list plus the totals it shows in its cards.
  * Both come off the same WHERE so the cards can never disagree with the rows.
  */
+/**
+ * The rows a caller outside head office may see, as one condition — or null
+ * when they may see every location. Shared by the register and the tax report
+ * so the two can never disagree about whose rows are in view.
+ */
+const locationScope = (scopeUser) => {
+  if (!scopeUser || scopeUser.canViewAllLocations) return null;
+  const { depotIds = [], lpgStationIds = [], pfiIds = [], fillingStationIds = [] } = scopeUser.scope || {};
+  // A station expense, for someone assigned stations, is theirs exactly
+  // when the station is — whatever PFI it is attributed to. Everyone else
+  // falls through to the rule below, unchanged (lib/stationScope.js).
+  return client`(CASE
+    WHEN e.delivery_customer_id IS NOT NULL AND cardinality(${fillingStationIds}::int[]) > 0
+    THEN e.delivery_customer_id = ANY(${fillingStationIds}::int[])
+    ELSE (
+    (e.pfi_id IS NULL AND e.lpg_station_id IS NULL)
+    OR e.pfi_id = ANY(${pfiIds})
+    OR e.pfi_id IN (
+      SELECT id FROM pfis WHERE location_id = ANY(${depotIds}) OR lpg_station_id = ANY(${lpgStationIds})
+    )
+    -- A plant expense belongs to a plant the caller may or may not hold, so
+    -- it is narrowed the same way a cargo is. A station expense has no
+    -- location to test and passes like a general overhead does.
+    OR e.lpg_station_id = ANY(${lpgStationIds})
+  ) END)`;
+};
+
 const listExpenses = async ({
   search,
   categoryId,
@@ -486,25 +513,9 @@ const listExpenses = async ({
   // A general expense (pfi_id IS NULL) always passes: it has no location, so
   // a location test can only ever fail on it, and failing closed hid every
   // company-wide overhead from everyone outside head office.
-  if (onlySubmitterId == null && scopeUser && !scopeUser.canViewAllLocations) {
-    const { depotIds = [], lpgStationIds = [], pfiIds = [], fillingStationIds = [] } = scopeUser.scope || {};
-    // A station expense, for someone assigned stations, is theirs exactly
-    // when the station is — whatever PFI it is attributed to. Everyone else
-    // falls through to the rule below, unchanged (lib/stationScope.js).
-    base.push(client`(CASE
-      WHEN e.delivery_customer_id IS NOT NULL AND cardinality(${fillingStationIds}::int[]) > 0
-      THEN e.delivery_customer_id = ANY(${fillingStationIds}::int[])
-      ELSE (
-      (e.pfi_id IS NULL AND e.lpg_station_id IS NULL)
-      OR e.pfi_id = ANY(${pfiIds})
-      OR e.pfi_id IN (
-        SELECT id FROM pfis WHERE location_id = ANY(${depotIds}) OR lpg_station_id = ANY(${lpgStationIds})
-      )
-      -- A plant expense belongs to a plant the caller may or may not hold, so
-      -- it is narrowed the same way a cargo is. A station expense has no
-      -- location to test and passes like a general overhead does.
-      OR e.lpg_station_id = ANY(${lpgStationIds})
-    ) END)`);
+  if (onlySubmitterId == null) {
+    const scope = locationScope(scopeUser);
+    if (scope) base.push(scope);
   }
 
   if (search) {
@@ -513,7 +524,9 @@ const listExpenses = async ({
       client`(e.description ILIKE ${p} OR e.vendor ILIKE ${p} OR c.name ILIKE ${p}
               OR e.bank_paid_from ILIKE ${p} OR e.receipt_reference ILIKE ${p}
               OR e.invoice_number ILIKE ${p} OR e.tin_number ILIKE ${p}
-              OR c.gl_code ILIKE ${p})`
+              OR c.gl_code ILIKE ${p}
+              -- EXP-2026-000812 as printed on the schedule, and the payee's account.
+              OR e.reference_number ILIKE ${p} OR e.payee_account_name ILIKE ${p})`
     );
   }
   if (categoryId === "none") base.push(client`e.category_id IS NULL`);
@@ -692,6 +705,95 @@ const listExpenses = async ({
   };
 };
 
+/**
+ * Every expense that carries VAT or WHT in a period, for paying the tax office
+ * in one go.
+ *
+ * `basis` picks which date the period is read on:
+ *   · 'paid'   — paid requests, by the day the money cleared. Tax is kept
+ *                back when the vendor is paid, so this is the one to remit.
+ *   · 'raised' — every live request but rejected ones, by expense date, for
+ *                seeing what is coming.
+ *
+ * VAT counts as ours to remit only on rows with `vat_withheld` (migration
+ * 0066). Older rows paid the vendor the VAT, so theirs is totalled apart and
+ * never added to what is owed. WHT has always been withheld.
+ *
+ * Naira is worked at the rate the money cleared at where there is one, else
+ * the rate raised at. A foreign row with no rate has no naira value and is
+ * counted apart rather than guessed.
+ */
+const taxReport = async ({ from, to, basis = "paid", onlySubmitterId = null, scopeUser = null }) => {
+  const paid = basis !== "raised";
+  const day = paid
+    ? client`COALESCE(e.payment_date, e.paid_at)::date`
+    : client`e.expense_date::date`;
+  const rate = client`(CASE WHEN COALESCE(e.currency, 'NGN') = 'NGN' THEN 1
+    ELSE COALESCE(e.paid_exchange_rate, e.exchange_rate) END)`;
+
+  const where = [
+    client`e.deleted_at IS NULL`,
+    client`NOT c.is_refund`,
+    client`(${HAS_VAT} OR ${HAS_WHT})`,
+    paid ? client`e.status = 'paid'` : client`e.status <> 'rejected'`,
+  ];
+  if (from) where.push(client`${day} >= ${from}::date`);
+  if (to) where.push(client`${day} <= ${to}::date`);
+  if (onlySubmitterId != null) {
+    where.push(client`COALESCE(e.added_by, e.recorded_by) = ${Number(onlySubmitterId)}`);
+  } else {
+    const scope = locationScope(scopeUser);
+    if (scope) where.push(scope);
+  }
+  const clause = where.reduce((a, c) => client`${a} AND ${c}`);
+
+  const rows = await client`
+    SELECT e.id, e.reference_number, e.expense_date,
+           COALESCE(e.payment_date, e.paid_at) AS payment_date,
+           e.status, e.vendor, e.vendor_id,
+           COALESCE(NULLIF(e.tin_number, ''), NULLIF(v.tax_id, ''), '') AS vendor_tin,
+           e.description, c.name AS category_name, c.gl_code, p.pfi_number,
+           dc.name AS station_name, ls.name AS plant_name,
+           COALESCE(e.currency, 'NGN') AS currency, ${rate} AS rate,
+           e.amount_ex_vat, e.vat_amount, e.vat_withheld,
+           e.wht_rate, e.wht_deduction, e.untaxed_amount, e.invoice_amount, e.amount,
+           ROUND(COALESCE(e.amount_ex_vat, 0) * ${rate}, 2) AS ex_vat_ngn,
+           ROUND(COALESCE(e.vat_amount, 0) * ${rate}, 2) AS vat_ngn,
+           ROUND(COALESCE(e.wht_deduction, 0) * ${rate}, 2) AS wht_ngn
+    FROM pfi_expenses e
+    JOIN expense_categories c ON c.id = e.category_id
+    LEFT JOIN vendors v ON v.id = e.vendor_id
+    LEFT JOIN pfis p ON p.id = e.pfi_id
+    LEFT JOIN delivery_customers dc ON dc.id = e.delivery_customer_id
+    LEFT JOIN lpg_stations ls ON ls.id = e.lpg_station_id
+    WHERE ${clause}
+    ORDER BY ${day}, e.id
+  `;
+
+  const sum = (pick) => Math.round(rows.reduce((s, r) => s + (pick(r) || 0) * 100, 0)) / 100;
+  const converted = rows.filter((r) => r.rate !== null);
+  const vatWithheld = sum((r) => (r.vat_withheld && r.rate !== null ? Number(r.vat_ngn) : 0));
+  const wht = sum((r) => (r.rate !== null ? Number(r.wht_ngn) : 0));
+
+  return {
+    rows,
+    totals: {
+      count: rows.length,
+      /** VAT kept back from vendors — owed to the tax office. */
+      vatWithheld,
+      /** VAT on older rows, paid to the vendor. Shown, never owed. */
+      vatPaidToVendor: sum((r) => (!r.vat_withheld && r.rate !== null ? Number(r.vat_ngn) : 0)),
+      wht,
+      /** What to pay the tax office for the period. */
+      toRemit: Math.round((vatWithheld + wht) * 100) / 100,
+      /** The amounts before VAT the taxes were worked on. */
+      taxableBase: sum((r) => (r.rate !== null ? Number(r.ex_vat_ngn) : 0)),
+      /** Foreign rows with no rate — no naira value, left out of every figure above. */
+      unconverted: rows.length - converted.length,
+    },
+  };
+};
+
 /** One expense with everything the detail view needs, in two queries. */
 const findExpenseFull = async (id) => {
   const [row] = await client`
@@ -762,16 +864,24 @@ const addComment = async ({ expenseId, body, authorId, authorName }) => {
   return row;
 };
 
+/**
+ * The untaxed lines as JSON text, which Postgres parses into the jsonb column.
+ * Passed bare, postgres.js has no serialiser for a list bound to jsonb and the
+ * write fails. See migration 0066.
+ */
+const withJson = (data) =>
+  Array.isArray(data.untaxed_items) ? { ...data, untaxed_items: JSON.stringify(data.untaxed_items) } : data;
+
 const createExpense = async (data, tx = client) => {
   const [row] = await tx`
-    INSERT INTO pfi_expenses ${tx(data)} RETURNING *
+    INSERT INTO pfi_expenses ${tx(withJson(data))} RETURNING *
   `;
   return row;
 };
 
 const updateExpense = async (id, data, tx = client) => {
   const [row] = await tx`
-    UPDATE pfi_expenses SET ${tx({ ...data, updated_at: new Date().toISOString() })}
+    UPDATE pfi_expenses SET ${tx({ ...withJson(data), updated_at: new Date().toISOString() })}
     WHERE id = ${Number(id)} AND deleted_at IS NULL
     RETURNING *
   `;
@@ -866,6 +976,7 @@ const listOrdersForPfi = async (pfiId) => {
 
 module.exports = {
   aggregatesFor,
+  taxReport,
   listOrdersForPfi,
   ensureCategoryForPfi,
   renameCategoryForPfi,

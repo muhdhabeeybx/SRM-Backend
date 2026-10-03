@@ -39,9 +39,19 @@ const vendorRepo = {
     return mapVendor(row);
   },
 
+  /**
+   * The vendor this name already belongs to, if any. Case, spacing and
+   * punctuation are ignored — "Keonamex Marine Ltd." and "KEONAMEX marine ltd"
+   * are one vendor, and saving them as two splits its spend in two. The
+   * request form matches names the same way (VendorField's vendorKey).
+   */
   async findByName(name) {
-    if (!name) return null;
-    const [row] = await client`SELECT * FROM vendors WHERE LOWER(name) = LOWER(${name}) LIMIT 1`;
+    const key = String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!key) return null;
+    const [row] = await client`
+      SELECT * FROM vendors
+      WHERE regexp_replace(LOWER(name), '[^a-z0-9]', '', 'g') = ${key}
+      ORDER BY id LIMIT 1`;
     return mapVendor(row);
   },
 
