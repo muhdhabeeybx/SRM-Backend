@@ -87,6 +87,7 @@ describe("an order raised with no price", () => {
   let productId;
   let customerId;
   let finance;
+  let pricer;
   let ticketing;
   let entry;
   let exit;
@@ -102,6 +103,9 @@ describe("an order raised with no price", () => {
     });
     customerId = customer.id;
     finance = await staffTokenWithRoles(["finance"], `test-unpriced-fin-${RUN}@soroman.test`);
+    // Whoever raises an unpriced order cannot also price it, so the pricing
+    // in these tests is done by a second member of finance.
+    pricer = await staffTokenWithRoles(["finance"], `test-unpriced-price-${RUN}@soroman.test`);
     ticketing = await staffTokenWithRoles(["ticketing"], `test-unpriced-tkt-${RUN}@soroman.test`);
     entry = await staffTokenWithRoles(["security_entry"], `test-unpriced-in-${RUN}@soroman.test`);
     exit = await staffTokenWithRoles(["security_exit"], `test-unpriced-out-${RUN}@soroman.test`);
@@ -231,13 +235,13 @@ describe("an order raised with no price", () => {
           truckNumber: `UNPR-${RUN}`,
           driverName: "Sani",
           driverPhone: "08010000002",
-          manualTicketNumber: "DEPOT-BOOK-0099",
+          manualTicketNumber: `DEPOT-BOOK-0099-${RUN}`,
         }],
       });
     assert.equal(cut.status, 200, JSON.stringify(cut.body));
 
     const [load] = await orderTruckRepo.findByOrder(orderId);
-    assert.equal(load.manualTicketNumber, "DEPOT-BOOK-0099");
+    assert.equal(load.manualTicketNumber, `DEPOT-BOOK-0099-${RUN}`);
 
     await request(app)
       .post(`/api/orders/${orderId}/gate-in`)
@@ -258,7 +262,7 @@ describe("an order raised with no price", () => {
     // Now the invoice conversation happens.
     const priced = await request(app)
       .post(`/api/orders/${orderId}/price`)
-      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .set("Authorization", `Bearer ${pricer.accessToken}`)
       .send({ price: 250, reason: "Agreed with the customer on the phone" });
     assert.equal(priced.status, 200, JSON.stringify(priced.body));
 
@@ -289,13 +293,13 @@ describe("an order raised with no price", () => {
 
     await request(app)
       .post(`/api/orders/${orderId}/price`)
-      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .set("Authorization", `Bearer ${pricer.accessToken}`)
       .send({ price: 200, reason: "first" })
       .expect(200);
 
     const again = await request(app)
       .post(`/api/orders/${orderId}/price`)
-      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .set("Authorization", `Bearer ${pricer.accessToken}`)
       .send({ price: 999, reason: "second" });
 
     assert.equal(again.status, 409, "repricing is a different act with its own trail");
@@ -390,7 +394,7 @@ describe("an order raised with no price", () => {
 
     await request(app)
       .post(`/api/orders/${orderId}/price`)
-      .set("Authorization", `Bearer ${finance.accessToken}`)
+      .set("Authorization", `Bearer ${pricer.accessToken}`)
       .send({ price: 300, reason: "Agreed" })
       .expect(200);
 

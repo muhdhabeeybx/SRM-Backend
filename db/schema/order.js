@@ -110,6 +110,12 @@ const orders = pgTable(
     pricingStatus: orderPricingStatusEnum("pricing_status").default("priced").notNull(),
     pricedAt: timestamp("priced_at", { withTimezone: true }),
     pricedBy: integer("priced_by").references(() => staff.id, { onDelete: "set null" }),
+    /**
+     * The depot's board price when an unpriced order was raised — what the
+     * agreed price is later measured against. Null on a priced order (its
+     * price IS the board price) and where the board read zero. Migration 0069.
+     */
+    boardPrice: decimal("board_price", { precision: 15, scale: 2 }),
     status: orderStatusEnum("status").default("Pending").notNull(),
 
     // Accountability per stage. These columns — not audit_logs — are the source

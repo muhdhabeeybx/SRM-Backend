@@ -125,12 +125,17 @@ router.delete(
 
 /**
  * Put a price on an order raised without one — the invoice that follows a
- * handwritten ticket. Finance-gated, and refused once an order has a price.
+ * handwritten ticket. Refused once an order has a price.
+ *
+ * Actually enforced (enforceRole), unlike the open requireRole around it: the
+ * price is the one figure in this codebase taken from the caller, so who may
+ * type it is a real gate. Finance or an admin; a super admin always. The
+ * controller also refuses whoever raised or released the order.
  */
 router.post(
   "/:id/price",
   authenticateStaff,
-  requireRole("finance", "super_admin", { message: "Finance access required to price an order" }),
+  enforceRole("finance", "admin", { message: "Only finance or an admin can price an order" }),
   validate({ params: orderSchemas.idParam, body: orderSchemas.setOrderPrice }),
   setOrderPrice
 );

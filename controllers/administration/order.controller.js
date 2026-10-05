@@ -12,6 +12,7 @@ const {
   auditLogRepo,
 } = require("../../repositories");
 const { isWithinScope } = require("../../lib/scopeFilter");
+const { checkCreditLimit, isSuperAdmin } = require("../../lib/creditLimit");
 const { db } = require("../../config/db");
 const { sql } = require("drizzle-orm");
 const { pfiMovements } = require("../../db/schema");
@@ -26,6 +27,55 @@ const orderMergeService = require("../../services/orderMerge.service");
 const { sendOrderInvoiceEmail } = require("../../services/email.service");
 const { sendOrderSummarySMS } = require("../../services/sms.service");
 const { placeOrder, withExpiresAt } = orderService;
+
+/**
+ * Paper ticket numbers in this request already written against another load
+ * at the same depot, or written twice in the request itself.
+ *
+ * Numbers compare trimmed and case-blind: "0123 " and "0123" are one ticket.
+ * The same truck resubmitted on the same order — the idempotent retry path —
+ * is not a second use of its own number.
+ */
+async function paperTicketClashes(tx, order, trucks) {
+  const papers = trucks
+    .map((t) => ({
+      plate: String(t.truckNumber || "").trim(),
+      quantity: Number(t.quantity),
+      number: String(t.manualTicketNumber ?? "").trim(),
+    }))
+    .filter((p) => p.number);
+  if (papers.length === 0) return [];
+
+  const clashes = [];
+  const seen = new Set();
+  for (const p of papers) {
+    const key = p.number.toUpperCase();
+    if (seen.has(key)) clashes.push({ number: p.number, truckNumber: p.plate, inThisBatch: true });
+    seen.add(key);
+  }
+
+  const found = await tx.execute(sql`
+    SELECT t.order_id AS "orderId", t.truck_number AS "truckNumber", t.quantity,
+           t.manual_ticket_number AS number, o.order_number AS "orderNumber", t.created_at AS "createdAt"
+      FROM order_trucks t
+      JOIN orders o ON o.id = t.order_id
+     WHERE o.depot_id = ${order.depotId}
+       AND upper(btrim(t.manual_ticket_number)) IN (${sql.join([...seen].map((k) => sql`${k}`), sql`, `)})`);
+  for (const r of found.rows ?? found) {
+    const key = String(r.number).trim().toUpperCase();
+    const resubmitted = Number(r.orderId) === Number(order.id)
+      && papers.some((p) => p.number.toUpperCase() === key && p.plate === r.truckNumber && p.quantity === Number(r.quantity));
+    if (!resubmitted) {
+      clashes.push({
+        number: String(r.number).trim(),
+        orderNumber: r.orderNumber,
+        truckNumber: r.truckNumber,
+        createdAt: r.createdAt,
+      });
+    }
+  }
+  return clashes;
+}
 
 /** Small helper: an HTTP error the error handler renders with its status. */
 function httpErr(status, message) {
@@ -62,6 +112,28 @@ const getOrderById = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { order: await withExpiresAt(order) } });
 });
 
+/**
+ * A super admin let a customer have more before payment while an earlier lot
+ * is still unsettled past the limit. Written down, with the orders it went
+ * past — see lib/creditLimit.
+ */
+async function recordLimitOverride(orderId, limit, req) {
+  await auditLogRepo.record({
+    entityType: "order",
+    entityId: Number(orderId),
+    action: "order.credit_limit_overridden",
+    actor: { type: "staff", staffId: req.user.id },
+    metadata: {
+      reason: limit.reason,
+      overdueOrders: limit.overridden.map((o) => ({
+        id: o.id, orderNumber: o.orderNumber, daysOutstanding: o.daysOutstanding,
+      })),
+    },
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+}
+
 // The desk places an order FOR a customer: the customer id comes from the
 // request body. The shared placeOrder service does the real work; this handler
 // only supplies who the customer is. See also the customer portal's
@@ -92,12 +164,24 @@ const createOrder = asyncHandler(async (req, res) => {
     });
   }
 
+  /*
+   * An unpriced order is product out before payment, so the same limit as
+   * releasing on credit applies: not while this customer's last lot is still
+   * unsettled past the limit, unless a super admin overrides with a reason.
+   */
+  let limit = { ok: true };
+  if (unpriced) {
+    limit = await checkCreditLimit({ customerId, user: req.user, override: req.body.limitOverride });
+    if (!limit.ok) return res.status(limit.status).json(limit.body);
+  }
+
   const { order, payment } = await placeOrder({
     customerId, state, depotId, productId, quantity, deliveryType, deliveryAddress, companyName, trucks,
     expectedTrucks,
     unpriced: unpriced || null,
     actor: { type: "staff", staffId: req.user.id },
   });
+  if (limit.overridden) await recordLimitOverride(order.id, limit, req);
 
   res.status(201).json({
     success: true,
@@ -1122,6 +1206,38 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
       throw httpErr(400, `Exceeds order quantity: ${(alreadyTicketed + incoming).toLocaleString()} requested against ${capacity.toLocaleString()} ordered (${alreadyTicketed.toLocaleString()} already ticketed)`);
     }
 
+    // ── The paper ticket number, used once ────────────────────────────────
+    // A handwritten ticket number already on another load at this depot is
+    // the one way a single paper ticket loads two trucks. It is not refused
+    // outright — books get restarted, numbers repeat across years — but it is
+    // asked about, and a second use somebody confirms is written down.
+    const reuse = await paperTicketClashes(tx, order, trucks);
+    if (reuse.length && !req.body.manualTicketReuseConfirmed) {
+      // The first few, named; the rest counted — the screen lists them all.
+      const named = reuse
+        .slice(0, 3)
+        .map((c) => `${c.number} (${c.inThisBatch ? "twice in this request" : `${c.orderNumber}, truck ${c.truckNumber}`})`);
+      const list = named.join(", ") + (reuse.length > 3 ? ` and ${reuse.length - 3} more` : "");
+      throw Object.assign(
+        httpErr(409, `Paper ticket number already used at this depot: ${list}. Check the ticket, or confirm it is a second use.`),
+        { details: { code: "MANUAL_TICKET_REUSED", clashes: reuse } },
+      );
+    }
+    if (reuse.length) {
+      await auditLogRepo.record(
+        {
+          entityType: "order",
+          entityId: orderId,
+          action: "order.manual_ticket_reused",
+          actor: { type: "staff", staffId: req.user.id },
+          metadata: { clashes: reuse },
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        tx,
+      );
+    }
+
     // ── Append, continuing the numbering ──────────────────────────────────
     // Read under the row lock, so a concurrent call cannot pick the same start.
     const startIndex = existing.reduce((max, l) => Math.max(max, Number(l.truckIndex || 0)), 0);
@@ -1517,7 +1633,7 @@ const setOrderPrice = asyncHandler(async (req, res) => {
   const actor = { type: "staff", staffId: req.user.id };
   const audit = { ipAddress: req.ip, userAgent: req.headers["user-agent"] };
 
-  await db.transaction(async (tx) => {
+  const priced = await db.transaction(async (tx) => {
     const order = await orderRepo.lockById(orderId, tx);
     if (!order) throw httpErr(404, "Order not found");
 
@@ -1532,8 +1648,45 @@ const setOrderPrice = asyncHandler(async (req, res) => {
     }
     if (!reason) throw httpErr(400, "A reason is required — say what this price was agreed against");
 
+    /*
+     * Two people, not one. Whoever raised the order or let it load before
+     * payment does not also decide what it costs — the person who handed the
+     * product over is the worst-placed to set the figure that settles it. A
+     * super admin may do both.
+     */
+    if (!isSuperAdmin(req.user)) {
+      const involved = await tx.execute(sql`
+        SELECT DISTINCT actor_staff_id AS id
+          FROM audit_logs
+         WHERE entity_type = 'order' AND entity_id = ${orderId}
+           AND action IN ('order.created', 'order.credit_authorised')
+           AND actor_staff_id IS NOT NULL`);
+      const ids = new Set((involved.rows ?? involved).map((r) => Number(r.id)));
+      if (order.creditAuthorisedBy) ids.add(Number(order.creditAuthorisedBy));
+      if (ids.has(Number(req.user.id))) {
+        throw httpErr(
+          403,
+          "You raised this order or released it before payment, so somebody else has to price it.",
+        );
+      }
+    }
+
     const quantity = Number(order.quantity);
     const totalAmount = price * quantity;
+
+    /*
+     * Under the board it left at: allowed — the owner's decision — but never
+     * silent. The gap goes into the audit row here, and onto the order and the
+     * receivables list, which read the same kept board price (migration 0069).
+     */
+    const board = Number(order.boardPrice);
+    const belowBoard = board > 0 && price < board
+      ? {
+          boardPrice: board,
+          perUnit: Math.round((board - price) * 100) / 100,
+          gap: Math.round((board - price) * quantity * 100) / 100,
+        }
+      : null;
 
     /**
      * The credit allowance is left exactly as it is.
@@ -1567,6 +1720,8 @@ const setOrderPrice = asyncHandler(async (req, res) => {
           quantity,
           totalAmount,
           reason,
+          boardPrice: board > 0 ? board : null,
+          belowBoard,
           // How long it sat without one. The number worth watching: a day is
           // ordinary, a month means the invoice was never going to be raised.
           daysUnpriced: Math.max(
@@ -1578,6 +1733,7 @@ const setOrderPrice = asyncHandler(async (req, res) => {
       },
       tx,
     );
+    return { belowBoard };
   });
 
   const order = await orderRepo.findByIdFull(orderId);
@@ -1636,12 +1792,15 @@ const setOrderPrice = asyncHandler(async (req, res) => {
   }
 
   const sentTo = [emailSent && "email", smsSent && "SMS"].filter(Boolean).join(" and ");
+  const under = priced.belowBoard
+    ? ` ₦${priced.belowBoard.perUnit.toLocaleString()} under the board of ₦${priced.belowBoard.boardPrice.toLocaleString()} — ₦${priced.belowBoard.gap.toLocaleString()} on this order.`
+    : "";
   res.json({
     success: true,
     message: `Priced at ₦${price.toLocaleString()} — ₦${Number(order.totalAmount).toLocaleString()} ${
       sentTo ? `invoiced by ${sentTo}` : "now invoiceable (the customer could not be messaged)"
-    }`,
-    data: { order, invoice: { emailSent, smsSent } },
+    }.${under}`,
+    data: { order, invoice: { emailSent, smsSent }, belowBoard: priced.belowBoard },
   });
 });
 
@@ -1677,6 +1836,14 @@ const authoriseCreditRelease = asyncHandler(async (req, res) => {
   const reason = String(req.body.reason || "").trim();
   const actor = { type: "staff", staffId: req.user.id };
   const audit = { ipAddress: req.ip, userAgent: req.headers["user-agent"] };
+
+  // Not while this customer's last lot before payment is unsettled past the limit.
+  const target = await orderRepo.findById(orderId);
+  if (!target) return res.status(404).json({ success: false, message: "Order not found" });
+  const limit = await checkCreditLimit({
+    customerId: target.customerId, excludeOrderId: orderId, user: req.user, override: req.body.limitOverride,
+  });
+  if (!limit.ok) return res.status(limit.status).json(limit.body);
 
   const result = await db.transaction(async (tx) => {
     const order = await orderRepo.lockById(orderId, tx);
@@ -1746,6 +1913,7 @@ const authoriseCreditRelease = asyncHandler(async (req, res) => {
 
     return { order: updated, releasedNow };
   });
+  if (limit.overridden) await recordLimitOverride(orderId, limit, req);
 
   const order = await orderRepo.findByIdFull(orderId);
   res.json({

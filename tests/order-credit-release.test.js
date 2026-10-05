@@ -182,14 +182,14 @@ describe("manual loading ticket — released on credit, paid afterwards", () => 
             truckNumber: `CRED-${RUN}`,
             driverName: "Musa",
             driverPhone: "08010000001",
-            manualTicketNumber: "DEPOT-BOOK-0042",
+            manualTicketNumber: `DEPOT-BOOK-0042-${RUN}`,
           },
         ],
       });
     assert.equal(cut.status, 200, JSON.stringify(cut.body));
 
     const [load] = await orderTruckRepo.findByOrder(order.id);
-    assert.equal(load.manualTicketNumber, "DEPOT-BOOK-0042", "the paper ticket is tied to the row");
+    assert.equal(load.manualTicketNumber, `DEPOT-BOOK-0042-${RUN}`, "the paper ticket is tied to the row");
 
     // The credit cannot now be withdrawn — there is product committed against it.
     const revoke = await request(app)

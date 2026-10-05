@@ -127,6 +127,13 @@ const errorHandler = (err, req, res, next) => {
     }));
   }
 
+  // A client error may say what it needs answered — a code and the facts the
+  // screen asks the person about. Set deliberately by the thrower, never from
+  // the error's own fields, and never on a 5xx.
+  if (status < 500 && err.details && typeof err.details === "object") {
+    body.details = err.details;
+  }
+
   if (isDetailAllowed() && status >= 500) {
     body.detail = err.message;
     body.stack = err.stack;

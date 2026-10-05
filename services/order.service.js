@@ -547,6 +547,8 @@ async function placeOrder({
    */
   let serverPrice = 0;
   let totalAmount = 0;
+  /** The board an unpriced order left at — kept, never charged (migration 0069). */
+  let boardPrice = null;
   if (pinned) {
     serverPrice = Number(pinned.price);
     if (!(serverPrice > 0)) throw httpError(400, "An agreed price is required");
@@ -565,6 +567,13 @@ async function placeOrder({
     if (!String(unpriced.reason || "").trim()) {
       throw httpError(400, "A reason is required to raise an order with no price");
     }
+    /*
+     * Read, not charged. The agreed price is measured against this when the
+     * order is priced, and it has to be taken now: every board is zeroed at
+     * 23:59, so by the time anyone prices the order it is gone.
+     */
+    const board = await depotRepo.getProductPrice(depotId, productId);
+    if (Number(board?.currentPrice) > 0) boardPrice = String(Number(board.currentPrice));
   }
 
   // Stock no longer gates a sale — a price does (see catalog.service). We
@@ -705,6 +714,7 @@ async function placeOrder({
         ...(unpriced
           ? {
               pricingStatus: "pending",
+              boardPrice,
               creditQty: String(Number(quantity)),
               creditReason: String(unpriced.reason).trim(),
               creditAuthorisedBy: actor.staffId,

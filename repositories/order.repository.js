@@ -232,6 +232,7 @@ const FULL_ORDER_COLUMNS = {
   pricingStatus: orders.pricingStatus,
   pricedAt: orders.pricedAt,
   pricedBy: orders.pricedBy,
+  boardPrice: orders.boardPrice,
   pricedByName: sql`(
     SELECT NULLIF(TRIM(CONCAT(s.first_name, ' ', s.surname)), '')
       FROM staff s WHERE s.id = ${orders.pricedBy}
@@ -1709,6 +1710,26 @@ const findStalePending = async (cutoff) => {
  * credit in January and completed in March has been exposed since January, and
  * dating it from completion would flatter the number by two months.
  */
+/**
+ * How far under the board an order raised without a price was priced.
+ *
+ * Only an order that was raised unpriced has a board price kept against it
+ * (migration 0069), and only once it has been priced is there a gap to state.
+ * Pricing under the board is allowed; this is what makes it visible.
+ */
+const belowBoard = (r) => {
+  const board = Number(r.boardPrice);
+  const price = Number(r.price);
+  if (r.pricingStatus === "pending" || !(board > 0) || !(price > 0) || price >= board) {
+    return { belowBoard: false, belowBoardGap: 0 };
+  }
+  return {
+    belowBoard: true,
+    belowBoardPerUnit: Math.round((board - price) * 100) / 100,
+    belowBoardGap: Math.round((board - price) * Number(r.quantity) * 100) / 100,
+  };
+};
+
 const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
   const ref = orderReferenceSql("o", "c");
   const term = String(search || "").trim();
@@ -1724,6 +1745,8 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
            o.amount_paid                             AS "amountPaid",
            (o.total_amount - o.amount_paid)          AS outstanding,
            o.pricing_status                          AS "pricingStatus",
+           o.price,
+           o.board_price                             AS "boardPrice",
            o.credit_qty                              AS "creditQty",
            o.credit_reason                           AS "creditReason",
            o.credit_authorised_at                    AS "creditAuthorisedAt",
@@ -1768,6 +1791,7 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
     outstanding: Number(r.outstanding),
     creditQty: Number(r.creditQty ?? 0),
     daysOutstanding: Number(r.daysOutstanding ?? 0),
+    ...belowBoard(r),
   }));
 
   const list = minDays > 0 ? all.filter((r) => r.daysOutstanding >= Number(minDays)) : all;
@@ -1795,6 +1819,9 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
       overThirtyDays: list
         .filter((r) => r.daysOutstanding >= 30 && !r.awaitingPrice)
         .reduce((sum, r) => sum + r.outstanding, 0),
+      // Priced under the board they left at — allowed, and shown.
+      belowBoard: list.filter((r) => r.belowBoard).length,
+      belowBoardGap: list.reduce((sum, r) => sum + (r.belowBoardGap || 0), 0),
     },
   };
 };

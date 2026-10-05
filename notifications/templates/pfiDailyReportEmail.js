@@ -277,6 +277,43 @@ const depotSales = (pfis) =>
     pfis.map(depotRow)
   );
 
+// ─── Out before payment ─────────────────────────────────────────────────────
+
+/**
+ * Product that left before it was paid for — the manual ticket. Absent from
+ * every money figure above, because none of it has been paid: an unpriced
+ * order has no value yet, and a credit release is owed, not revenue. Shown
+ * only when there is some, since most days there is none.
+ *
+ * Mirrored in soromanfe routes/admin-reports/-operations-model.ts — the page
+ * and the email are one report.
+ */
+const beforePayment = (pfis) => {
+  const out = pfis.filter((p) => p.beforePayment && (p.beforePayment.unpricedOrders > 0 || p.beforePayment.creditOrders > 0));
+  if (!out.length) return "";
+  return (
+    section("Out before payment", "awaiting a price, or released before payment and unpaid") +
+    table(
+      ["PFI", "Location", "Awaiting a price", "Orders", "Released before payment", "Orders", "Owed on those"],
+      out.map((p) => {
+        const b = p.beforePayment;
+        const owed = m(b.creditOwed);
+        return (
+          `<tr>` +
+          idCell(p.pfiNumber) +
+          cell(escapeHtml(up(p.location)) || "—") +
+          cell(q0(b.unpricedLitres, p.unit), { r: true }) +
+          cell(c0(b.unpricedOrders), { r: true }) +
+          cell(q0(b.creditLitres, p.unit), { r: true }) +
+          cell(c0(b.creditOrders), { r: true }) +
+          cell(owed, balance(owed)) +
+          `</tr>`
+        );
+      })
+    )
+  );
+};
+
 // ─── Loading and exit gate ──────────────────────────────────────────────────
 
 /**
@@ -791,6 +828,7 @@ const renderPfiDailyReportEmail = (d) => {
      * totals, and every figure in them can be traced to the rows it came from.
      */
     depotSales(pfis) +
+    beforePayment(pfis) +
     gateReport(pfis) +
     expenses(d.expenseLines) +
     commissions(pfis) +

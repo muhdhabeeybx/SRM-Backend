@@ -158,6 +158,16 @@ const collectionsFor = async (pfiIds) => {
  *
  * @returns {Promise<Map<number, object>>}
  */
+/** An order raised with no price, not since cancelled or lapsed. */
+const UNPRICED = client.unsafe(
+  "o.pricing_status = 'pending' AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')",
+);
+/** A priced order trusted to load before payment, and not yet paid. */
+const CREDIT_UNPAID = client.unsafe(
+  "o.credit_qty > 0 AND o.pricing_status = 'priced' AND o.payment_status::text <> 'Paid' "
+  + "AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')",
+);
+
 const activityFor = async (pfiIds) => {
   const out = new Map();
   const list = ids(pfiIds);
@@ -177,7 +187,15 @@ const activityFor = async (pfiIds) => {
              MIN(o.created_at) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')) AS "firstOrderAt",
              MAX(o.created_at) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')) AS "lastOrderAt",
              MIN(o.payment_confirmed_at) AS "firstConfirmedAt",
-             MAX(o.payment_confirmed_at) AS "lastConfirmedAt"
+             MAX(o.payment_confirmed_at) AS "lastConfirmedAt",
+             -- Out before payment, and so in none of the money-landed figures
+             -- above (manual ticket, migrations 0048/0049). Unpriced orders
+             -- count by quantity only: their naira figures are placeholders.
+             COUNT(*) FILTER (WHERE ${UNPRICED})::int AS "awaitingPriceOrders",
+             COALESCE(SUM(o.quantity) FILTER (WHERE ${UNPRICED}), 0)::text AS "awaitingPriceQty",
+             COUNT(*) FILTER (WHERE ${CREDIT_UNPAID})::int AS "creditUnpaidOrders",
+             COALESCE(SUM(o.quantity) FILTER (WHERE ${CREDIT_UNPAID}), 0)::text AS "creditUnpaidQty",
+             COALESCE(SUM(GREATEST(o.total_amount - o.amount_paid, 0)) FILTER (WHERE ${CREDIT_UNPAID}), 0)::text AS "creditOwed"
         FROM orders o
        WHERE o.pfi_id = ANY(${list})
        GROUP BY o.pfi_id
@@ -210,6 +228,7 @@ const activityFor = async (pfiIds) => {
     firstOrderAt: null, lastOrderAt: null, firstConfirmedAt: null, lastConfirmedAt: null,
     firstPaymentAt: null, lastPaymentAt: null, statementPayments: 0,
     trucks: 0, trucksOut: 0, truckQty: 0,
+    awaitingPriceOrders: 0, awaitingPriceQty: 0, creditUnpaidOrders: 0, creditUnpaidQty: 0, creditOwed: 0,
   });
   for (const id of list) out.set(id, blank());
 
@@ -220,6 +239,9 @@ const activityFor = async (pfiIds) => {
       salesValue: Number(r.salesValue),
       received: Number(r.received),
       outstanding: Number(r.outstanding),
+      awaitingPriceQty: Number(r.awaitingPriceQty),
+      creditUnpaidQty: Number(r.creditUnpaidQty),
+      creditOwed: Number(r.creditOwed),
     });
   }
   for (const { pfiId, ...r } of paymentRows) Object.assign(out.get(Number(pfiId)), r);

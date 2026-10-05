@@ -34,6 +34,17 @@ const pickupTruck = z.object({
  * customer declares each truck and its quantity here, at order time. Delivery
  * orders leave it empty — their fleet trucks are allocated at release.
  */
+/**
+ * A super admin's reason for giving a customer more before payment while an
+ * earlier lot is still unsettled past the limit (lib/creditLimit). Ignored
+ * from anyone else — the controller checks the role, not this field.
+ */
+const limitOverride = z
+  .object({
+    reason: z.string().trim().min(3, "Say why the limit is being overridden").max(500, "Reason is too long"),
+  })
+  .optional();
+
 const createOrder = z.object({
   customer: id("Customer"),
   depot: id("Depot"),
@@ -64,6 +75,7 @@ const createOrder = z.object({
         .max(500, "Reason is too long"),
     })
     .optional(),
+  limitOverride,
 });
 
 const listOrders = pagination.extend({
@@ -194,6 +206,7 @@ const creditRelease = z.object({
     .trim()
     .min(3, "Say why this order is being released before payment")
     .max(500, "Reason is too long"),
+  limitOverride,
 });
 
 /**

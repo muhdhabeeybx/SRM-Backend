@@ -111,7 +111,15 @@ const buildPfiDailyReportData = async (date = new Date()) => {
            COALESCE(SUM(o.amount_paid::numeric), 0)            AS paid_all,
            COUNT(*)                    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}) AS orders_today,
            COALESCE(SUM(o.quantity)    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS litres_today,
-           COALESCE(SUM(o.total_amount::numeric) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS value_today
+           COALESCE(SUM(o.total_amount::numeric) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS value_today,
+           -- Out before payment (the manual ticket). Unpriced by quantity only:
+           -- their naira figures are placeholders.
+           COUNT(*)                    FILTER (WHERE o.pricing_status = 'pending') AS unpriced_orders,
+           COALESCE(SUM(o.quantity)    FILTER (WHERE o.pricing_status = 'pending'), 0) AS unpriced_litres,
+           COUNT(*)                    FILTER (WHERE o.credit_qty > 0 AND o.pricing_status = 'priced' AND o.payment_status::text <> 'Paid') AS credit_orders,
+           COALESCE(SUM(o.quantity)    FILTER (WHERE o.credit_qty > 0 AND o.pricing_status = 'priced' AND o.payment_status::text <> 'Paid'), 0) AS credit_litres,
+           COALESCE(SUM(GREATEST(o.total_amount::numeric - o.amount_paid::numeric, 0))
+                                       FILTER (WHERE o.credit_qty > 0 AND o.pricing_status = 'priced' AND o.payment_status::text <> 'Paid'), 0) AS credit_owed
       FROM orders o
      WHERE o.pfi_id IS NOT NULL
        AND o.status NOT IN ('Cancelled', 'Expired')
@@ -367,6 +375,15 @@ const buildPfiDailyReportData = async (date = new Date()) => {
         today: { count: Number(o.orders_today || 0), litres: num(o.litres_today), value: num(o.value_today), paid: collected },
         toDate: { count: Number(o.orders_all || 0), litres: num(o.litres_all), value: valueAll, paid: paidAll },
         outstanding: Math.max(0, valueAll - paidAll),
+      },
+
+      /** Product out before payment — awaiting a price, or released on credit and unpaid. */
+      beforePayment: {
+        unpricedOrders: Number(o.unpriced_orders || 0),
+        unpricedLitres: num(o.unpriced_litres),
+        creditOrders: Number(o.credit_orders || 0),
+        creditLitres: num(o.credit_litres),
+        creditOwed: num(o.credit_owed),
       },
 
       movements: {
