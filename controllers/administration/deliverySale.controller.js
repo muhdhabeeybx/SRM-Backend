@@ -5,6 +5,7 @@ const { client } = require("../../config/db");
 const { allocationCodesFor } = require("../../lib/pfiScope");
 const { scopedStationIds, stationVisible } = require("../../lib/stationScope");
 const pfiBankScope = require("../../lib/pfiBankScope");
+const stationEntry = require("../../lib/stationEntry");
 
 /** The signed-in person's name, as the ledger writes it: "First Surname", else their email. */
 const actorName = (user) =>
@@ -23,6 +24,17 @@ const notFound = (res) => res.status(404).json({ success: false, message: "Sale 
 const forbidden = (res, message) => res.status(403).json({ success: false, message });
 
 const saleVisible = (codes, sale) => codes === null || (!!sale && codes.includes(code(sale.allocationCode)));
+
+/*
+  ── Who enters a station's rows ────────────────────────────────────────────
+
+  Seeing a station is not the same as entering for it. Its sales and
+  expenses, and its deposits, may each be given to named people
+  (lib/stationEntry.js, migration 0067); a row of that kind is then written,
+  changed and deleted by them alone — and by admins, to correct. Every write
+  below asks, after the visibility checks, so somebody who cannot see the
+  station is still told "not yours" rather than who enters it.
+*/
 
 /**
  * The filling-station half of visibility, beside the PFI half above. Someone
@@ -129,8 +141,13 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   }
   if (bankAccountId) await pfiBankScope.assertAccountAllowed(req.user, bankAccountId);
   if (!stationWriteOk(req.user, base)) return forbidden(res, "That station is not one of yours.");
+  // A claimed credit is a deposit before it has an amount: the amount comes
+  // off the statement line, after this.
+  const claiming = Array.isArray(lineIds) && lineIds.length > 0;
+  const refusal = await stationEntry.refusalFor(req.user, [base], claiming ? { kinds: ["deposits"] } : {});
+  if (refusal) return forbidden(res, refusal);
 
-  if (Array.isArray(lineIds) && lineIds.length) {
+  if (claiming) {
     const sales = await deliverySaleRepo.createFromStatementLines({
       lineIds,
       bankAccountId,
@@ -207,6 +224,9 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
   for (const accountId of new Set(rows.map((r) => r.bankAccountId).filter(Boolean))) {
     await pfiBankScope.assertAccountAllowed(req.user, accountId);
   }
+  // All or nothing, like the insert: one row of somebody else's kind refuses the lot.
+  const refusal = await stationEntry.refusalFor(req.user, rows);
+  if (refusal) return forbidden(res, refusal);
 
   const sales = await deliverySaleRepo.createMany(rows);
   res.status(201).json({
@@ -240,6 +260,9 @@ const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
   if (ends.some((end) => !stationWriteOk(req.user, end))) {
     return forbidden(res, "Both ends of a transfer must be at your stations.");
   }
+  // Moving banked money between loads is deposits work, at both ends.
+  const refusal = await stationEntry.refusalFor(req.user, ends, { kinds: ["deposits"] });
+  if (refusal) return forbidden(res, refusal);
   const actor = req.user?.name || req.user?.email || "";
   const result = await deliverySaleRepo.transferOverpayment({
     from: req.body.from,
@@ -288,6 +311,10 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });
   }
+  // Theirs as it stands AND as it would stand: a sales row cannot be edited
+  // into a deposit by somebody who does not enter deposits, nor the reverse.
+  const refusal = await stationEntry.refusalFor(req.user, [sale, { ...sale, ...req.body }]);
+  if (refusal) return forbidden(res, refusal);
 
   // An edit is not a new author: whoever recorded the row stays on it. The
   // page resends the whole row, "Unknown" and all, so it is dropped here.
@@ -340,9 +367,12 @@ const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
 
 const deleteDeliverySale = asyncHandler(async (req, res) => {
   const codes = await allocationCodesFor(req.user);
-  if (codes !== null || scopedStationIds(req.user) !== null) {
+  if (codes !== null || scopedStationIds(req.user) !== null || !stationEntry.mayAlwaysEnter(req.user)) {
     const existing = await deliverySaleRepo.findById(req.params.id);
-    if (!existing || !saleVisible(codes, existing) || !stationOk(req.user, existing)) return notFound(res);
+    if (existing && (!saleVisible(codes, existing) || !stationOk(req.user, existing))) return notFound(res);
+    if ((codes !== null || scopedStationIds(req.user) !== null) && !existing) return notFound(res);
+    const refusal = await stationEntry.refusalFor(req.user, existing ? [existing] : []);
+    if (refusal) return forbidden(res, refusal);
   }
   const sale = await deliverySaleRepo.deleteById(req.params.id);
   if (!sale) {

@@ -53,6 +53,7 @@ const API_PERMISSIONS = {
   "/api/delivery-customers": { read: null },
   "/api/delivery-inventory": { read: null },
   "/api/delivery-sales": { read: null },
+  "/api/station-entry-staff": { read: null },
   "/api/offline-sales": { read: null },
   "/api/incidents": { read: null },
   "/api/daily-reports": { read: null },

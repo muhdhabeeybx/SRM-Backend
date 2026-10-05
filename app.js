@@ -96,6 +96,8 @@ app.use("/api/people", require("./routes/administration/people.route"));
 app.use("/api/delivery-customers", require("./routes/administration/deliveryCustomer.route"));
 app.use("/api/delivery-inventory", require("./routes/administration/deliveryInventory.route"));
 app.use("/api/delivery-sales", require("./routes/administration/deliverySale.route"));
+// Who enters a station's sales and its deposits — migration 0067.
+app.use("/api/station-entry-staff", require("./routes/administration/stationEntryStaff.route"));
 app.use("/api/orders", require("./routes/administration/order.route"));
 // Overpayment sent back to the customer. Its own mount rather than a path
 // under /api/orders, where it would have to be matched above /:id.
