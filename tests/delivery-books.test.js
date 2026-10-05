@@ -221,6 +221,25 @@ describe("two books on one load", () => {
     assert.equal(b.unpaid, 18500000);
   });
 
+  test("a station's share nobody has charged owes nothing, even on a split truck priced for another buyer", () => {
+    const customers = [
+      { id: stationId, customerType: "filling_station" },
+      { id: customerId, customerType: "customer" },
+    ];
+    const entries = [{ id: 1, truckNumber: PLATE, dateAllocated: DAY, allocationCode: CODE, quantityAllocated: 33000, customerId: stationId }];
+    const sale = (o) => ({ truckNumber: PLATE, dateLoaded: DAY, book: "trucking", ...o });
+    const b = summariseBatches({
+      entries,
+      sales: [
+        sale({ id: 1, customerId: stationId, quantity: 17000 }),
+        sale({ id: 2, customerId, quantity: 16000, rate: 965, salesValue: 15440000, paymentAmount: 15440000 }),
+      ],
+      customers,
+    }).get(CODE);
+    assert.equal(b.salesValue, 15440000);
+    assert.equal(b.unpaid, 0);
+  });
+
   test("a station's position reads its own days, and its share off the truck sale", () => {
     const loading = { id: 1, truckNumber: PLATE, dateAllocated: DAY, allocationCode: CODE, quantityAllocated: 45000, customerId: stationId };
     const sale = (o) => ({ truckNumber: PLATE, dateLoaded: DAY, customerId: stationId, ...o });
