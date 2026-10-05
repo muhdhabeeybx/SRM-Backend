@@ -1,11 +1,11 @@
-const { registerWorker, scheduleCron } = require("../config/queue");
+const { registerWorker, scheduleCron, startQueue } = require("../config/queue");
 const { rolesFor } = require("../notifications/staffChoices");
 const { expiryTimeOfDay, EXPIRY_TZ } = require("../config/orderExpiry");
 const { expireStaleOrders } = require("../services/order.service");
 const { expireStaleRequests } = require("../services/requestExpiry.service");
 const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
 const { notify } = require("../notifications");
-const { runDeskNudges } = require("../services/deskNudge.service");
+const { runRound: runWorkReminders, cronExpression: workReminderCron } = require("../services/workReminders.service");
 const { resetPricesForTheDay } = require("../services/priceReset.service");
 const { syncTermii } = require("../services/messageLog.service");
 
@@ -13,7 +13,9 @@ const { syncTermii } = require("../services/messageLog.service");
 // cron — not part of the WhatsApp queue set.
 const EXPIRY_QUEUE = "order-expiry-sweep";
 const DAILY_REPORT_QUEUE = "daily-report-send";
+/** Retired 2026-10-05 for the work reminders below; unscheduled at boot. */
 const DESK_NUDGE_QUEUE = "desk-nudge-sweep";
+const WORK_REMINDER_QUEUE = "work-reminders";
 const PRICE_RESET_QUEUE = "depot-price-reset";
 const MESSAGE_COST_QUEUE = "message-cost-sync";
 const MESSAGE_COST_CRON = process.env.MESSAGE_COST_CRON || "*/30 * * * *";
@@ -23,13 +25,6 @@ const MESSAGE_COST_CRON = process.env.MESSAGE_COST_CRON || "*/30 * * * *";
  * on sale at yesterday's price. See services/priceReset.service.js.
  */
 const PRICE_RESET_CRON = process.env.PRICE_RESET_CRON || "59 23 * * *";
-
-/**
- * 08:00 Africa/Lagos, every day — the start of the working day, when a desk
- * can still act on what it is told. Local time with an explicit tz for the
- * same reason the daily report uses it.
- */
-const DESK_NUDGE_CRON = process.env.DESK_NUDGE_CRON || "0 8 * * *";
 
 /**
  * 23:50 Africa/Lagos, every day.
@@ -108,25 +103,42 @@ const start = async () => {
 
   await scheduleCron(DAILY_REPORT_QUEUE, DAILY_REPORT_CRON, {}, { tz: DAILY_REPORT_TZ });
 
-  // ── Desk backlogs ─────────────────────────────────────────────────────────
+  // ── Reminders of waiting work ─────────────────────────────────────────────
   //
-  // Tells ticketing, the entrance gate and the exit gate what is still sitting
-  // on them. Swallows its own failure rather than dead-lettering: a nudge that
-  // did not go out is a nudge, not a lost report, and retrying it an hour
-  // later would arrive as a duplicate of a queue that has since moved.
-  await registerWorker(DESK_NUDGE_QUEUE, async () => {
+  // Every two hours in the working day (WORK_REMINDER_HOURS, default 8–20),
+  // each member of staff with something waiting on them gets one text listing
+  // it all. See services/workReminders.service.js.
+  //
+  // It replaces the 08:00 desk nudge, which told only ticketing and the gates,
+  // only in the app, and only once a day. That schedule is removed here —
+  // pg-boss keeps a schedule in its own table until told otherwise. The manual
+  // desk-nudge buttons on the dashboard still work.
+  //
+  // Swallows its own failure: a round that did not go out is followed by the
+  // next one two hours later, and a retry an hour late would only arrive as a
+  // duplicate of a queue that has since moved.
+  try {
+    const boss = await startQueue();
+    await boss.unschedule(DESK_NUDGE_QUEUE);
+  } catch {
+    // Never scheduled on this database — nothing to remove.
+  }
+  await registerWorker(WORK_REMINDER_QUEUE, async () => {
     try {
-      const results = await runDeskNudges();
-      const said = results.filter((r) => r.notified).map((r) => `${r.desk} ${r.count}`);
-      console.log(`[scheduler] desk nudges — ${said.join(", ") || "every desk clear"}`);
-      return { results };
+      const result = await runWorkReminders({ trigger: "schedule" });
+      console.log(
+        result.skipped
+          ? `[scheduler] work reminders — ${result.reason}`
+          : `[scheduler] work reminders ${result.round} — ${result.people} people, ${result.texted} texted, ${result.failed} failed`
+      );
+      return { round: result.round, skipped: Boolean(result.skipped) };
     } catch (err) {
-      console.error("[scheduler] desk nudges failed:", err.message);
+      console.error("[scheduler] work reminders failed:", err.message);
       return { failed: true };
     }
   });
-  await scheduleCron(DESK_NUDGE_QUEUE, DESK_NUDGE_CRON, {}, { tz: DAILY_REPORT_TZ });
-  console.log(`[scheduler] desk nudges scheduled (${DESK_NUDGE_CRON} ${DAILY_REPORT_TZ})`);
+  await scheduleCron(WORK_REMINDER_QUEUE, workReminderCron(), {}, { tz: DAILY_REPORT_TZ });
+  console.log(`[scheduler] work reminders scheduled (${workReminderCron()} ${DAILY_REPORT_TZ})`);
   console.log(
     `[scheduler] daily report scheduled (${DAILY_REPORT_CRON} ${DAILY_REPORT_TZ})`
   );
@@ -176,4 +188,4 @@ const start = async () => {
   }
 };
 
-module.exports = { start, EXPIRY_QUEUE, DAILY_REPORT_QUEUE, DAILY_REPORT_CRON, PRICE_RESET_QUEUE, PRICE_RESET_CRON };
+module.exports = { start, EXPIRY_QUEUE, DAILY_REPORT_QUEUE, DAILY_REPORT_CRON, PRICE_RESET_QUEUE, PRICE_RESET_CRON, WORK_REMINDER_QUEUE };

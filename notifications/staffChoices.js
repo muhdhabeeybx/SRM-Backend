@@ -154,6 +154,16 @@ const CHOICES = [
     personal: true,
   },
   {
+    // Every two hours, one text listing everything waiting on the person —
+    // see services/workReminders.service.js for who owes what.
+    key: "work_reminders",
+    label: "Reminders of waiting work",
+    description:
+      "Every two hours in the working day, one text and bell notice listing everything still waiting on them: payments, tickets, gates, expenses, approvals, daily reports.",
+    types: ["staff.work_reminder"],
+    personal: true,
+  },
+  {
     // Sent to the officers of the next desk on the order's PFI, by text as
     // well as the bell — see notifications/deskOfficers.js for who that is.
     key: "desk_steps",

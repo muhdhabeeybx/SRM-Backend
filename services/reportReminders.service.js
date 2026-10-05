@@ -314,4 +314,4 @@ const sendReminders = async ({ date, targets, note, dryRun = false }, { actor } 
   return { date, results, skipped };
 };
 
-module.exports = { outstandingReports, sendReminders, reminderText, shortPfi, FILER_ROLES };
+module.exports = { outstandingReports, sendReminders, reminderText, shortPfi, dayLabel, FILER_ROLES, REPORT_NAMES };

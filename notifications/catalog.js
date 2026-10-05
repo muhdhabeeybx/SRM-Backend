@@ -1690,6 +1690,45 @@ const CATALOG = {
     dedupe: (d) => `staff.trucks_on_yard:${new Date().toISOString().slice(0, 10)}:${d.count}`,
   },
 
+  /**
+   * Everything waiting on one person, every two hours until it is done.
+   * services/workReminders.service.js decides who owes what; the lines are
+   * its phrases ("4 orders to ticket, oldest 6h"), listed here.
+   *
+   * One per person per round: the round ("2026-10-05 10:00") is the dedupe
+   * key, so a retried job or "Send now" in the same hour cannot text twice.
+   *
+   * data: round, firstName, lines[], total, path
+   */
+  "staff.work_reminder": {
+    audience: "staff",
+    category: "operations",
+    priority: "normal",
+    channels: APP_AND_SMS,
+    title: (d) =>
+      (d.lines || []).length === 1
+        ? `Waiting on you: ${d.lines[0]}`
+        : `Waiting on you: ${(d.lines || []).length} things to clear`,
+    body: (d) => {
+      const lines = (d.lines || []).map((l) => `${l.charAt(0).toUpperCase()}${l.slice(1)}`);
+      return `${lines.join(". ")}.`;
+    },
+    sms: (d) => {
+      // Five lines fit two SMS pages; anything past that is on the dashboard.
+      const lines = d.lines || [];
+      const shown = lines.slice(0, 5);
+      const more = lines.length - shown.length;
+      return (
+        `${d.firstName ? `Hello ${d.firstName}, ` : ""}waiting on you on the dashboard: ` +
+        `${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}. Please clear them.`
+      ).replace(/^w/, "W");
+    },
+    entity: (d) => ({ type: "work_reminder", id: String(d.round || "") }),
+    data: () => ({ screen: "Home" }),
+    actionUrl: (d) => adminLink(d.path || "/"),
+    dedupe: (d) => (d.round ? `staff.work_reminder:${d.round}` : null),
+  },
+
   /** data: orderId, reference, customerName, totalAmount, depotName, product, quantity, unit */
   "staff.order_placed": {
     audience: "staff",

@@ -2,10 +2,12 @@ const { denyPfiScoped } = require("../../lib/pfiScope");
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
+const { enforceRole } = require("../../middleware/verifyStaff");
 const { getStats, getOverview, getWorkQueues, getMyPfis, getMyNotifications, getActivity } = require("../../controllers/administration/dashboard.controller");
 const {
   getDeskAssignments, getDeskNudges, sendDeskNudges, smsDeskNudge,
 } = require("../../controllers/administration/deskNudge.controller");
+const { getWorkReminders, sendWorkReminders } = require("../../controllers/administration/workReminders.controller");
 
 /*
   The company's dashboard, its activity log and its desk backlogs are
@@ -32,9 +34,9 @@ router.get("/activity", verifyStaff, denyPfiScoped, getActivity);
 /**
  * Chasing the desks.
  *
- * The daily 08:00 sweep nudges in-app on its own; these are for an admin
- * looking at a queue that has been sitting for months and not wanting to wait
- * until tomorrow. The SMS route is one desk per call and takes a dryRun flag,
+ * The two-hourly work reminders chase every desk on their own (below); these
+ * are for an admin looking at one queue and not wanting to wait for the next
+ * round. The SMS route is one desk per call and takes a dryRun flag,
  * because texting eleven people is a decision, not a page load.
  */
 // Who owes what, by name. Admin-gated inside the controller — it names
@@ -43,5 +45,14 @@ router.get("/desk-assignments", verifyStaff, denyPfiScoped, getDeskAssignments);
 router.get("/desk-nudges", verifyStaff, denyPfiScoped, getDeskNudges);
 router.post("/desk-nudges/notify", verifyStaff, denyPfiScoped, sendDeskNudges);
 router.post("/desk-nudges/sms", verifyStaff, denyPfiScoped, smsDeskNudge);
+
+/**
+ * The two-hourly reminders of waiting work (services/workReminders.service.js).
+ * Admin-only: the page names each person and what they are holding up, and
+ * sending texts them. Mirrored in soromanfe lib/serverGates.ts.
+ */
+const adminOnly = enforceRole("admin", { message: "Only an admin may see or send work reminders" });
+router.get("/work-reminders", verifyStaff, adminOnly, getWorkReminders);
+router.post("/work-reminders/send", verifyStaff, adminOnly, sendWorkReminders);
 
 module.exports = router;
