@@ -108,7 +108,9 @@ const pfiSummary = async () => {
 // Delivery sales ledger totals: sales value vs payments received, and the
 // gap between them — the same arithmetic the Django ledger screens show.
 const deliverySalesTotals = async ({ dateFrom, dateTo, customerType } = {}) => {
-  const conditions = [];
+  // The sales ledger is the truck sale's book; a station's own days are not
+  // on it (migration 0070).
+  const conditions = [eq(deliverySales.book, "trucking")];
   if (dateFrom) conditions.push(gte(deliverySales.dateLoaded, dateFrom));
   if (dateTo) conditions.push(lte(deliverySales.dateLoaded, dateTo));
   if (customerType) conditions.push(eq(deliveryCustomers.customerType, customerType));

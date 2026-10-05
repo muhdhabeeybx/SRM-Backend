@@ -413,12 +413,17 @@ describe("truck sales — a batch summed the way PFI Tracking sums it", () => {
     assert.equal(b.unpaid, 8500000);
   });
 
-  test("a station's pump sales add up rather than repeat", () => {
+  test("a station is billed its charge, never its pump sales or deposits", () => {
     const b = run([entry(1, { customerId: 2 })], [
-      sale(10, "TRK 1", { customerId: 2, quantity: "10000", rate: "1300", salesValue: "13000000" }),
-      sale(11, "TRK 1", { customerId: 2, quantity: "15000", rate: "1300", salesValue: "19500000" }),
+      sale(10, "TRK 1", { customerId: 2, book: "trucking", quantity: "30000", rate: "1100", salesValue: "33000000" }),
+      sale(11, "TRK 1", { customerId: 2, book: "trucking", quantity: "0", rate: "0", salesValue: "0", paymentAmount: "33000000", paymentMethod: "station_account" }),
+      sale(12, "TRK 1", { customerId: 2, book: "station", quantity: "10000", rate: "1300", salesValue: "13000000" }),
+      sale(13, "TRK 1", { customerId: 2, book: "station", quantity: "15000", rate: "1300", salesValue: "19500000" }),
+      sale(14, "TRK 1", { customerId: 2, book: "station", quantity: "0", rate: "0", salesValue: "0", paymentAmount: "30000000" }),
     ]);
-    assert.equal(b.salesValue, 32500000);
+    assert.equal(b.salesValue, 33000000);
+    assert.equal(b.paid, 33000000);
+    assert.equal(b.unpaid, 0);
   });
 
   test("one buyer's overpayment never cancels another's debt", () => {

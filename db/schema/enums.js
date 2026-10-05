@@ -225,6 +225,10 @@ const depositStatusEnum = pgEnum("deposit_status_enum", [
 const paymentMethodEnum = pgEnum("payment_method", [
   "manual",
   "paystack_dva",
+  // A station's load settled to the truck sale with no bank credit: the
+  // station is ours, and its own deposits are counted on its own book.
+  // Migration 0070.
+  "station_account",
 ]);
 
 /**

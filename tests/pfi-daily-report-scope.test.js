@@ -61,12 +61,17 @@ describe("sales & operations report — what is listed", () => {
              (${code("D")}, ${`${RUN}T5`}, ${deskClosed},       ${buyer},   45000, 'loaded', ${DAY})`;
     // D's PFI is still active, but the desk closed the batch on Delivery Inventory.
     await client`INSERT INTO delivery_batches (code, status) VALUES (${code("D")}, 'completed')`;
+    // The station is a customer of the truck sale (migration 0070): its share
+    // is charged at 1,100 and settled from the station account. What it sold
+    // at the pump and banked is on its own book.
     await client`
-      INSERT INTO delivery_sales (allocation_code, customer_id, customer_name, truck_number, date_loaded, quantity, rate, sales_value, payment_amount)
-      VALUES (${code("A")}, ${buyer},   ${`${RUN} Buyer`},   ${`${RUN}T1`}, ${DAY},        45000, 1200, 54000000, 50000000),
-             (${code("A")}, ${station}, ${`${RUN} Station`}, ${`${RUN}T2`}, ${DAY},        20000, 1200, 24000000, 24000000),
-             (${code("F")}, ${buyer},   ${`${RUN} Buyer`},   ${`${RUN}T3`}, '2026-08-01', 45000, 1200, 54000000, 40000000),
-             (${code("F")}, ${station}, ${`${RUN} Station`}, ${`${RUN}T4`}, '2026-08-01', 50000, 1200, 60000000, 55000000)`;
+      INSERT INTO delivery_sales (allocation_code, customer_id, customer_name, truck_number, date_loaded, quantity, rate, sales_value, payment_amount, book, payment_method)
+      VALUES (${code("A")}, ${buyer},   ${`${RUN} Buyer`},   ${`${RUN}T1`}, ${DAY},        45000, 1200, 54000000, 50000000, 'trucking', 'manual'),
+             (${code("A")}, ${station}, ${`${RUN} Station`}, ${`${RUN}T2`}, ${DAY},        20000, 1100, 22000000, 0,        'trucking', 'manual'),
+             (${code("A")}, ${station}, ${`${RUN} Station`}, ${`${RUN}T2`}, ${DAY},        0,     0,    0,        22000000, 'trucking', 'station_account'),
+             (${code("A")}, ${station}, ${`${RUN} Station`}, ${`${RUN}T2`}, ${DAY},        20000, 1200, 24000000, 24000000, 'station',  'manual'),
+             (${code("F")}, ${buyer},   ${`${RUN} Buyer`},   ${`${RUN}T3`}, '2026-08-01', 45000, 1200, 54000000, 40000000, 'trucking', 'manual'),
+             (${code("F")}, ${station}, ${`${RUN} Station`}, ${`${RUN}T4`}, '2026-08-01', 50000, 1200, 60000000, 55000000, 'station',  'manual')`;
 
     // One sheet against the depot batch, one against the trucking PFI.
     await client`
@@ -107,10 +112,12 @@ describe("sales & operations report — what is listed", () => {
     assert.ok(!codes.includes(code("D")), "so is one the desk closed on Delivery Inventory");
     const a = data.truckSales.find((b) => b.code === code("A"));
     // Two trucks: one sold to the buyer, one to the station (sold on assignment).
+    // The station's line is its charge and its settlement — never its pump
+    // sales or its deposits.
     assert.equal(a.trucks, 2);
     assert.equal(a.soldTrucks, 2);
-    assert.equal(a.salesValue, 54000000 + 24000000);
-    assert.equal(a.paid, 50000000 + 24000000);
+    assert.equal(a.salesValue, 54000000 + 22000000);
+    assert.equal(a.paid, 50000000 + 22000000);
     assert.equal(a.unpaid, 4000000);
   });
 

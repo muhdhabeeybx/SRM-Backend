@@ -110,6 +110,10 @@ const financeSummary = async ({ from, to }) => {
       FROM delivery_sales ds
       WHERE ds.date_loaded >= ${String(from).slice(0, 10)}
         AND ds.date_loaded <= ${String(to).slice(0, 10)}
+        -- A station's load settled on the truck sale is internal: the money
+        -- is its deposits, counted on its own book (migration 0070).
+        AND NOT (ds.book = 'trucking' AND ds.customer_id IN (
+          SELECT id FROM delivery_customers WHERE customer_type::text IN ('filling_station', 'lpg_plant')))
     `),
   );
 

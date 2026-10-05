@@ -46,6 +46,10 @@ const deliverySales = pgTable(
     // 'end_user' | 'dealer' on an LPG plant's sale line; null on every other
     // row. See migration 0068.
     buyerClass: varchar("buyer_class", { length: 16 }),
+    // 'trucking' — the truck sale: who took the load, at what rate, what they
+    // paid. 'station' — a filling station's or LPG plant's own trade: its pump
+    // sales, expenses and deposits. Migration 0070; lib/deliveryBook.js.
+    book: varchar("book", { length: 16 }).default("trucking").notNull(),
     // The two legs of an overpayment moved between trucks share this id, so
     // the pair can be found from either end. Null on an ordinary payment.
     transferGroupId: varchar("transfer_group_id", { length: 64 }),
@@ -81,6 +85,7 @@ const deliverySales = pgTable(
     index("delivery_sales_customer_idx").on(table.customerId),
     index("delivery_sales_truck_idx").on(table.truckNumber),
     index("delivery_sales_deposit_channel_idx").on(table.depositChannel),
+    index("delivery_sales_book_idx").on(table.book),
     uniqueIndex("delivery_sales_paystack_ref_unique_idx")
       .on(table.paystackReference)
       .where(sql`${table.paystackReference} IS NOT NULL AND ${table.paystackReference} != ''`),
