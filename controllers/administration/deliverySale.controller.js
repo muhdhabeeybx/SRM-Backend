@@ -169,6 +169,32 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
   const actor = actorName(req.user);
   const rows = req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" }));
 
+  /**
+   * A row with no truck is an LPG plant's, or nobody's.
+   *
+   * The plants' daily sheets are imported before their deliveries are on the
+   * register, so those entries name no load yet — they sit on the plant's
+   * account, unattached, until the loads are entered. Every other kind of
+   * entry is placed on a truck's load the moment it is written, and still has
+   * to say which.
+   */
+  const truckless = rows.filter((r) => !String(r.truckNumber || "").trim());
+  if (truckless.length) {
+    const ids = [...new Set(truckless.map((r) => Number(r.customerId)).filter(Boolean))];
+    const plants = ids.length
+      ? await client`SELECT id FROM delivery_customers WHERE id = ANY(${ids}::int[]) AND customer_type = 'lpg_plant'`
+      : [];
+    const plantIds = new Set(plants.map((p) => Number(p.id)));
+    const i = rows.findIndex((r) => !String(r.truckNumber || "").trim() && !plantIds.has(Number(r.customerId)));
+    if (i >= 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Row ${i + 1}: truck number is required`,
+        errors: [{ path: `sales.${i}.truckNumber`, message: "Truck number is required" }],
+      });
+    }
+  }
+
   const codes = await allocationCodesFor(req.user);
   if (codes !== null && rows.some((r) => !codes.includes(code(r.allocationCode ?? r.allocation_code)))) {
     return forbidden(res, "One or more of those rows is on a batch that is not on your PFI.");

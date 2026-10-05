@@ -43,6 +43,9 @@ const deliverySales = pgTable(
     // are not remittances at all (a pump sale, an expense). See
     // depositChannelEnum for why it is not defaulted.
     depositChannel: depositChannelEnum("deposit_channel"),
+    // 'end_user' | 'dealer' on an LPG plant's sale line; null on every other
+    // row. See migration 0068.
+    buyerClass: varchar("buyer_class", { length: 16 }),
     // The two legs of an overpayment moved between trucks share this id, so
     // the pair can be found from either end. Null on an ordinary payment.
     transferGroupId: varchar("transfer_group_id", { length: 64 }),

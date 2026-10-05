@@ -42,6 +42,9 @@ const base = {
   // has to be expressible, otherwise a mis-keyed POS entry can never be
   // corrected to anything but the other channel.
   depositChannel: enumOf("Deposit channel", ["pos", "bank_deposit"]).optional().nullable(),
+  // Who an LPG plant's sale line was sold to (migration 0068). Nullable so a
+  // line keyed under the wrong buyer can be cleared as well as swapped.
+  buyerClass: enumOf("Buyer", ["end_user", "dealer"]).optional().nullable(),
   dateOfPayment: optionalString("Date of payment", 40),
   phoneNumber: optionalString("Phone number", 30),
   remarks: optionalString("Remarks", 1000),
@@ -97,7 +100,14 @@ const createDeliverySalesBulk = z.object({
   sales: z
     .array(z.object({
       ...base,
-      truckNumber: requiredString("Truck number", 100),
+      /**
+       * Optional here, and only here, for one case: an LPG plant's own daily
+       * sheet, imported before its deliveries are on the register. Those
+       * entries belong to no truck yet. The controller refuses a truckless
+       * row for anything but an LPG plant, so a fuel station's entries still
+       * always name their load.
+       */
+      truckNumber: optionalString("Truck number", 100),
     }))
     .min(1, "Nothing to record")
     .max(1000, "Too many rows in one upload — split the file"),

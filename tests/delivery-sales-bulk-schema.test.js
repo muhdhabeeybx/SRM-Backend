@@ -50,10 +50,19 @@ describe("bulk delivery sales schema", () => {
     assert.equal(createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], quantity: -5.5 }] }).success, false);
   });
 
-  test("every row still needs its truck", () => {
+  test("a truckless row parses — whether it may be written is the controller's call", () => {
+    // Only an LPG plant's row may name no truck; the schema cannot see the
+    // customer's type, so tests/plant-sheet-entries.test.js pins the refusal.
     const r = createDeliverySalesBulk.safeParse({ sales: [day[0], { customerId: 12, paymentAmount: 1 }] });
-    assert.equal(r.success, false);
-    assert.equal(r.error.issues[0].path.join("."), "sales.1.truckNumber");
+    assert.equal(r.success, true);
+    assert.equal(r.data.sales[1].truckNumber, "");
+  });
+
+  test("a sale line can say who bought it, and only as end user or dealer", () => {
+    const ok = createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], buyerClass: "dealer" }] });
+    assert.equal(ok.success, true);
+    assert.equal(ok.data.sales[0].buyerClass, "dealer");
+    assert.equal(createDeliverySalesBulk.safeParse({ sales: [{ ...day[0], buyerClass: "wholesale" }] }).success, false);
   });
 
   test("an empty upload is refused rather than answered with success", () => {
