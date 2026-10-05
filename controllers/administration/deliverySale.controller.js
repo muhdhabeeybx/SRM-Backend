@@ -6,8 +6,6 @@ const { allocationCodesFor } = require("../../lib/pfiScope");
 const { scopedStationIds, stationVisible } = require("../../lib/stationScope");
 const pfiBankScope = require("../../lib/pfiBankScope");
 const stationEntry = require("../../lib/stationEntry");
-const { withBooks } = require("../../lib/deliveryBook");
-const { isStationType } = require("../../lib/customerTypes");
 
 /** The signed-in person's name, as the ledger writes it: "First Surname", else their email. */
 const actorName = (user) =>
@@ -70,7 +68,7 @@ const cycleVisible = async (codes, cycle) => {
 // const { generateDeliveryCustomerDva } = require("../../services/deliveryCustomerDva.service");
 
 const getDeliverySales = asyncHandler(async (req, res) => {
-  const { search, customer, truck_number, date_from, date_to, book, page = 1, limit = 500 } = req.query;
+  const { search, customer, truck_number, date_from, date_to, page = 1, limit = 500 } = req.query;
 
   const result = await deliverySaleRepo.findAll({
     search,
@@ -78,7 +76,6 @@ const getDeliverySales = asyncHandler(async (req, res) => {
     truck_number,
     date_from,
     date_to,
-    book,
     page,
     limit,
     allowedCodes: await allocationCodesFor(req.user),
@@ -135,18 +132,7 @@ const createDeliverySale = asyncHandler(async (req, res) => {
    * that was empty — which it was for everybody after the login rework — so
    * 600 rows since 24 August say "Unknown" instead of who keyed them.
    */
-  const typed = { ...rest, enteredBy: actorName(req.user) || rest.enteredBy || "" };
-
-  // A claimed credit is a deposit before it has an amount: the amount comes
-  // off the statement line, after this.
-  const claiming = Array.isArray(lineIds) && lineIds.length > 0;
-  /*
-   * The truck sale or the station's own book (lib/deliveryBook.js). A claim
-   * carries money even though its amount is not here yet, so it is placed as
-   * money — a station's claimed credit with no book named is its deposit.
-   */
-  const [placed] = await withBooks([claiming ? { ...typed, paymentAmount: typed.paymentAmount || 1 } : typed]);
-  const base = { ...typed, book: placed.book };
+  const base = { ...rest, enteredBy: actorName(req.user) || rest.enteredBy || "" };
 
   // Only onto a batch of this person's PFI, and only from its accounts.
   const codes = await allocationCodesFor(req.user);
@@ -155,6 +141,9 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   }
   if (bankAccountId) await pfiBankScope.assertAccountAllowed(req.user, bankAccountId);
   if (!stationWriteOk(req.user, base)) return forbidden(res, "That station is not one of yours.");
+  // A claimed credit is a deposit before it has an amount: the amount comes
+  // off the statement line, after this.
+  const claiming = Array.isArray(lineIds) && lineIds.length > 0;
   const refusal = await stationEntry.refusalFor(req.user, [base], claiming ? { kinds: ["deposits"] } : {});
   if (refusal) return forbidden(res, refusal);
 
@@ -195,8 +184,7 @@ const createDeliverySale = asyncHandler(async (req, res) => {
  */
 const createDeliverySalesBulk = asyncHandler(async (req, res) => {
   const actor = actorName(req.user);
-  // Each row in its book — see lib/deliveryBook.js.
-  const rows = await withBooks(req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" })));
+  const rows = req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" }));
 
   /**
    * A row with no truck is an LPG plant's, or nobody's.
@@ -268,9 +256,7 @@ const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
       }
     }
   }
-  // The book the surplus is in; the truck sale's unless the request says.
-  const book = req.body.book || "trucking";
-  const ends = [req.body.from, ...(Array.isArray(req.body.to) ? req.body.to : [])].map((end) => ({ ...end, book }));
+  const ends = [req.body.from, ...(Array.isArray(req.body.to) ? req.body.to : [])];
   if (ends.some((end) => !stationWriteOk(req.user, end))) {
     return forbidden(res, "Both ends of a transfer must be at your stations.");
   }
@@ -282,7 +268,6 @@ const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
     from: req.body.from,
     to: req.body.to,
     actor,
-    book,
   });
 
   res.status(201).json({
@@ -308,60 +293,8 @@ const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
     truckNumber: req.query.truckNumber,
     dateLoaded: req.query.dateLoaded,
     customerId: req.query.customerId || null,
-    book: req.query.book || "trucking",
   });
   res.json({ success: true, data: standing });
-});
-
-/**
- * Charge stations for their share of loads and settle it from the station
- * account, so the truck sale stops reading as owed — migration 0070.
- *
- * The delivery desk's act, not the station's: it is checked against the PFI
- * and the station the way any truck-sale write is, and never against who
- * enters the station's own days (lib/stationEntry), because none of these
- * rows is one of those days. No notice goes out — nothing was delivered and
- * no customer paid; the company moved what one of its stations owes.
- */
-const settleStationLoads = asyncHandler(async (req, res) => {
-  const { loads, note } = req.body;
-  const codes = await allocationCodesFor(req.user);
-  for (const load of loads) {
-    if (codes !== null && !codes.includes(code(load.allocationCode))) {
-      return forbidden(res, "That batch is not on your PFI.");
-    }
-    if (!stationWriteOk(req.user, load)) return forbidden(res, "That station is not one of yours.");
-  }
-
-  const ids = [...new Set(loads.map((l) => Number(l.customerId)))];
-  const found = await client`
-    SELECT id, name, customer_type::text AS type FROM delivery_customers WHERE id = ANY(${ids}::int[])`;
-  const byId = new Map(found.map((c) => [Number(c.id), c]));
-  for (const id of ids) {
-    const c = byId.get(id);
-    if (!c) return res.status(400).json({ success: false, message: `Customer ${id} does not exist` });
-    if (!isStationType(c.type)) {
-      return res.status(400).json({
-        success: false,
-        message: `${c.name} is not a filling station or LPG plant — record its payment instead`,
-      });
-    }
-  }
-
-  const results = await deliverySaleRepo.settleStationLoads({
-    loads: loads.map((l) => ({ ...l, customerName: l.customerName || byId.get(Number(l.customerId))?.name || "" })),
-    note,
-    actor: actorName(req.user),
-  });
-  const settled = results.filter((r) => r.settled > 0);
-  const total = settled.reduce((sum, r) => sum + r.settled, 0);
-  res.status(201).json({
-    success: true,
-    message: settled.length
-      ? `${settled.length} load${settled.length === 1 ? "" : "s"} settled from the station account — ₦${total.toLocaleString()}`
-      : "Charged — nothing was left to settle",
-    data: { loads: results, settled: total },
-  });
 });
 
 const updateDeliverySale = asyncHandler(async (req, res) => {
@@ -458,5 +391,4 @@ module.exports = {
   deleteDeliverySale,
   transferDeliveryOverpayment,
   getDeliveryCycleStanding,
-  settleStationLoads,
 };

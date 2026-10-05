@@ -54,8 +54,6 @@ const findAll = async ({
    * assigned stations see only sales to them — lib/stationScope.js.
    */
   allowedStationIds = null,
-  /** One book only — 'trucking' or 'station' (migration 0070). Both when absent. */
-  book = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
@@ -76,10 +74,6 @@ const findAll = async ({
     conditions.push(
       allowedStationIds.length ? inArray(deliverySales.customerId, allowedStationIds) : sql`false`,
     );
-  }
-
-  if (book) {
-    conditions.push(eq(deliverySales.book, book));
   }
 
   if (customer) {
@@ -316,7 +310,7 @@ const update = async (id, data) => {
  * The plate is normalised the way getCycleKey normalises it, so a loading
  * written "BWR 809 XB" and a payment written "BWR809XB" stay one cycle.
  */
-const cycleStanding = async ({ truckNumber, dateLoaded, customerId, book = "trucking" }) => {
+const cycleStanding = async ({ truckNumber, dateLoaded, customerId }) => {
   const [row] = await db.execute(sql`
     SELECT
       COALESCE(MAX(${deliverySales.salesValue}::numeric), 0) AS sales_value,
@@ -330,9 +324,6 @@ const cycleStanding = async ({ truckNumber, dateLoaded, customerId, book = "truc
       AND ${customerId == null
         ? sql`${deliverySales.customerId} IS NULL`
         : sql`${deliverySales.customerId} = ${Number(customerId)}`}
-      -- One book's standing. A station's deposits are not what its load was
-      -- paid on the truck sale, nor the reverse (migration 0070).
-      AND ${deliverySales.book} = ${book}
   `);
 
   const salesValue = Number(row?.sales_value ?? 0);
@@ -361,13 +352,13 @@ const cycleStanding = async ({ truckNumber, dateLoaded, customerId, book = "truc
  * All legs go in one transaction: a credit that lands without its matching
  * debit is money created out of nothing.
  */
-const transferOverpayment = async ({ from, to, actor = "", book = "trucking" }) => {
+const transferOverpayment = async ({ from, to, actor = "" }) => {
   const destinations = (to || []).filter((d) => Number(d.amount) > 0);
   if (destinations.length === 0) {
     throw Object.assign(new Error("Nothing to transfer"), { status: 400 });
   }
 
-  const standing = await cycleStanding({ ...from, book });
+  const standing = await cycleStanding(from);
   if (standing.surplus <= 0) {
     throw Object.assign(
       new Error("This truck has no overpayment to move"),
@@ -417,8 +408,6 @@ const transferOverpayment = async ({ from, to, actor = "", book = "trucking" }) 
     transferCounterparty: counterparty,
     enteredBy: actor,
     remarks: payer,
-    // Both legs stay in the book the surplus was in.
-    book,
   });
 
   const rows = [];
@@ -437,139 +426,6 @@ const transferOverpayment = async ({ from, to, actor = "", book = "trucking" }) 
     remaining: Math.round((standing.surplus - total) * 100) / 100,
     sales: inserted,
   };
-};
-
-/**
- * Charge stations for their share of loads, and settle it from the station
- * account — migration 0070.
- *
- * A filling station or LPG plant is a customer of the truck sale like any
- * other: its share of the load is priced, and the truck sale is owed that.
- * Unlike any other customer the station is ours, so what it owes can be
- * settled at once without waiting on a bank credit — the station's own
- * deposits are counted on its own book, so this money is never counted twice.
- *
- * ── Per load ──────────────────────────────────────────────────────────────
- *
- * With a rate, the share is priced first: every row of the station's share
- * on the truck sale takes the rate and the value it implies, the way Row
- * Setup prices any customer's rows. A share with no row yet — a load put on
- * a station through the allocation alone — gets one, at the quantity the
- * screen read off the load split.
- *
- * Then whatever the share is still owed is written as one payment from the
- * station account. A share already paid in full gets nothing; one overpaid
- * is left as it is for the desk to move.
- *
- * ── All or none ───────────────────────────────────────────────────────────
- *
- * One transaction for every load, because the desk picks a batch's stations
- * and settles them as one act: half a batch settled is a batch that reads as
- * closed on one screen and owing on the next.
- */
-const round2 = (n) => Math.round(n * 100) / 100;
-
-const quantityOfRow = (row) => {
-  const quantity = Number(row.quantity || 0);
-  const rate = Number(row.rate || 0);
-  const value = Number(row.sales_value || 0);
-  if (rate > 0 && value > 0 && Math.abs(value / rate - quantity) > 1) return value / rate;
-  return quantity;
-};
-
-const settleStationLoads = async ({ loads, note = "", actor = "" }) => {
-  const today = lagosToday();
-  return db.transaction(async (tx) => {
-    const results = [];
-    for (const load of loads) {
-      const label = [load.truckNumber, load.customerName].filter(Boolean).join(" · ") || load.truckNumber;
-      const shareOf = () => tx.execute(sql`
-        SELECT id, quantity, rate, sales_value, payment_amount, payment_method, transfer_group_id
-          FROM ${deliverySales}
-         WHERE ${deliverySales.book} = 'trucking'
-           AND ${deliverySales.customerId} = ${Number(load.customerId)}
-           AND regexp_replace(UPPER(COALESCE(${deliverySales.truckNumber}, '')), '\s', '', 'g')
-             = regexp_replace(UPPER(${load.truckNumber || ""}), '\s', '', 'g')
-           AND COALESCE(LEFT(${deliverySales.dateLoaded}, 10), '') = ${String(load.dateLoaded || "").slice(0, 10)}
-         ORDER BY ${deliverySales.id}
-         FOR UPDATE`);
-
-      let rows = await shareOf();
-      // A settlement or a transfer leg carries money and nothing else; the
-      // share's quantity and price live on the other rows.
-      const priced = (r) => !r.transfer_group_id && r.payment_method !== "station_account";
-      const rowsQty = rows.filter(priced).reduce((mx, r) => Math.max(mx, quantityOfRow(r)), 0);
-      const quantity = rowsQty > 0 ? rowsQty : Number(load.quantity || 0);
-      const rate = Number(load.rate || 0);
-
-      if (rate > 0) {
-        if (!(quantity > 0)) throw httpError(400, `${label}: no quantity on this load to charge`);
-        const value = String(round2(quantity * rate));
-        const targets = rows.filter(priced);
-        if (targets.length) {
-          await tx
-            .update(deliverySales)
-            .set({ quantity, rate: String(rate), salesValue: value, updatedAt: new Date() })
-            .where(inArray(deliverySales.id, targets.map((r) => Number(r.id))));
-        } else {
-          await tx.insert(deliverySales).values({
-            truckNumber: load.truckNumber,
-            dateLoaded: load.dateLoaded || "",
-            depotLoaded: load.depotLoaded || "",
-            customerId: Number(load.customerId),
-            customerName: load.customerName || "",
-            location: load.location || load.customerName || "",
-            allocationCode: load.allocationCode || null,
-            quantity,
-            rate: String(rate),
-            salesValue: value,
-            enteredBy: actor,
-            book: "trucking",
-          });
-        }
-        rows = await shareOf();
-      }
-
-      const billed = rows.filter(priced).reduce((mx, r) => Math.max(mx, Number(r.sales_value || 0)), 0);
-      const topRate = rows.filter(priced).reduce((mx, r) => Math.max(mx, Number(r.rate || 0)), 0);
-      const charged = billed > 0 ? billed : topRate * quantity;
-      if (!(charged > 0)) throw httpError(400, `${label}: give a rate — this share has not been charged yet`);
-
-      const paid = rows.reduce((sum, r) => sum + Number(r.payment_amount || 0), 0);
-      const due = round2(charged - paid);
-      if (due > 0.005) {
-        await tx.insert(deliverySales).values({
-          truckNumber: load.truckNumber,
-          dateLoaded: load.dateLoaded || "",
-          depotLoaded: load.depotLoaded || "",
-          customerId: Number(load.customerId),
-          customerName: load.customerName || "",
-          location: load.location || load.customerName || "",
-          allocationCode: load.allocationCode || null,
-          quantity: 0,
-          rate: "0",
-          salesValue: "0",
-          paymentAmount: String(due),
-          payerName: "Station account",
-          dateOfPayment: today,
-          // No bank credit to confirm: the station is ours.
-          depositStatus: "paid",
-          paymentMethod: "station_account",
-          remarks: note || "Settled from the station account",
-          enteredBy: actor,
-          book: "trucking",
-        });
-      }
-      results.push({
-        truckNumber: load.truckNumber,
-        customerId: Number(load.customerId),
-        charged: round2(charged),
-        alreadyPaid: round2(paid),
-        settled: due > 0.005 ? due : 0,
-      });
-    }
-    return results;
-  });
 };
 
 /**
@@ -619,5 +475,4 @@ module.exports = {
   deleteById,
   cycleStanding,
   transferOverpayment,
-  settleStationLoads,
 };

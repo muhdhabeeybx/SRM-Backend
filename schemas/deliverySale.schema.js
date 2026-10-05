@@ -51,9 +51,6 @@ const base = {
   enteredBy: optionalString("Entered by", 255),
   allocationCode: optionalString("Allocation code", 64),
   paymentMethod: enumOf("Payment method", ["manual", "paystack_dva"]).optional(),
-  // The truck sale or the station's own trade (migration 0070). Left out, the
-  // server places the row by lib/deliveryBook's rule.
-  book: enumOf("Book", ["trucking", "station"]).optional(),
 };
 
 /**
@@ -122,7 +119,6 @@ const listDeliverySales = pagination.extend({
   truck_number: z.string().trim().max(100, "Truck number is too long").optional(),
   date_from: z.string().trim().max(40, "Start date is too long").optional(),
   date_to: z.string().trim().max(40, "End date is too long").optional(),
-  book: enumOf("Book", ["trucking", "station"]).optional(),
 });
 
 const idParam = z.object({ id: id("Sale id") });
@@ -150,9 +146,6 @@ const transferCycle = z.object({
  * surplus is a fact about the ledger and not something a request can assert.
  */
 const transferOverpayment = z.object({
-  // Which book's surplus moves. A transfer never crosses books: the truck
-  // sale's overpayment is not a station's deposit, nor the reverse.
-  book: enumOf("Book", ["trucking", "station"]).optional(),
   from: transferCycle,
   to: z
     .array(transferCycle.extend({ amount: money("Amount") }))
@@ -164,38 +157,9 @@ const cycleStandingQuery = z.object({
   truckNumber: z.string().trim().max(100, "Truck number is too long"),
   dateLoaded: z.string().trim().max(40, "Date loaded is too long").optional(),
   customerId: z.coerce.number().int().positive().optional(),
-  book: enumOf("Book", ["trucking", "station"]).optional(),
-});
-
-/**
- * A station's share of loads, charged and settled from the station account.
- *
- * `quantity` is the station's share as the screen read it off the load split
- * — needed only when the truck sale has no row for the station yet. `rate`
- * prices the share first; without one the share must already be priced. No
- * amount is accepted: what is settled is what the share is still owed,
- * worked out from the table.
- */
-const settleStationLoads = z.object({
-  loads: z
-    .array(z.object({
-      truckNumber: requiredString("Truck number", 100),
-      dateLoaded: optionalString("Date loaded", 40),
-      depotLoaded: optionalString("Depot loaded", 255),
-      customerId: id("Station"),
-      customerName: optionalString("Station name", 255),
-      location: optionalString("Location", 255),
-      allocationCode: optionalString("Allocation code", 100),
-      quantity: volume("Quantity").optional(),
-      rate: money("Rate").optional(),
-    }))
-    .min(1, "Choose at least one load")
-    .max(200, "Too many loads in one go"),
-  note: optionalString("Note", 500),
 });
 
 module.exports = {
-  settleStationLoads,
   createDeliverySale,
   createDeliverySalesBulk,
   updateDeliverySale,

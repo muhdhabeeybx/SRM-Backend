@@ -13,7 +13,6 @@ const {
   deleteDeliverySale,
   transferDeliveryOverpayment,
   getDeliveryCycleStanding,
-  settleStationLoads,
 } = require("../../controllers/administration/deliverySale.controller");
 
 router.get("/", verifyStaff, validate({ query: saleSchemas.listDeliverySales }), getDeliverySales);
@@ -23,8 +22,6 @@ router.get("/cycle-standing", verifyStaff, validate({ query: saleSchemas.cycleSt
 // One transaction for many rows — see the controller.
 router.post("/bulk", verifyStaff, validate({ body: saleSchemas.createDeliverySalesBulk }), createDeliverySalesBulk);
 router.post("/transfer", verifyStaff, validate({ body: saleSchemas.transferOverpayment }), transferDeliveryOverpayment);
-// A station's share of loads, charged and settled from the station account.
-router.post("/settle-station", verifyStaff, validate({ body: saleSchemas.settleStationLoads }), settleStationLoads);
 router.get("/:id", verifyStaff, validate({ params: saleSchemas.idParam }), getDeliverySaleById);
 router.post("/", verifyStaff, validate({ body: saleSchemas.createDeliverySale }), createDeliverySale);
 router.patch("/:id", verifyStaff, validate({ params: saleSchemas.idParam, body: saleSchemas.updateDeliverySale }), updateDeliverySale);

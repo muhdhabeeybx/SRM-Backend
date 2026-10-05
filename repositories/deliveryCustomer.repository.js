@@ -201,15 +201,17 @@ const findAllWithSalesAggregation = async ({
      * with every payment against it coming off. The dashboard's own rule:
      * shareMoney in soromanfe/src/lib/delivery-records.ts.
      *
-     * A station is one of these customers (migration 0070): on the truck sale
-     * it is charged for its share of a load and settles it like anyone else.
-     * Its own pump sales and deposits are on the station's book and are not
-     * read here — its account proper is built by the station pages.
+     * A station's rows ACCUMULATE instead — each is a day's pump sales — so
+     * for a station they are summed, and what it owes here is what it sold
+     * less what it banked. Its account proper (product at landed cost) is
+     * built by the dashboard from its loads; see lib/customer-accounts there.
      */
     const salesAggregation = await db.execute(sql`
       WITH loads AS (
         SELECT s.customer_id,
+               dc.customer_type IN ('filling_station', 'lpg_plant') AS station,
                MAX(s.sales_value::numeric)  AS top_value,
+               SUM(s.sales_value::numeric)  AS all_value,
                -- A row's quantity, read off its money where the two disagree:
                -- a split truck's rows can carry the whole truck's litres
                -- (quantityOf in soromanfe/src/lib/load-split.ts).
@@ -217,21 +219,23 @@ const findAllWithSalesAggregation = async ({
                          AND abs(s.sales_value::numeric / s.rate::numeric - COALESCE(s.quantity::numeric, 0)) > 1
                         THEN s.sales_value::numeric / s.rate::numeric
                         ELSE s.quantity::numeric END) AS top_qty,
+               SUM(CASE WHEN s.sales_value::numeric > 0 THEN s.quantity::numeric ELSE 0 END) AS sold_qty,
                MAX(s.rate::numeric)         AS rate,
                SUM(COALESCE(s.payment_amount::numeric, 0)) AS paid,
                MAX(s.date_of_payment)       AS last_date
           FROM delivery_sales s
+          JOIN delivery_customers dc ON dc.id = s.customer_id
          WHERE s.customer_id IN ${sql.raw(`(${customerIds.map(Number).join(",")})`)}
-           AND s.book = 'trucking'
-         GROUP BY s.customer_id,
+         GROUP BY s.customer_id, dc.customer_type,
                   regexp_replace(upper(coalesce(s.truck_number, '')), '\\s', '', 'g'),
                   left(coalesce(s.date_loaded, ''), 10)
       )
       SELECT customer_id AS "customerId",
-             SUM(CASE WHEN COALESCE(top_value, 0) > 0 THEN top_value
+             SUM(CASE WHEN station THEN COALESCE(all_value, 0)
+                      WHEN COALESCE(top_value, 0) > 0 THEN top_value
                       ELSE COALESCE(rate, 0) * COALESCE(top_qty, 0) END) AS "totalSalesValue",
              SUM(paid) AS "totalPayments",
-             SUM(COALESCE(top_qty, 0)) AS "totalQty",
+             SUM(CASE WHEN station THEN sold_qty ELSE COALESCE(top_qty, 0) END) AS "totalQty",
              MAX(last_date) AS "lastTransactionDate"
         FROM loads
        GROUP BY customer_id`);

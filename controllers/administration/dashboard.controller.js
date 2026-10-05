@@ -133,12 +133,7 @@ async function getDailyRevenueTrend(dateFrom, dateTo) {
       .where(
         and(
           gte(deliverySales.dateLoaded, dateFrom.slice(0, 10)),
-          lte(deliverySales.dateLoaded, dateTo.slice(0, 10)),
-          // A station's load paid on the truck sale is the company settling
-          // with itself; the money arrives as the station's own deposits,
-          // which are counted. Migration 0070.
-          sql`NOT (${deliverySales.book} = 'trucking' AND ${deliverySales.customerId} IN (
-            SELECT id FROM delivery_customers WHERE customer_type::text IN ('filling_station', 'lpg_plant')))`
+          lte(deliverySales.dateLoaded, dateTo.slice(0, 10))
         )
       )
       .groupBy(deliverySales.dateLoaded),
