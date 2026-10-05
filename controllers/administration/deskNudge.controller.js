@@ -9,10 +9,9 @@ const deskAssignments = require("../../services/deskAssignments.service");
  * POST /desk-nudges/notify     send the in-app nudge now
  * POST /desk-nudges/sms        text the desk — deliberate, admin-only
  *
- * The daily sweep already nudges in-app at 08:00. These exist because an admin
- * looking at a queue that has been sitting for months should not have to wait
- * until tomorrow morning to chase it, and because in-app plainly has not been
- * enough for the ones that have.
+ * The two-hourly work reminders (workReminders.service) chase each person on
+ * their own. These exist for an admin looking at one desk's queue who wants to
+ * chase the whole desk now, without waiting for the next round.
  */
 
 /** Read-only. Nothing is sent; this is the "who would I be chasing" view. */

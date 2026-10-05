@@ -271,11 +271,12 @@ const nudgeSms = (deskKey, payload) => {
 };
 
 /**
- * Text a desk about its backlog. Admin-triggered, never automatic.
+ * Text a whole desk about its backlog, by hand.
  *
- * The daily sweep nudges in-app on its own; sending SMS costs money and
- * interrupts somebody's evening, so it stays a decision a person takes while
- * looking at the queue rather than a rule that fires at 8am.
+ * The automatic chasing is the two-hourly work reminders
+ * (workReminders.service), which text each person their own share. This is
+ * the admin's button for texting everyone on one desk at once, while looking
+ * at its queue.
  */
 const smsDesk = async (deskKey, { dryRun = false } = {}) => {
   const desk = DESKS.find((d) => d.key === deskKey);
