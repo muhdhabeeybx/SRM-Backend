@@ -186,6 +186,23 @@ const createPfi = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: "A PFI with this number already exists" });
   }
 
+  /**
+   * A trucking batch's quantity may be typed, and be bigger than the trucks
+   * named today — more are coming, or they are hired and not in the fleet. It
+   * may not be SMALLER: the trucks named are part of it, and activation
+   * deducts what they loaded, capped at the quantity, so the excess would
+   * silently vanish from the stock.
+   */
+  const truckLoadedTotal = pfi_type === "trucking" && Array.isArray(req.body.batch?.trucks)
+    ? req.body.batch.trucks.reduce((sum, t) => sum + (Number(t.loadedQty) || 0), 0)
+    : 0;
+  if (truckLoadedTotal > (Number(starting_qty_litres) || 0)) {
+    return res.status(400).json({
+      success: false,
+      message: `The trucks loaded ${truckLoadedTotal.toLocaleString()} — the quantity cannot be less than that`,
+    });
+  }
+
   let location_name = "";
   let location_id_val = null;
 
@@ -282,8 +299,17 @@ const createPfi = asyncHandler(async (req, res) => {
      * off, which is exactly what the gate exists to prevent.
      */
     pendingBatch: pfi_type === "trucking" && req.body.batch ? req.body.batch : null,
+    /**
+     * A trucking PFI carries its batch code whether or not trucks came with
+     * it. Raised with a typed quantity and no trucks yet, the code is what the
+     * trucks added later are grouped under, and what scoping and the daily
+     * report join the PFI to them by. It is the PFI name, normalised the way
+     * the form and activation normalise it.
+     */
     allocationCode:
-      pfi_type === "trucking" && req.body.batch?.code ? String(req.body.batch.code) : null,
+      pfi_type === "trucking"
+        ? String(req.body.batch?.code || pfi_number).trim().toUpperCase().replace(/\s+/g, "-")
+        : null,
   });
 
   /**

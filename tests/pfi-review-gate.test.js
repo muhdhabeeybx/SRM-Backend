@@ -246,6 +246,69 @@ describe("PFI review gate — raised, then reviewed, then trading", () => {
     await db.delete(deliveryInventory).where(eq(deliveryInventory.allocationCode, code));
   });
 
+  test("a trucking batch can be raised by its quantity alone, and keeps its code for the trucks to come", async () => {
+    const name = `PFI-${RUN}T Q`;
+    const res = await raise({
+      pfiNumber: name,
+      pfiType: "trucking",
+      startingQtyLitres: 300000,
+      ticketCount: 7,
+    });
+    assert.equal(res.status, 201);
+
+    const [row] = await db.select().from(pfis).where(eq(pfis.pfiNumber, name));
+    assert.equal(Number(row.startingQtyLitres), 300000, "the typed quantity, not a sum of no trucks");
+    assert.equal(row.ticketCount, 7);
+    assert.equal(row.pendingBatch, null, "no trucks named, so none parked");
+    assert.equal(
+      row.allocationCode,
+      `PFI-${RUN}T-Q`,
+      "the PFI name is still its batch code, normalised as the form and activation normalise it",
+    );
+
+    // Approving it moves no stock: nothing has loaded yet.
+    await request(app)
+      .post(`${API}/${row.id}/activate`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        bankAccountIds: [account.id],
+        officers: { auditOfficerId: audit.id, salesManagerId: finance.id },
+      });
+    const [after] = await db.select().from(pfis).where(eq(pfis.id, row.id));
+    assert.equal(after.status, "active");
+    assert.equal(Number(after.soldQtyLitres), 0);
+  });
+
+  test("a trucking batch's quantity may exceed its named trucks, never fall short of them", async () => {
+    const short = await raise({
+      pfiNumber: `PFI/GATE/U/${RUN}`,
+      pfiType: "trucking",
+      startingQtyLitres: 50000,
+      batch: {
+        code: `TRKU-${RUN}`,
+        trucks: [
+          { plateNumber: `CCC-${RUN}`, loadedQty: 45000 },
+          { plateNumber: `DDD-${RUN}`, loadedQty: 47300 },
+        ],
+      },
+    });
+    assert.equal(short.status, 400);
+    assert.match(short.body.message, /cannot be less/i);
+    const none = await db.select().from(pfis).where(eq(pfis.pfiNumber, `PFI/GATE/U/${RUN}`));
+    assert.equal(none.length, 0, "refused, not saved short");
+
+    const more = await raise({
+      pfiNumber: `PFI/GATE/V/${RUN}`,
+      pfiType: "trucking",
+      startingQtyLitres: 200000,
+      batch: {
+        code: `TRKV-${RUN}`,
+        trucks: [{ plateNumber: `EEE-${RUN}`, loadedQty: 45000 }],
+      },
+    });
+    assert.equal(more.status, 201, "trucks still to come are not an error");
+  });
+
   test("an already-active PFI cannot be activated twice", async () => {
     const [row] = await db.select().from(pfis).where(eq(pfis.pfiNumber, `PFI/GATE/A/${RUN}`));
     const res = await request(app)
