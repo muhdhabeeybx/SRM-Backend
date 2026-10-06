@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const stepNotices = require("../../services/stepNotices.service");
 const { deliveryInventoryRepo, pfiRepo, truckRepo } = require("../../repositories");
 const { lagosToday, localDateStr } = require("../../lib/zonedDay");
+const { pfiIdForCode, codeOf } = require("../../lib/batchPfi");
 
 /**
  * Trip costs are stripped for anybody who cannot open Delivery Costing.
@@ -70,8 +71,10 @@ const getDeliveryInventoryById = asyncHandler(async (req, res) => {
 });
 
 const createDeliveryInventory = asyncHandler(async (req, res) => {
-  const pfi = req.body.pfi || req.body.pfiId;
   const allocation_code = req.body.allocation_code || req.body.allocationCode;
+  // Allocate Trucks sends the batch code and no PFI. Without the PFI the truck
+  // is hidden from everybody assigned to it — lib/batchPfi.
+  const pfi = req.body.pfi || req.body.pfiId || (await pfiIdForCode(allocation_code));
   const truck = req.body.truck || req.body.truckId;
   const truck_number = req.body.truck_number || req.body.truckNumber;
   const depot = req.body.depot;
@@ -171,7 +174,28 @@ const updateDeliveryInventory = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: "Inventory record not found" });
   }
 
-  const updated = await deliveryInventoryRepo.update(record.id, req.body);
+  /*
+   * The batch code decides the PFI when nobody chose one: a row with no PFI,
+   * or one moved to another batch with the old batch's PFI still on it (the
+   * edit form sends back whatever PFI the row had — it has no control for it).
+   */
+  const data = { ...req.body };
+  const nextCode = data.allocationCode !== undefined ? data.allocationCode : record.allocationCode;
+  const codeChanged = data.allocationCode !== undefined && codeOf(data.allocationCode) !== codeOf(record.allocationCode);
+  const pfiAfter = data.pfiId !== undefined ? data.pfiId : record.pfiId;
+  const unchosen = pfiAfter == null || pfiAfter === "" || (codeChanged && Number(pfiAfter) === Number(record.pfiId));
+  if (codeOf(nextCode) && unchosen) {
+    const inferred = await pfiIdForCode(nextCode);
+    if (inferred && inferred !== Number(record.pfiId)) {
+      const pfiObj = await pfiRepo.findById(inferred);
+      data.pfiId = inferred;
+      if (pfiObj?.pfiNumber) data.pfiNumber = pfiObj.pfiNumber;
+    } else if (inferred) {
+      data.pfiId = inferred;
+    }
+  }
+
+  const updated = await deliveryInventoryRepo.update(record.id, data);
 
   res.json({
     success: true,

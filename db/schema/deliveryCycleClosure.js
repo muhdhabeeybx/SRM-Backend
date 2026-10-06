@@ -15,7 +15,11 @@ const { pgTable, varchar, text, timestamp, index } = require("drizzle-orm/pg-cor
 const deliveryCycleClosures = pgTable(
   "delivery_cycle_closures",
   {
-    /** "loading:<id>", or "sale:<cycle>::<customer>::<location>" with no loading. */
+    /**
+     * "loading:<id>", or "sale:<cycle>::<customer>::<location>" with no loading.
+     * Also "station:<station id>|<PFI key>": a PFI the station has finished
+     * with, closed on its own page (soromanfe lib/station-pfi-status).
+     */
     cycleKey: text("cycle_key").primaryKey(),
     /** 'active' | 'completed'. Checked in the database, see the migration. */
     status: varchar("status", { length: 20 }).default("active").notNull(),
