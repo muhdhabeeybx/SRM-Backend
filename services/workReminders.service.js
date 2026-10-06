@@ -1,68 +1,62 @@
 const { client, db } = require("../config/db");
 const audit = require("./audit.service");
 const { notifyAndWait } = require("../notifications");
-const { STAGE_RECIPIENTS, cfoDeskIds } = require("./expenseNotifications.service");
 const { DESKS: ASSIGNMENT_DESKS } = require("./deskAssignments.service");
-const { outstandingReports, shortPfi, dayLabel, REPORT_NAMES } = require("./reportReminders.service");
+const { cfoDeskIds } = require("./expenseNotifications.service");
+const { officerIdsFor, stationOfficerIds, generalOfficerIds } = require("../lib/expenseOfficers");
+const { shortPfi, dayLabel, FILER_ROLES, REPORT_NAMES } = require("./reportReminders.service");
 const { localDateStr, addDaysStr } = require("../lib/zonedDay");
 const { CATALOG } = require("../notifications/catalog");
 
 /**
- * Everybody's outstanding work, texted to them every two hours until it is done.
+ * Reminders of work waiting on someone — the owner's rules of 6 Oct 2026.
  *
- * The dashboard already knows what is waiting — the sidebar badges, the desk
- * assignments panel, the report reminders page — but only somebody who opens
- * it sees any of that. The desk steps text the next desk once, when an order
- * reaches it, and a text read once and forgotten is how a ticket waits a day.
- * This is the same knowledge pushed out on a clock: each round, every member of
- * staff with something waiting on them gets ONE message listing all of it.
+ * These reminders and nothing else:
  *
- * ── One message per person, not one per queue ──────────────────────────────
+ *   Expenses        each stage to whoever's turn it is: the expenditure
+ *                   officer to verify and to pay, the CFO to approve, the
+ *                   admins for final approval, the raiser when sent back
+ *   Finance         orders on their PFIs still waiting for payment confirmation
+ *   Ticketing       orders on their PFIs paid for but not ticketed yet
+ *   Exit gate       trucks on their PFIs ticketed but not gated out yet
+ *     — every two hours in the working day (WORK_REMINDER_HOURS, 8–20),
+ *       once the work has waited WORK_REMINDER_AFTER_HOURS (2)
  *
- * An admin can owe five different things at once. Five texts every two hours
- * is thirty a day and a phone set to silent; one text naming all five is a
- * to-do list. A person with nothing waiting gets nothing — silence is what a
- * clear desk sounds like.
+ *   Daily report    "please enter your report", at 20:00 and 22:00
+ *                   (WORK_REMINDER_REPORT_HOURS), to each officer whose
+ *                   report for today is not in
+ *   No orders       "no orders today — what is the issue?", at 18:00
+ *                   (WORK_REMINDER_NO_ORDERS_HOUR), to every officer on an
+ *                   active depot-sales PFI that has raised none today
  *
- * ── Who owes what ──────────────────────────────────────────────────────────
+ * ── Assigned, or nothing ───────────────────────────────────────────────────
  *
- * Three rules, one per kind of work:
+ * A reminder reaches a person only when they hold the role AND are named on
+ * the PFI as an officer (pfi_staff). Work on a PFI with nobody on that desk is
+ * sent to nobody — not to the role's other holders, not to the admins. The
+ * expense chain is the one thing not tied to a PFI: each stage goes to the
+ * people whose turn it is (see DESK_KINDS). Super admins get only what their
+ * other roles and assignments bring them.
  *
- *   desk      Work on an order or a load belongs to the desk's officers on its
- *             PFI, the rule the desk-step texts use (notifications/deskOfficers):
- *             role holders on the PFI; else the role's company-wide holders
- *             (no PFIs, and no depots or this one); else the admins, because
- *             work nobody holds is exactly the work that gets stuck.
- *   role      Approvals that belong to a role, not a batch: every active holder
- *             of the role; else the admins.
- *   personal  Work that is one person's own: an expense sent back to them, a
- *             daily report they have not filed.
+ * ── One text per person per kind ───────────────────────────────────────────
  *
- * Super admins are never reminded by role — they can do everything, so
- * deriving from what they CAN do would put the whole company on their phone.
- * They are the last fallback when a desk has no admin at all.
+ * The work reminders are one text listing everything on the person's desks,
+ * each named by PFI. The report reminder and the no-orders alert are their
+ * own texts, because they say one thing each. Each carries the round (the
+ * Lagos date and hour) in its dedupe key, so a retried job or "Send now" in
+ * the same hour sends nothing twice. Every round is an audit row
+ * (work_reminder.round), which the Reminders tab on the Messaging page reads.
  *
- * ── Only what is late ──────────────────────────────────────────────────────
- *
- * An item joins a reminder once it has waited WORK_REMINDER_AFTER_HOURS (2).
- * Trucks on the yard wait WORK_REMINDER_YARD_HOURS (6), because loading takes
- * hours and a truck on the yard at hour three is working, not forgotten.
- * Today's daily report is chased from WORK_REMINDER_REPORT_HOUR (18:00), since
- * most are filed in the evening; yesterday's is chased all day if still missing.
- *
- * ── Sent once per round ────────────────────────────────────────────────────
- *
- * Each message carries the round (the Lagos date and hour) as its dedupe key,
- * so a retried job, a second server, or "Send now" pressed after the scheduled
- * round cannot text the same person twice in the same hour. Every round is an
- * audit row (work_reminder.round) holding who was told what, which is what the
- * Reminders tab on the Messaging page reads back.
- *
- * Every person can be switched off on Manage Users ("Reminders of waiting
- * work", notifications/staffChoices.js). Their own quiet hours apply too.
+ * ON unless WORK_REMINDERS_ENABLED=false (switched on by the owner 6 Oct 2026,
+ * after a day paused). Each person can be switched off
+ * on Manage Users ("Reminders of waiting work"); their quiet hours apply too.
  */
 
-const NOTICE = "staff.work_reminder";
+const NOTICES = {
+  desk: "staff.work_reminder",
+  report: "staff.report_reminder",
+  noOrders: "staff.no_orders_alert",
+};
 const ROUND_ACTION = "work_reminder.round";
 const ROUND_ENTITY = "work_reminder_round";
 const TZ = () => process.env.REPORT_TIMEZONE || "Africa/Lagos";
@@ -72,29 +66,35 @@ const num = (v, fallback) => {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
-/** The settings, read at call time so a test or an env change takes effect. */
-const settings = () => {
-  const hours = String(process.env.WORK_REMINDER_HOURS || "8,10,12,14,16,18,20")
+const hoursFrom = (value, fallback) => {
+  const hours = String(value || fallback)
     .split(",")
     .map((h) => Number(h.trim()))
     .filter((h) => Number.isInteger(h) && h >= 0 && h <= 23)
     .sort((a, b) => a - b);
+  return [...new Set(hours)];
+};
+
+/** The settings, read at call time so a test or an env change takes effect. */
+const settings = () => {
+  const deskHours = hoursFrom(process.env.WORK_REMINDER_HOURS, "8,10,12,14,16,18,20");
+  const reportHours = hoursFrom(process.env.WORK_REMINDER_REPORT_HOURS, "20,22");
+  const noOrdersHour = num(process.env.WORK_REMINDER_NO_ORDERS_HOUR, 18);
   return {
-    hours: [...new Set(hours)],
+    deskHours,
+    reportHours,
+    noOrdersHour,
+    /** Every hour a round runs at — the scheduler's cron. */
+    hours: [...new Set([...deskHours, ...reportHours, noOrdersHour])].sort((a, b) => a - b),
     afterHours: num(process.env.WORK_REMINDER_AFTER_HOURS, 2),
-    yardHours: num(process.env.WORK_REMINDER_YARD_HOURS, 6),
-    reportHour: num(process.env.WORK_REMINDER_REPORT_HOUR, 18),
-    /** The switch, separate from the scheduler's own, so reminders can stop alone. */
+    /** On unless switched off — the owner switched them on on 6 Oct 2026. */
     enabled: process.env.WORK_REMINDERS_ENABLED !== "false",
     scheduled: process.env.SCHEDULED_JOBS_ENABLED === "true",
   };
 };
 
-/** The cron the scheduler registers: on the hour, at each reminder hour. */
-const cronExpression = () => {
-  const { hours } = settings();
-  return `0 ${hours.length ? hours.join(",") : "8"} * * *`;
-};
+/** The cron the scheduler registers: on the hour, at each round's hour. */
+const cronExpression = () => `0 ${settings().hours.join(",") || "8"} * * *`;
 
 /** The hour of day in Lagos, 0–23. */
 const lagosHour = (at = new Date()) =>
@@ -103,28 +103,51 @@ const lagosHour = (at = new Date()) =>
 /** "2026-10-05 10:00" — the round a moment belongs to, and its dedupe key. */
 const roundKey = (at = new Date()) => `${localDateStr(at, TZ())} ${String(lagosHour(at)).padStart(2, "0")}:00`;
 
-/** When the next scheduled round is, as "2026-10-05 12:00" Lagos, or null with no hours set. */
+/** When the next scheduled round is, as "2026-10-05 12:00" Lagos. */
 const nextRound = (at = new Date()) => {
   const { hours } = settings();
   if (!hours.length) return null;
   const today = localDateStr(at, TZ());
-  const hour = lagosHour(at);
-  const later = hours.find((h) => h > hour);
+  const later = hours.find((h) => h > lagosHour(at));
   return later != null
     ? `${today} ${String(later).padStart(2, "0")}:00`
     : `${addDaysStr(today, 1)} ${String(hours[0]).padStart(2, "0")}:00`;
 };
 
-const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
-const hoursOf = (v) => Math.max(0, Math.floor(Number(v) || 0));
-const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+/**
+ * Which reminders a round sends.
+ *
+ * A scheduled round sends what is due at its hour. "Send now" sends the work
+ * reminders, and the report and no-orders ones only from their hour on, so a
+ * press in the morning cannot text "no orders today" before the day is out.
+ * The preview shows all three.
+ */
+const dueKinds = (at, trigger) => {
+  const cfg = settings();
+  const hour = lagosHour(at);
+  if (trigger === "preview") return { desk: true, report: true, noOrders: true };
+  if (trigger === "manual") {
+    return {
+      desk: true,
+      report: cfg.reportHours.length > 0 && hour >= cfg.reportHours[0],
+      noOrders: hour >= cfg.noOrdersHour,
+    };
+  }
+  return {
+    desk: cfg.deskHours.includes(hour),
+    report: cfg.reportHours.includes(hour),
+    noOrders: hour === cfg.noOrdersHour,
+  };
+};
 
-// ─── Who is on the staff ────────────────────────────────────────────────────
+const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
+const pfiKey = (v) => String(v || "").trim().toUpperCase().replace(/\s+/g, " ");
+
+// ─── Who is on which desk ───────────────────────────────────────────────────
 
 /**
- * Every active member of staff with their roles and assignments, read once per
- * round. Owners are then worked out in memory: eighteen kinds of work over a
- * few dozen people is cheaper to match here than to ask the database per item.
+ * Every active member of staff with their roles and the PFIs they are named
+ * on. Depot assignments are not read: a reminder follows the PFI's officers.
  */
 const loadDirectory = async () => {
   const people = await client`
@@ -133,487 +156,310 @@ const loadDirectory = async () => {
      WHERE is_active = true AND suspended = false
   `;
   const ids = people.map((p) => p.id);
-  const [pfiRows, depotRows] = ids.length
-    ? await Promise.all([
-        client`SELECT staff_id, pfi_id FROM pfi_staff WHERE staff_id IN ${client(ids)}`,
-        client`SELECT staff_id, depot_id FROM depot_staff WHERE staff_id IN ${client(ids)}`,
-      ])
-    : [[], []];
+  const pfiRows = ids.length
+    ? await client`SELECT staff_id, pfi_id FROM pfi_staff WHERE staff_id IN ${client(ids)}`
+    : [];
 
   const byId = new Map();
   for (const p of people) {
-    const name = [p.first_name, p.surname].filter(Boolean).join(" ").trim() || `Staff #${p.id}`;
     byId.set(Number(p.id), {
       id: Number(p.id),
-      name,
+      name: [p.first_name, p.surname].filter(Boolean).join(" ").trim() || `Staff #${p.id}`,
       firstName: String(p.first_name || "").trim(),
       phone: p.phone_number || null,
       roles: new Set(p.roles || []),
       pfis: new Set(),
-      depots: new Set(),
     });
   }
   for (const r of pfiRows) byId.get(Number(r.staff_id))?.pfis.add(Number(r.pfi_id));
-  for (const r of depotRows) byId.get(Number(r.staff_id))?.depots.add(Number(r.depot_id));
 
   const all = [...byId.values()];
-  const holders = (roles) => all.filter((p) => roles.some((r) => p.roles.has(r)));
-  const admins = () => {
-    const a = holders(["admin"]);
-    return a.length ? a : holders(["super_admin"]);
+  return {
+    byId,
+    /** Holders of any of these roles. */
+    holders: (roles) => all.filter((p) => roles.some((r) => p.roles.has(r))),
+    /** Holders of any of these roles named on this PFI — nobody else. Any role when `roles` is null. */
+    onPfi: (roles, pfiId) =>
+      pfiId == null ? [] : all.filter((p) => p.pfis.has(Number(pfiId)) && (!roles || roles.some((r) => p.roles.has(r)))),
   };
-
-  return { byId, holders, admins };
 };
 
-/** The desk's officers for one item — see "Who owes what" above. */
-const deskOwners = (dir, roles, item) => {
-  const holders = dir.holders(roles);
-  if (!holders.length) return dir.admins();
-  const pfiId = item.pfiId != null ? Number(item.pfiId) : null;
-  const depotId = item.depotId != null ? Number(item.depotId) : null;
-  if (pfiId != null) {
-    const onPfi = holders.filter((p) => p.pfis.has(pfiId));
-    if (onPfi.length) return onPfi;
-  }
-  const companyWide = holders.filter(
-    (p) => p.pfis.size === 0 && (p.depots.size === 0 || (depotId != null && p.depots.has(depotId))),
-  );
-  return companyWide.length ? companyWide : dir.admins();
-};
-
-/** A role's holders, else the admins. */
-const roleOwners = (dir, roles) => {
-  const holders = dir.holders(roles);
-  return holders.length ? holders : dir.admins();
-};
-
-/** The CFO desk, by name — the same people expense.verified texts. */
-const cfoOwners = (dir) => {
-  const named = cfoDeskIds().map((id) => dir.byId.get(id)).filter(Boolean);
-  return named.length ? named : roleOwners(dir, STAGE_RECIPIENTS.verified.roles);
+/** The PFIs a reminder can name, with the label the desks use ("PFI 47"). */
+const loadPfis = async () => {
+  const rows = await client`
+    SELECT id, pfi_number, pfi_type, status, location_name FROM pfis WHERE status <> 'finished'`;
+  return new Map(rows.map((p) => [Number(p.id), {
+    id: Number(p.id),
+    number: p.pfi_number || "",
+    label: shortPfi(p.pfi_number) || `PFI ${p.id}`,
+    type: p.pfi_type || "coastal",
+    status: p.status,
+    location: p.location_name || "",
+  }]));
 };
 
 // ─── What is waiting ────────────────────────────────────────────────────────
 
-/** Rows of a drizzle query from deskAssignments, so tickets and gates count as its panel does. */
-const assignmentDesk = (key) => async () => {
-  const desk = ASSIGNMENT_DESKS.find((d) => d.key === key);
-  return rowsOf(await db.execute(desk.fetch())).map((r) => ({
-    pfiId: r.pfiId, depotId: r.depotId, hours: r.hoursWaiting,
-  }));
+/** Orders still waiting for their payment to be confirmed. */
+const pendingPayments = () => client`
+  SELECT o.pfi_id AS "pfiId", EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600 AS hours
+    FROM orders o
+    JOIN pfis p ON p.id = o.pfi_id
+   WHERE o.status = 'Pending'
+     AND o.payment_status IN ('Unpaid', 'Part Paid')
+     AND p.status <> 'finished'
+`;
+
+/** Orders paid for and released, with no ticket yet — the ticketing desk's own query. */
+const unticketedOrders = async () => {
+  const desk = ASSIGNMENT_DESKS.find((d) => d.key === "tickets");
+  return rowsOf(await db.execute(desk.fetch())).map((r) => ({ pfiId: r.pfiId, hours: r.hoursWaiting }));
 };
 
-const expensesAt = async (status) =>
-  client`
-    SELECT e.id, e.pfi_id AS "pfiId", COALESCE(e.added_by, e.recorded_by) AS "submitter",
-           EXTRACT(EPOCH FROM (now() - COALESCE(
-             CASE e.status
-               WHEN 'verified' THEN e.verified_at
-               WHEN 'audit_approved' THEN e.audit_approved_at
-               WHEN 'admin_approved' THEN e.admin_approved_at
-               WHEN 'changes_requested' THEN e.reviewed_at
-             END,
-             CASE WHEN e.status = 'pending' THEN e.created_at END,
-             e.updated_at, e.created_at
-           ))) / 3600 AS hours
-      FROM pfi_expenses e
-     WHERE e.deleted_at IS NULL AND e.status::text = ${status}
-  `;
+/** Trucks with a ticket that have not been gated out. */
+const trucksNotExited = () => client`
+  SELECT o.pfi_id AS "pfiId", EXTRACT(EPOCH FROM (now() - t.created_at)) / 3600 AS hours
+    FROM order_trucks t
+    JOIN orders o ON o.id = t.order_id
+    JOIN pfis p   ON p.id = o.pfi_id
+   WHERE t.status IN ('pending', 'gated_in', 'loaded')
+     AND o.status NOT IN ('Cancelled', 'Expired')
+     AND p.status <> 'finished'
+     AND p.pfi_type NOT IN ('gantry', 'delivery')
+`;
 
 /**
- * The kinds of work, in the order a message lists them.
- *
- * `owners` is how an item finds its people: "desk" with `roles`, "role" with
- * `roles`, "cfo", or "personal" where the fetch names the staff itself.
- * `noun` is what one line of the message says about `n` of them. `path` is the
- * page that clears it, for the bell's link and the Reminders tab.
+ * Expense requests at one stage of the approval chain, aged from when they
+ * reached it, with whoever raised them (for the stage that is theirs).
  */
-const KINDS = [
+const expensesAt = (status) => client`
+  SELECT COALESCE(added_by, recorded_by) AS "raisedBy",
+         delivery_customer_id, lpg_station_id,
+         EXTRACT(EPOCH FROM (now() - COALESCE(
+           CASE status::text
+             WHEN 'pending'           THEN created_at
+             WHEN 'verified'          THEN verified_at
+             WHEN 'audit_approved'    THEN audit_approved_at
+             WHEN 'admin_approved'    THEN admin_approved_at
+             WHEN 'changes_requested' THEN reviewed_at
+           END,
+           updated_at, created_at
+         ))) / 3600 AS hours
+    FROM pfi_expenses
+   WHERE deleted_at IS NULL AND status::text = ${status}
+`;
+
+/** The expenditure officer named for this expense, if active. */
+const officersOf = (dir, expense) => officerIdsFor(expense).map((id) => dir.byId.get(id)).filter(Boolean);
+
+/** Who the named desks are, by name, for the Reminders tab. */
+const namedDesks = (dir) => {
+  const names = (ids) => ids.map((id) => dir.byId.get(id)?.name).filter(Boolean).join(" and ") || "nobody (not an active member of staff)";
+  return {
+    officers: `${names(stationOfficerIds())} for station and LPG plant expenses; ${names(generalOfficerIds())} for the rest`,
+    cfo: `The CFO, ${names(cfoDeskIds())}`,
+  };
+};
+
+/**
+ * The work reminders — in the order a text lists them.
+ *
+ * `ownersOf` says who an item is waiting on. The expense chain is the
+ * company's, not a PFI's: each stage reaches the people whose turn it is —
+ * the expenditure officer named for the expense to verify and to pay
+ * (lib/expenseOfficers.js: station and plant expenses to one, the rest to
+ * another), the CFO by name
+ * (EXPENSE_CFO_STAFF_IDS, as the stage's own notice is sent), the admins for
+ * final approval, and whoever raised a request sent back to them. The order
+ * desks reach the role's officers on the order's PFI. Nobody else, ever.
+ */
+const DESK_KINDS = [
   {
-    key: "payments",
-    label: "Payments to confirm",
-    who: "Finance on the order's PFI",
-    path: "/payable-orders",
-    owners: "desk",
-    roles: ["finance"],
-    noun: (n) => `${plural(n, "order")} to confirm payment for`,
-    fetch: () => client`
-      SELECT o.pfi_id AS "pfiId", o.depot_id AS "depotId",
-             EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600 AS hours
-        FROM orders o
-       WHERE o.status = 'Pending'
-         AND o.payment_status IN ('Unpaid', 'Part Paid')
-         AND NOT EXISTS (SELECT 1 FROM pfis p WHERE p.id = o.pfi_id AND p.status = 'finished')
-    `,
+    key: "expenseVerify", label: "Expense requests to verify", who: (n) => n.officers,
+    fetch: () => expensesAt("pending"), ownersOf: (dir, item) => officersOf(dir, item), path: "/expenses",
   },
   {
-    key: "pricing",
-    label: "Credit orders to price",
-    who: "Finance on the order's PFI",
-    path: "/receivables",
-    owners: "desk",
-    roles: ["finance"],
-    noun: (n) => `${plural(n, "credit order")} to price`,
-    fetch: () => client`
-      SELECT o.pfi_id AS "pfiId", o.depot_id AS "depotId",
-             EXTRACT(EPOCH FROM (now() - o.created_at)) / 3600 AS hours
-        FROM orders o
-       WHERE o.pricing_status = 'pending'
-         AND o.status NOT IN ('Cancelled', 'Expired')
-    `,
-  },
-  {
-    key: "refunds",
-    label: "Refunds to pay",
-    who: "Finance on the order's PFI",
-    path: "/overpayment-refunds",
-    owners: "desk",
-    roles: ["finance"],
-    noun: (n) => `${plural(n, "refund")} to pay`,
-    fetch: () => client`
-      SELECT o.pfi_id AS "pfiId", o.depot_id AS "depotId",
-             EXTRACT(EPOCH FROM (now() - COALESCE(r.requested_at, r.created_at))) / 3600 AS hours
-        FROM order_refunds r
-        JOIN orders o ON o.id = r.order_id
-       WHERE r.status = 'requested'
-    `,
-  },
-  {
-    key: "tickets",
-    label: "Orders to ticket",
-    who: "Ticketing and dispatch on the order's PFI",
-    path: "/ticket",
-    owners: "desk",
-    roles: ["ticketing", "dispatch"],
-    noun: (n) => `${plural(n, "order")} to ticket`,
-    fetch: assignmentDesk("tickets"),
-  },
-  {
-    key: "gateIn",
-    label: "Trucks to gate in",
-    who: "Entrance gate on the order's PFI",
-    path: "/security/entry",
-    owners: "desk",
-    roles: ["security_entry"],
-    noun: (n) => `${plural(n, "truck")} to gate in`,
-    fetch: assignmentDesk("entry"),
-  },
-  {
-    key: "gateOut",
-    label: "Trucks to gate out",
-    who: "Exit gate on the order's PFI",
-    path: "/security/exit",
-    owners: "desk",
-    roles: ["security_exit"],
-    yard: true,
-    noun: (n) => `${plural(n, "truck")} to gate out`,
-    fetch: assignmentDesk("exit"),
-  },
-  {
-    key: "trucksToSell",
-    label: "Loaded trucks to sell",
-    who: "Truck sales on the batch's PFI",
-    path: "/delivery-operations",
-    owners: "desk",
-    roles: ["truck_sales"],
-    noun: (n) => `${plural(n, "loaded truck")} to sell`,
-    fetch: () => client`
-      SELECT di.pfi_id AS "pfiId", p.location_id AS "depotId",
-             EXTRACT(EPOCH FROM (now() - di.created_at)) / 3600 AS hours
-        FROM delivery_inventory di
-        JOIN pfis p ON p.id = di.pfi_id
-       WHERE di.loading_status = 'loaded'
-         AND di.customer_id IS NULL
-         AND p.status <> 'finished'
-    `,
-  },
-  {
-    key: "expenseVerify",
-    label: "Expenses to verify",
-    who: "Expenditure officers and admins",
-    path: "/expenses",
-    owners: "role",
-    roles: STAGE_RECIPIENTS.pending.roles,
-    noun: (n) => `${plural(n, "expense")} to verify`,
-    fetch: () => expensesAt("pending"),
-  },
-  {
-    key: "expenseCfo",
-    label: "Expenses for CFO approval",
-    who: "The CFO",
-    path: "/expenses",
-    owners: "cfo",
-    noun: (n) => `${plural(n, "expense")} for your CFO approval`,
+    key: "expenseCfo", label: "Expense requests for CFO approval", who: (n) => n.cfo,
     fetch: () => expensesAt("verified"),
-  },
-  {
-    key: "expenseApprove",
-    label: "Expenses for final approval",
-    who: "Admins",
+    ownersOf: (dir) => cfoDeskIds().map((id) => dir.byId.get(id)).filter(Boolean),
     path: "/expenses",
-    owners: "role",
-    roles: STAGE_RECIPIENTS.audit_approved.roles,
-    noun: (n) => `${plural(n, "expense")} for final approval`,
-    fetch: () => expensesAt("audit_approved"),
   },
   {
-    key: "expensePay",
-    label: "Approved expenses to pay",
-    who: "Expenditure officers",
-    path: "/expenses",
-    owners: "role",
-    roles: STAGE_RECIPIENTS.admin_approved.roles,
-    noun: (n) => `${plural(n, "approved expense")} to pay`,
-    fetch: () => expensesAt("admin_approved"),
+    key: "expenseFinal", label: "Expense requests for final approval", who: "Admins",
+    fetch: () => expensesAt("audit_approved"), ownersOf: (dir) => dir.holders(["admin"]), path: "/expenses",
   },
   {
-    key: "expenseChanges",
-    label: "Expenses sent back for changes",
-    who: "Whoever raised the expense",
+    key: "expensePay", label: "Approved expense requests to pay", who: (n) => n.officers,
+    fetch: () => expensesAt("admin_approved"), ownersOf: (dir, item) => officersOf(dir, item), path: "/expenses",
+  },
+  {
+    key: "expenseChanges", label: "Expense requests sent back for changes", who: "Whoever raised the request",
+    fetch: () => expensesAt("changes_requested"),
+    ownersOf: (dir, item) => [dir.byId.get(Number(item.raisedBy))].filter(Boolean),
     path: "/expense-requests",
-    owners: "personal",
-    noun: (n) => `${plural(n, "expense")} sent back to you for changes`,
-    fetch: async () =>
-      (await expensesAt("changes_requested"))
-        .filter((r) => r.submitter != null)
-        .map((r) => ({ ...r, staffIds: [Number(r.submitter)] })),
   },
   {
-    key: "reports",
-    label: "Daily reports to file",
-    who: "Sales managers, product managers, the gate, commissions and IT compliance on each PFI",
-    path: "/my-report",
-    owners: "personal",
-    // Built separately: each line names the report and the PFIs. See reportLines.
+    key: "payments", label: "Payments to confirm", who: "Finance officers on the order's PFI", byPfi: true,
+    fetch: pendingPayments, ownersOf: (dir, item) => dir.onPfi(["finance"], item.pfiId), path: "/payable-orders",
   },
   {
-    key: "allocations",
-    label: "Truck allocations to approve",
-    who: "Admins",
-    path: "/pfi",
-    owners: "role",
-    roles: ["admin"],
-    noun: (n) => `${plural(n, "truck allocation")} to approve`,
-    fetch: () => client`
-      SELECT EXTRACT(EPOCH FROM (now() - COALESCE(raised_at, created_at))) / 3600 AS hours
-        FROM pfi_truck_allocations
-       WHERE status = 'pending'
-    `,
+    key: "tickets", label: "Paid orders not ticketed", who: "Ticketing officers on the order's PFI", byPfi: true,
+    fetch: unticketedOrders, ownersOf: (dir, item) => dir.onPfi(["ticketing"], item.pfiId), path: "/ticket",
   },
   {
-    key: "priceChanges",
-    label: "Price changes to approve",
-    who: "Admins",
-    path: "/product-pricing",
-    owners: "role",
-    roles: ["admin"],
-    noun: (n) => `${plural(n, "price change")} to approve`,
-    fetch: () => client`
-      SELECT EXTRACT(EPOCH FROM (now() - COALESCE(requested_at, created_at))) / 3600 AS hours
-        FROM depot_price_changes
-       WHERE status = 'pending'
-    `,
-  },
-  {
-    key: "pfisToStart",
-    label: "PFIs to start",
-    who: "Admins",
-    path: "/pfi",
-    owners: "role",
-    roles: ["admin"],
-    noun: (n) => `${plural(n, "PFI")} to start`,
-    fetch: () => client`
-      SELECT EXTRACT(EPOCH FROM (now() - created_at)) / 3600 AS hours
-        FROM pfis
-       WHERE status = 'not_started'
-    `,
-  },
-  {
-    key: "requests",
-    label: "Dangote and LPG requests to review",
-    who: "Sales managers",
-    path: "/dangote-order-request",
-    owners: "role",
-    roles: ["sales_manager"],
-    noun: (n) => `${plural(n, "Dangote or LPG request")} to review`,
-    fetch: () => client`
-      SELECT EXTRACT(EPOCH FROM (now() - created_at)) / 3600 AS hours
-        FROM dangote_order_requests WHERE status = 'Pending Review'
-      UNION ALL
-      SELECT EXTRACT(EPOCH FROM (now() - created_at)) / 3600 AS hours
-        FROM lpg_order_requests WHERE status = 'Pending Review'
-    `,
-  },
-  {
-    key: "licences",
-    label: "Customer licences to review",
-    who: "IT compliance",
-    path: "/licence-verification",
-    owners: "role",
-    roles: ["it_compliance"],
-    noun: (n) => `${plural(n, "customer licence")} to review`,
-    fetch: () => client`
-      SELECT EXTRACT(EPOCH FROM (now() - created_at)) / 3600 AS hours
-        FROM customer_licenses WHERE status = 'pending'
-    `,
+    key: "exits", label: "Ticketed trucks not gated out", who: "Exit gate officers on the order's PFI", byPfi: true,
+    fetch: trucksNotExited, ownersOf: (dir, item) => dir.onPfi(["security_exit"], item.pfiId), path: "/security/exit",
   },
 ];
 
-/**
- * The daily reports still missing, one entry per officer per report and day.
- *
- * Read through reportReminders.outstandingReports, so the grid is the Reports
- * Hub's own: a desk is filed when anybody filed it, and its officers are the
- * filers scoped to its PFI. A desk nobody is scoped to has no officer and is
- * not chased here — that is a staffing gap, and the hub already shows it.
- */
-const reportItems = async (at) => {
-  const { reportHour } = settings();
-  const today = localDateStr(at, TZ());
-  const days = [addDaysStr(today, -1)];
-  if (lagosHour(at) >= reportHour) days.push(today);
+/** Active PFIs that sell from the depot — every type but trucking, whose loads are sold off the truck. */
+const depotSalesPfis = (pfis) => [...pfis.values()].filter((p) => p.status === "active" && p.type !== "trucking");
 
-  const items = [];
-  for (const date of days) {
-    const state = await outstandingReports(date);
-    for (const role of state.roles) {
-      for (const desk of role.desks) {
-        if (desk.status !== "missing") continue;
-        for (const officer of desk.officers) {
-          items.push({ staffId: Number(officer.staffId), role: role.type, date, pfiNumber: desk.pfiNumber });
-        }
+// ─── Building a round ───────────────────────────────────────────────────────
+
+/**
+ * The messages a round would send. Reads only.
+ *
+ * @param {Date} at
+ * @param {{trigger?: "schedule"|"manual"|"preview", staffIds?: number[]}} [opts]
+ * @returns {Promise<{round, messages, totals, failures}>}
+ */
+const buildRound = async (at = new Date(), { trigger = "preview", staffIds = null } = {}) => {
+  const cfg = settings();
+  const due = dueKinds(at, trigger);
+  const [dir, pfis] = await Promise.all([loadDirectory(), loadPfis()]);
+  const failures = [];
+  const totals = {};
+  const only = staffIds ? new Set(staffIds.map(Number)) : null;
+  const wanted = (id) => !only || only.has(Number(id));
+  const pfiLabel = (id) => pfis.get(Number(id))?.label || `PFI ${id}`;
+  const today = localDateStr(at, TZ());
+  const messages = [];
+
+  // ── The work reminders: one text per person, every desk they are behind on.
+  if (due.desk) {
+    const owed = new Map(); // staffId → { expenseFinal: n, payments: Map(pfiId → n), … }
+    const add = (person, kind, pfiId) => {
+      if (!owed.has(person.id)) owed.set(person.id, {});
+      const mine = owed.get(person.id);
+      if (kind.byPfi) {
+        mine[kind.key] ??= new Map();
+        mine[kind.key].set(pfiId, (mine[kind.key].get(pfiId) || 0) + 1);
+      } else {
+        mine[kind.key] = (mine[kind.key] || 0) + 1;
+      }
+    };
+    for (const kind of DESK_KINDS) {
+      let rows = [];
+      try {
+        rows = rowsOf(await kind.fetch());
+      } catch (err) {
+        console.error(`[work-reminders] ${kind.key} failed:`, err.message);
+        failures.push({ kind: kind.key, error: err.message });
+        continue;
+      }
+      const late = rows.filter((r) => Number(r.hours) >= cfg.afterHours);
+      totals[kind.key] = late.length;
+      for (const item of late) {
+        for (const p of kind.ownersOf(dir, item)) add(p, kind, item.pfiId);
       }
     }
+    for (const [staffId, mine] of owed) {
+      if (!wanted(staffId)) continue;
+      const person = dir.byId.get(staffId);
+      const byPfi = (m) => (m ? [...m.entries()].map(([id, count]) => ({ pfi: pfiLabel(id), count })) : []);
+      const data = { firstName: person.firstName };
+      for (const k of DESK_KINDS) data[k.key] = k.byPfi ? byPfi(mine[k.key]) : mine[k.key] || 0;
+      data.path = DESK_KINDS.find((k) => (k.byPfi ? data[k.key].length : data[k.key] > 0))?.path || "/";
+      messages.push({ kind: "desk", person, data });
+    }
   }
-  return items;
-};
 
-/** "your gate report for Sun 4 Oct, PFI 47 and PFI 39" — one per report and day. */
-const reportLines = (items) => {
-  const groups = new Map();
-  for (const i of items) {
-    const k = `${i.date}|${i.role}`;
-    if (!groups.has(k)) groups.set(k, { date: i.date, role: i.role, pfis: [] });
-    const label = shortPfi(i.pfiNumber);
-    if (!groups.get(k).pfis.includes(label)) groups.get(k).pfis.push(label);
-  }
-  return [...groups.values()]
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .map((g) => {
-      const pfis = g.pfis.length > 1 ? `${g.pfis.slice(0, -1).join(", ")} and ${g.pfis.at(-1)}` : g.pfis[0];
-      return `your ${REPORT_NAMES[g.role] || "daily report"} for ${dayLabel(g.date)}, ${pfis}`;
-    });
-};
-
-/** "6h" or "3 days" — how long the oldest has waited. */
-const age = (hours) => (hours >= 48 ? `${Math.floor(hours / 24)} days` : `${hours}h`);
-
-// ─── The round ──────────────────────────────────────────────────────────────
-
-/**
- * Who would be reminded of what, right now. Reads only.
- *
- * @param {Date} [at]
- * @param {{staffIds?: number[]}} [opts] only these people (the tests use it)
- * @returns {Promise<{round, people: Array, kinds: Array}>}
- */
-const buildRound = async (at = new Date(), { staffIds = null } = {}) => {
-  const cfg = settings();
-  const dir = await loadDirectory();
-  const owed = new Map(); // staffId → Map(kindKey → { count, oldest })
-  const kindTotals = {};
-  const failures = [];
-
-  const add = (person, kindKey, hours) => {
-    if (!owed.has(person.id)) owed.set(person.id, new Map());
-    const mine = owed.get(person.id);
-    const e = mine.get(kindKey) || { count: 0, oldest: 0 };
-    e.count += 1;
-    e.oldest = Math.max(e.oldest, hoursOf(hours));
-    mine.set(kindKey, e);
-  };
-
-  for (const kind of KINDS) {
-    if (kind.key === "reports") continue;
-    let rows = [];
+  // ── The daily report: the officers of every report not in for today.
+  if (due.report) {
     try {
-      rows = rowsOf(await kind.fetch());
+      const sheets = await client`
+        SELECT report_type::text AS role, pfi_number FROM daily_reports WHERE report_date = ${today}`;
+      const filed = new Set(sheets.map((s) => `${s.role}|${pfiKey(s.pfi_number)}`));
+      const missing = new Map(); // staffId → Map(reportType → [pfi labels])
+      let count = 0;
+      for (const pfi of depotSalesPfis(pfis)) {
+        for (const [type, roles] of Object.entries(FILER_ROLES)) {
+          if (filed.has(`${type}|${pfiKey(pfi.number)}`)) continue;
+          const officers = dir.onPfi(roles, pfi.id);
+          if (officers.length) count += 1;
+          for (const p of officers) {
+            if (!missing.has(p.id)) missing.set(p.id, new Map());
+            const mine = missing.get(p.id);
+            mine.set(type, [...(mine.get(type) || []), pfi.label]);
+          }
+        }
+      }
+      totals.reports = count;
+      for (const [staffId, mine] of missing) {
+        if (!wanted(staffId)) continue;
+        const person = dir.byId.get(staffId);
+        messages.push({
+          kind: "report",
+          person,
+          data: {
+            firstName: person.firstName,
+            day: dayLabel(today),
+            reports: [...mine.entries()].map(([type, list]) => ({ name: REPORT_NAMES[type] || "daily report", pfis: list })),
+            path: "/my-report",
+          },
+        });
+      }
     } catch (err) {
-      // One broken query must not cost everybody else their reminder.
-      console.error(`[work-reminders] ${kind.key} failed:`, err.message);
-      failures.push({ kind: kind.key, error: err.message });
-      continue;
-    }
-    const after = kind.yard ? cfg.yardHours : cfg.afterHours;
-    const late = rows.filter((r) => Number(r.hours) >= after);
-    kindTotals[kind.key] = late.length;
-
-    for (const item of late) {
-      let people;
-      if (kind.owners === "desk") people = deskOwners(dir, kind.roles, item);
-      else if (kind.owners === "role") people = roleOwners(dir, kind.roles);
-      else if (kind.owners === "cfo") people = cfoOwners(dir);
-      else people = (item.staffIds || []).map((id) => dir.byId.get(id)).filter(Boolean);
-      for (const p of people) add(p, kind.key, item.hours);
+      console.error("[work-reminders] reports failed:", err.message);
+      failures.push({ kind: "reports", error: err.message });
     }
   }
 
-  let reports = [];
-  try {
-    reports = await reportItems(at);
-  } catch (err) {
-    console.error("[work-reminders] reports failed:", err.message);
-    failures.push({ kind: "reports", error: err.message });
-  }
-  kindTotals.reports = reports.length;
-  const reportsBy = new Map();
-  for (const r of reports) {
-    if (!dir.byId.has(r.staffId)) continue;
-    if (!reportsBy.has(r.staffId)) reportsBy.set(r.staffId, []);
-    reportsBy.get(r.staffId).push(r);
+  // ── No orders today on an active depot-sales PFI: every officer on it.
+  if (due.noOrders) {
+    try {
+      const counts = await client`
+        SELECT pfi_id, COUNT(*)::int AS n FROM orders
+         WHERE pfi_id IS NOT NULL AND (created_at AT TIME ZONE ${TZ()})::date = ${today}::date
+         GROUP BY pfi_id`;
+      const raised = new Map(counts.map((c) => [Number(c.pfi_id), c.n]));
+      const quiet = depotSalesPfis(pfis).filter((p) => !raised.get(p.id));
+      totals.noOrders = quiet.length;
+      const told = new Map(); // staffId → [pfi]
+      for (const pfi of quiet) {
+        for (const p of dir.onPfi(null, pfi.id)) told.set(p.id, [...(told.get(p.id) || []), pfi]);
+      }
+      for (const [staffId, list] of told) {
+        if (!wanted(staffId)) continue;
+        const person = dir.byId.get(staffId);
+        messages.push({
+          kind: "noOrders",
+          person,
+          data: {
+            firstName: person.firstName,
+            day: dayLabel(today),
+            pfis: list.map((p) => ({ pfi: p.label, location: p.location })),
+            path: "/orders",
+          },
+        });
+      }
+    } catch (err) {
+      console.error("[work-reminders] no-orders check failed:", err.message);
+      failures.push({ kind: "noOrders", error: err.message });
+    }
   }
 
   const off = await switchedOff();
-  const only = staffIds ? new Set(staffIds.map(Number)) : null;
-  const ids = new Set([...owed.keys(), ...reportsBy.keys()].filter((id) => !only || only.has(id)));
-  const people = [...ids]
-    .map((id) => {
-      const person = dir.byId.get(id);
-      const mine = owed.get(id) || new Map();
-      const lines = [];
-      for (const kind of KINDS) {
-        if (kind.key === "reports") {
-          const own = reportsBy.get(id);
-          if (own?.length) {
-            for (const text of reportLines(own)) lines.push({ kind: "reports", path: kind.path, count: 1, oldestHours: null, text });
-          }
-          continue;
-        }
-        const e = mine.get(kind.key);
-        if (!e) continue;
-        lines.push({
-          kind: kind.key,
-          path: kind.path,
-          count: e.count,
-          oldestHours: e.oldest,
-          text: `${kind.noun(e.count)}, oldest ${age(e.oldest)}`,
-        });
-      }
-      return {
-        staffId: id,
-        name: person.name,
-        firstName: person.firstName,
-        phone: person.phone,
-        roles: [...person.roles],
-        lines,
-        switchedOff: off.has(id),
-      };
-    })
-    .filter((p) => p.lines.length)
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  return { round: roundKey(at), people, kinds: kindTotals, failures };
+  const order = { desk: 0, report: 1, noOrders: 2 };
+  messages.sort((a, b) => a.person.name.localeCompare(b.person.name) || order[a.kind] - order[b.kind]);
+  return {
+    round: roundKey(at),
+    totals,
+    failures,
+    names: namedDesks(dir),
+    messages: messages.map((m) => ({ ...m, switchedOff: off.has(m.person.id), text: textOf(m) })),
+  };
 };
 
 /** Staff switched off reminders on Manage Users. */
@@ -621,24 +467,25 @@ const switchedOff = async () => {
   try {
     const rows = await client`
       SELECT staff_id FROM staff_notification_overrides
-       WHERE choice = 'work_reminders' AND enabled = false
-    `;
+       WHERE choice = 'work_reminders' AND enabled = false`;
     return new Set(rows.map((r) => Number(r.staff_id)));
   } catch {
     return new Set();
   }
 };
 
-/** What one person's message says, for the preview — the catalog renders the real one. */
-const previewText = (person) => CATALOG[NOTICE].sms(dataFor(person, ""));
+/** The SMS exactly as the catalog will word it. */
+const textOf = (m) => CATALOG[NOTICES[m.kind]].sms(m.data);
 
-const dataFor = (person, round) => ({
-  round,
-  firstName: person.firstName,
-  lines: person.lines.map((l) => l.text),
-  total: person.lines.reduce((s, l) => s + l.count, 0),
-  path: person.lines[0]?.path || "/",
+const summaryOf = (m) => ({
+  staffId: m.person.id,
+  name: m.person.name,
+  phone: m.person.phone,
+  kind: m.kind,
+  text: m.text,
 });
+
+// ─── Sending a round ────────────────────────────────────────────────────────
 
 /** Whether this hour's full round has gone out, by the schedule or "Send now". */
 const roundAlreadySent = async (round) => {
@@ -652,46 +499,45 @@ const roundAlreadySent = async (round) => {
 };
 
 /**
- * Send a round: build it, then one notice per person.
+ * Send a round: build it, then one notice per message.
  *
  * A scheduled round that already ran this hour is skipped whole. "Send now"
- * builds a fresh round; people already told this hour come back as
- * `duplicate` and are not texted again.
+ * builds a fresh round; anyone already sent the same kind this hour comes back
+ * as `duplicate` and is not texted again.
  *
  * @param {{trigger?: "schedule"|"manual", actor?: object, at?: Date, staffIds?: number[]}} opts
  */
 const runRound = async ({ trigger = "schedule", actor = null, at = new Date(), staffIds = null } = {}) => {
-  const cfg = settings();
-  if (!cfg.enabled) return { skipped: true, reason: "Reminders are switched off (WORK_REMINDERS_ENABLED=false)" };
+  if (!settings().enabled) {
+    return { skipped: true, reason: "Reminders are switched off (WORK_REMINDERS_ENABLED=false)" };
+  }
 
   const round = roundKey(at);
   if (trigger === "schedule" && (await roundAlreadySent(round))) {
     return { skipped: true, reason: `The ${round} round has already gone out`, round };
   }
 
-  const built = await buildRound(at, { staffIds });
+  const built = await buildRound(at, { trigger, staffIds });
   const results = [];
-  const queue = [...built.people];
+  const queue = [...built.messages];
   const worker = async () => {
     while (queue.length) {
-      const person = queue.shift();
-      const text = previewText(person);
-      if (person.switchedOff) {
-        results.push({ ...summaryOf(person, text), status: "switched_off" });
+      const m = queue.shift();
+      if (m.switchedOff) {
+        results.push({ ...summaryOf(m), status: "switched_off" });
         continue;
       }
-      let status = "sent";
+      let status = "texted";
       let error = null;
       try {
-        const res = await notifyAndWait(NOTICE, { to: [{ staffId: person.staffId }], data: dataFor(person, round) });
+        const res = await notifyAndWait(NOTICES[m.kind], { to: [{ staffId: m.person.id }], data: { ...m.data, round } });
         const r = res?.results?.[0];
         if (res?.error) [status, error] = ["failed", res.error];
         else if (res?.skipped) [status, error] = ["failed", res.reason || "Not sent"];
         else if (!r) status = "switched_off";
         else if (r.duplicate) status = "duplicate";
         else if (r.error) [status, error] = ["failed", r.error];
-        else if (r.channels?.sms === "sent") status = "texted";
-        else {
+        else if (r.channels?.sms !== "sent") {
           // Told in the app; why not by text is on the suppression.
           status = "app_only";
           error = r.suppressed?.find((s) => s.channel === "sms")?.reason || r.channelErrors?.sms || null;
@@ -699,7 +545,7 @@ const runRound = async ({ trigger = "schedule", actor = null, at = new Date(), s
       } catch (err) {
         [status, error] = ["failed", err.message];
       }
-      results.push({ ...summaryOf(person, text), status, error });
+      results.push({ ...summaryOf(m), status, error });
     }
   };
   await Promise.all(Array.from({ length: Math.min(4, queue.length) }, worker));
@@ -711,13 +557,14 @@ const runRound = async ({ trigger = "schedule", actor = null, at = new Date(), s
     round,
     // A round for named people only does not stand in for the hour's round.
     partial: Boolean(staffIds),
-    people: results.length,
+    messages: results.length,
+    people: new Set(results.map((r) => r.staffId)).size,
     texted: count("texted"),
     appOnly: count("app_only"),
     duplicates: count("duplicate"),
     switchedOff: count("switched_off"),
     failed: count("failed"),
-    kinds: built.kinds,
+    totals: built.totals,
     failures: built.failures,
   };
 
@@ -736,14 +583,6 @@ const runRound = async ({ trigger = "schedule", actor = null, at = new Date(), s
   return { ...summary, results };
 };
 
-const summaryOf = (person, text) => ({
-  staffId: person.staffId,
-  name: person.name,
-  phone: person.phone,
-  lines: person.lines.map((l) => l.text),
-  text,
-});
-
 /** The last rounds, newest first, for the Reminders tab. */
 const recentRounds = async (limit = 20) => {
   const rows = await client`
@@ -753,18 +592,51 @@ const recentRounds = async (limit = 20) => {
      ORDER BY created_at DESC
      LIMIT ${limit}
   `;
-  return rows.map((r) => ({
-    id: r.id,
-    at: r.created_at,
-    by: r.actor_name || "",
-    ...(r.metadata || {}),
-  }));
+  return rows.map((r) => ({ id: r.id, at: r.created_at, by: r.actor_name || "", ...(r.metadata || {}) }));
 };
+
+const hourList = (hours) => hours.map((h) => `${h}:00`).join(", ");
+
+/** "Every 2 hours, 8:00 to 20:00" where the hours are evenly spaced, else the list. */
+const deskWhen = (hours) => {
+  const gaps = new Set(hours.slice(1).map((h, i) => h - hours[i]));
+  return hours.length > 2 && gaps.size === 1
+    ? `Every ${[...gaps][0]} hours, ${hours[0]}:00 to ${hours[hours.length - 1]}:00`
+    : hourList(hours);
+};
+
+/** The rules as the Reminders tab states them, with how much each has waiting now. */
+const rulesOf = (cfg, totals, names) => [
+  ...DESK_KINDS.map((k) => ({
+    key: k.key,
+    label: k.label,
+    who: typeof k.who === "function" ? k.who(names) : k.who,
+    when: `${deskWhen(cfg.deskHours)}, once waiting ${cfg.afterHours} hour${cfg.afterHours === 1 ? "" : "s"}`,
+    path: k.path,
+    waiting: totals[k.key] ?? 0,
+  })),
+  {
+    key: "reports",
+    label: "Daily report not entered",
+    who: "The officers on each active depot-sales PFI who file that report",
+    when: `${hourList(cfg.reportHours).replace(/, ([^,]*)$/, " and $1")}, while today's report is not in`,
+    path: "/my-report",
+    waiting: totals.reports ?? 0,
+  },
+  {
+    key: "noOrders",
+    label: "No orders raised today",
+    who: "Every officer on an active depot-sales PFI",
+    when: `${cfg.noOrdersHour}:00, when the PFI has raised no order today`,
+    path: "/orders",
+    waiting: totals.noOrders ?? 0,
+  },
+];
 
 /** Everything the Reminders tab shows. */
 const overview = async (at = new Date()) => {
   const cfg = settings();
-  const [built, rounds] = await Promise.all([buildRound(at), recentRounds()]);
+  const [built, rounds] = await Promise.all([buildRound(at, { trigger: "preview" }), recentRounds()]);
   return {
     settings: {
       ...cfg,
@@ -772,20 +644,13 @@ const overview = async (at = new Date()) => {
       running: cfg.enabled && cfg.scheduled,
       nextRound: cfg.enabled && cfg.scheduled ? nextRound(at) : null,
     },
-    kinds: KINDS.map((k) => ({
-      key: k.key,
-      label: k.label,
-      who: k.who,
-      path: k.path,
-      afterHours: k.key === "reports" ? null : k.yard ? cfg.yardHours : cfg.afterHours,
-      waiting: built.kinds[k.key] ?? 0,
-    })),
+    rules: rulesOf(cfg, built.totals, built.names),
     round: built.round,
     failures: built.failures,
-    people: built.people.map((p) => ({
-      ...summaryOf(p, previewText(p)),
-      roles: p.roles,
-      switchedOff: p.switchedOff,
+    messages: built.messages.map((m) => ({
+      ...summaryOf(m),
+      roles: [...m.person.roles],
+      switchedOff: m.switchedOff,
     })),
     rounds,
   };
@@ -801,8 +666,8 @@ module.exports = {
   roundKey,
   nextRound,
   settings,
-  deskOwners,
-  KINDS,
-  NOTICE,
+  dueKinds,
+  DESK_KINDS,
+  NOTICES,
   ROUND_ACTION,
 };

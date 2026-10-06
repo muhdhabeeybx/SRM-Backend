@@ -159,8 +159,8 @@ const CHOICES = [
     key: "work_reminders",
     label: "Reminders of waiting work",
     description:
-      "Every two hours in the working day, one text and bell notice listing everything still waiting on them: payments, tickets, gates, expenses, approvals, daily reports.",
-    types: ["staff.work_reminder"],
+      "Texts about work on their own desks: expense requests at their stage, payments to confirm, orders to ticket, trucks to gate out; their daily report at 20:00 and 22:00; no orders by 18:00 on their PFI.",
+    types: ["staff.work_reminder", "staff.report_reminder", "staff.no_orders_alert"],
     personal: true,
   },
   {

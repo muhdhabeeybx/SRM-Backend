@@ -1,6 +1,7 @@
 const { client } = require("../db");
 const { notify } = require("../notifications");
 const chain = require("../lib/expenseChain");
+const { officerIdsFor } = require("../lib/expenseOfficers");
 
 /**
  * Who hears about each stage, by role rather than by name — adding a second
@@ -127,6 +128,18 @@ const cfoDesk = async () => {
   return rows.length ? rows.map((r) => r.id) : staffWithRoles(stageRoles("audit_approve"));
 };
 
+/**
+ * The expenditure officer named for this expense (lib/expenseOfficers.js),
+ * active only — who is told when it waits to be verified or paid. Nobody
+ * else holding the role: the owner gave each expense one officer.
+ */
+const officerDesk = async (expense) => {
+  const ids = officerIdsFor(expense);
+  if (!ids.length) return [];
+  const rows = await client`SELECT id FROM staff WHERE is_active = true AND id = ANY(${ids})`;
+  return rows.map((r) => r.id);
+};
+
 /** Staff holding any of these roles, active only. */
 const staffWithRoles = async (roles) => {
   if (!roles?.length) return [];
@@ -197,7 +210,10 @@ async function notifyExpenseStage({ expense, stage, note, actorId, actorName }) 
   if (spec.participants) recipients = participantsOf(expense);
   else if (spec.submitterOnly) recipients = [submitterId].filter((v) => v != null).map(Number);
   else {
-    recipients = stage === chain.STATUS.VERIFIED ? await cfoDesk() : await staffWithRoles(spec.roles);
+    recipients =
+      stage === chain.STATUS.VERIFIED ? await cfoDesk()
+        : stage === chain.STATUS.PENDING || stage === chain.STATUS.ADMIN_APPROVED ? await officerDesk(expense)
+          : await staffWithRoles(spec.roles);
     if (spec.includeSubmitter && submitterId != null && !recipients.some(isSubmitter)) {
       progressTo = [Number(submitterId)];
     }

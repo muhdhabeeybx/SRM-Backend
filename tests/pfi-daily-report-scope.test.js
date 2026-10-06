@@ -27,7 +27,9 @@ const at = new Date(`${DAY}T12:00:00Z`);
 describe("sales & operations report — what is listed", () => {
   let data;
   const ids = { pfis: [], customers: [] };
-  const code = (s) => `PFI-${RUN}${s}`;
+  // A batch number from before PFI-47B, so the station's own entries are read
+  // as they always were (lib/deliveryBook.js); the run id keeps it unique.
+  const code = (s) => `PFI-40${s}-${RUN}`;
   const depotNumber = `DEPOT/${RUN}`;
   const truckingNumber = `PFI ${RUN}A`;
 

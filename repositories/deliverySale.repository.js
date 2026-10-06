@@ -1,7 +1,8 @@
-const { eq, and, or, ilike, desc, count, sql, inArray } = require("drizzle-orm");
+const { eq, and, or, ilike, desc, count, sql, inArray, getTableColumns } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { deliverySales, deliveryCustomers, bankStatementLines } = require("../db/schema");
 const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
+const { readBookSql } = require("../lib/deliveryBook");
 
 const findById = async (id) => {
   const [row] = await db
@@ -10,6 +11,20 @@ const findById = async (id) => {
     .where(eq(deliverySales.id, id))
     .limit(1);
   return row || null;
+};
+
+/**
+ * How one row is read right now — 'trucking', 'station' or 'legacy' — the
+ * same reading the list returns (lib/deliveryBook.js). Null when it is gone.
+ */
+const readBookById = async (id) => {
+  const [row] = await db
+    .select({ readBook: readBookSql(deliverySales, deliveryCustomers.customerType) })
+    .from(deliverySales)
+    .leftJoin(deliveryCustomers, eq(deliveryCustomers.id, deliverySales.customerId))
+    .where(eq(deliverySales.id, id))
+    .limit(1);
+  return row?.readBook ?? null;
 };
 
 const findByPaystackReference = async (reference) => {
@@ -134,8 +149,12 @@ const findAll = async ({
 
   const [rows, [{ total }]] = await Promise.all([
     db
-      .select()
+      // Every column, and which record the row is read as — the sales ledger's,
+      // a station's own, or one from before the two were told apart. Worked
+      // out here once (lib/deliveryBook.js) so every screen and report agrees.
+      .select({ ...getTableColumns(deliverySales), readBook: readBookSql(deliverySales, deliveryCustomers.customerType) })
       .from(deliverySales)
+      .leftJoin(deliveryCustomers, eq(deliveryCustomers.id, deliverySales.customerId))
       .where(whereClause)
       // `id` breaks the tie. Ordering by a timestamp alone is not a total
       // order — 17 rows here share a created_at with another — and OFFSET
@@ -310,6 +329,8 @@ const update = async (id, data) => {
  * The plate is normalised the way getCycleKey normalises it, so a loading
  * written "BWR 809 XB" and a payment written "BWR809XB" stay one cycle.
  */
+// The standing on the sales ledger, so a station's own entries on a load from
+// PFI-47B on are left out: they are its separate record (lib/deliveryBook.js).
 const cycleStanding = async ({ truckNumber, dateLoaded, customerId }) => {
   const [row] = await db.execute(sql`
     SELECT
@@ -318,12 +339,14 @@ const cycleStanding = async ({ truckNumber, dateLoaded, customerId }) => {
       COALESCE(MAX(${deliverySales.quantity}::numeric), 0)   AS quantity,
       COALESCE(SUM(${deliverySales.paymentAmount}::numeric), 0) AS paid
     FROM ${deliverySales}
+    LEFT JOIN ${deliveryCustomers} ON ${deliveryCustomers.id} = ${deliverySales.customerId}
     WHERE regexp_replace(UPPER(COALESCE(${deliverySales.truckNumber}, '')), '\\s', '', 'g')
         = regexp_replace(UPPER(${truckNumber || ""}), '\\s', '', 'g')
       AND COALESCE(LEFT(${deliverySales.dateLoaded}, 10), '') = ${String(dateLoaded || "").slice(0, 10)}
       AND ${customerId == null
         ? sql`${deliverySales.customerId} IS NULL`
         : sql`${deliverySales.customerId} = ${Number(customerId)}`}
+      AND ${readBookSql(deliverySales, deliveryCustomers.customerType)} <> 'station'
   `);
 
   const salesValue = Number(row?.sales_value ?? 0);
@@ -408,6 +431,8 @@ const transferOverpayment = async ({ from, to, actor = "" }) => {
     transferCounterparty: counterparty,
     enteredBy: actor,
     remarks: payer,
+    // Moved on the sales ledger, so the ledger's.
+    book: "trucking",
   });
 
   const rows = [];
@@ -465,6 +490,7 @@ const deleteById = async (id) => {
 
 module.exports = {
   findById,
+  readBookById,
   findByPaystackReference,
   findPendingByCustomer,
   findAll,

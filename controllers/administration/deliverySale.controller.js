@@ -6,6 +6,21 @@ const { allocationCodesFor } = require("../../lib/pfiScope");
 const { scopedStationIds, stationVisible } = require("../../lib/stationScope");
 const pfiBankScope = require("../../lib/pfiBankScope");
 const stationEntry = require("../../lib/stationEntry");
+const { bookForWrite } = require("../../lib/deliveryBook");
+
+/**
+ * Each row with the record it is written into (migration 0070): the sales
+ * ledger's or a station page's own. The screens say which; a row that does
+ * not is placed by lib/deliveryBook's rule, which needs its customer's type.
+ */
+const placeRows = async (rows) => {
+  const ids = [...new Set(rows.map((r) => Number(r.customerId ?? r.customer_id)).filter(Number.isFinite))];
+  const found = ids.length
+    ? await client`SELECT id, customer_type::text AS type FROM delivery_customers WHERE id = ANY(${ids}::int[])`
+    : [];
+  const types = new Map(found.map((c) => [Number(c.id), c.type]));
+  return rows.map((r) => ({ ...r, book: bookForWrite(r, types.get(Number(r.customerId ?? r.customer_id))) }));
+};
 
 /** The signed-in person's name, as the ledger writes it: "First Surname", else their email. */
 const actorName = (user) =>
@@ -132,7 +147,14 @@ const createDeliverySale = asyncHandler(async (req, res) => {
    * that was empty — which it was for everybody after the login rework — so
    * 600 rows since 24 August say "Unknown" instead of who keyed them.
    */
-  const base = { ...rest, enteredBy: actorName(req.user) || rest.enteredBy || "" };
+  const typed = { ...rest, enteredBy: actorName(req.user) || rest.enteredBy || "" };
+  // A claimed credit is a deposit before it has an amount: the amount comes
+  // off the statement line, after this.
+  const claiming = Array.isArray(lineIds) && lineIds.length > 0;
+  // Placed as money when it is a claim, so a station's claimed credit with no
+  // record named is its own deposit.
+  const [placed] = await placeRows([claiming ? { ...typed, paymentAmount: typed.paymentAmount || 1 } : typed]);
+  const base = { ...typed, book: placed.book };
 
   // Only onto a batch of this person's PFI, and only from its accounts.
   const codes = await allocationCodesFor(req.user);
@@ -141,9 +163,6 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   }
   if (bankAccountId) await pfiBankScope.assertAccountAllowed(req.user, bankAccountId);
   if (!stationWriteOk(req.user, base)) return forbidden(res, "That station is not one of yours.");
-  // A claimed credit is a deposit before it has an amount: the amount comes
-  // off the statement line, after this.
-  const claiming = Array.isArray(lineIds) && lineIds.length > 0;
   const refusal = await stationEntry.refusalFor(req.user, [base], claiming ? { kinds: ["deposits"] } : {});
   if (refusal) return forbidden(res, refusal);
 
@@ -184,7 +203,7 @@ const createDeliverySale = asyncHandler(async (req, res) => {
  */
 const createDeliverySalesBulk = asyncHandler(async (req, res) => {
   const actor = actorName(req.user);
-  const rows = req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" }));
+  const rows = await placeRows(req.body.sales.map((row) => ({ ...row, enteredBy: actor || row.enteredBy || "" })));
 
   /**
    * A row with no truck is an LPG plant's, or nobody's.
@@ -311,15 +330,30 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });
   }
+  /*
+   * An edit never moves a row between the sales ledger and the station page.
+   * A row with no book is placed by how it reads (lib/deliveryBook.js), and
+   * that reading turns on whether it carries money — so pricing a station's
+   * share on the ledger would otherwise make it read as one of the station's
+   * own entries. Its present side is written onto it instead. A row from
+   * before PFI-47B is left unmarked, to keep reading as it always has.
+   */
+  let keepBook = {};
+  if (sale.book == null && req.body.book === undefined) {
+    const reading = await deliverySaleRepo.readBookById(sale.id);
+    if (reading === "trucking" || reading === "station") keepBook = { book: reading };
+  }
+  const current = { ...sale, ...keepBook };
+
   // Theirs as it stands AND as it would stand: a sales row cannot be edited
   // into a deposit by somebody who does not enter deposits, nor the reverse.
-  const refusal = await stationEntry.refusalFor(req.user, [sale, { ...sale, ...req.body }]);
+  const refusal = await stationEntry.refusalFor(req.user, [current, { ...current, ...req.body }]);
   if (refusal) return forbidden(res, refusal);
 
   // An edit is not a new author: whoever recorded the row stays on it. The
   // page resends the whole row, "Unknown" and all, so it is dropped here.
   const { enteredBy: _ignored, entered_by: _ignoredSnake, ...changes } = req.body;
-  const updated = await deliverySaleRepo.update(sale.id, changes);
+  const updated = await deliverySaleRepo.update(sale.id, { ...keepBook, ...changes });
 
   // An edit that puts a new customer on the truck, or first puts money on it,
   // is the same news as a new row saying so. Anything else is a correction.

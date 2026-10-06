@@ -26,6 +26,8 @@ const RUN = Date.now();
 
 describe("refunds paid through expenses", () => {
   let requester, cfo, admin, officer;
+  // A refund is not a station expense, so its officer is the general one.
+  const savedOfficer = process.env.EXPENSE_OFFICER_STAFF_IDS;
   let tokens = {};
   let customerId, accountLabel;
   const orderIds = [];
@@ -69,12 +71,15 @@ describe("refunds paid through expenses", () => {
     ({ staff: cfo, accessToken: tokens.cfo } = await mk(["finance"], "cfo"));
     ({ staff: admin, accessToken: tokens.admin } = await mk(["admin"], "adm"));
     ({ staff: officer, accessToken: tokens.officer } = await mk(["expenditure_officer"], "off"));
+    process.env.EXPENSE_OFFICER_STAFF_IDS = String(officer.id);
     customerId = Number((await client`SELECT id FROM customers ORDER BY id LIMIT 1`)[0].id);
     const [a] = await client`SELECT bank_name, account_number FROM bank_accounts WHERE account_number <> '' ORDER BY id LIMIT 1`;
     accountLabel = `${a.bank_name} · ${a.account_number}`;
   });
 
   after(async () => {
+    if (savedOfficer === undefined) delete process.env.EXPENSE_OFFICER_STAFF_IDS;
+    else process.env.EXPENSE_OFFICER_STAFF_IDS = savedOfficer;
     if (orderIds.length) {
       await client`DELETE FROM order_payments WHERE order_id = ANY(${orderIds}::int[])`;
       await client`DELETE FROM order_refunds WHERE order_id = ANY(${orderIds}::int[])`;

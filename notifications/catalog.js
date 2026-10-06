@@ -917,6 +917,63 @@ const announcement = (category) => ({
 
 // ─── The catalog ────────────────────────────────────────────────────────────
 
+/**
+ * The reminders' sentences (services/workReminders.service.js), one per desk,
+ * each naming the PFIs: "3 orders on PFI 47 are waiting for you to confirm
+ * their payment." A person on several desks gets them one after another.
+ */
+const andList = (parts) =>
+  parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+const total = (list) => (list || []).reduce((n, x) => n + Number(x.count || 0), 0);
+const onPfis = (list) => andList((list || []).map((x) => `${x.count} on ${x.pfi}`));
+
+const reminderSentences = (d) => {
+  const out = [];
+  const requests = (n, verb) => `${n} expense request${n === 1 ? " is" : "s are"} ${verb}.`;
+  if (d.expenseVerify > 0) out.push(requests(d.expenseVerify, "waiting for you to verify"));
+  if (d.expenseCfo > 0) out.push(requests(d.expenseCfo, "waiting for your CFO approval"));
+  if (d.expenseFinal > 0) out.push(requests(d.expenseFinal, "waiting for your final approval"));
+  if (d.expensePay > 0) {
+    out.push(`${d.expensePay} approved expense request${d.expensePay === 1 ? " is" : "s are"} waiting for you to pay.`);
+  }
+  if (d.expenseChanges > 0) {
+    out.push(d.expenseChanges === 1
+      ? "1 of your expense requests was sent back for changes."
+      : `${d.expenseChanges} of your expense requests were sent back for changes.`);
+  }
+  const n = total(d.payments);
+  if (n > 0) {
+    out.push(d.payments.length === 1
+      ? `${n} order${n === 1 ? "" : "s"} on ${d.payments[0].pfi} ${n === 1 ? "is" : "are"} waiting for you to confirm ${n === 1 ? "its" : "their"} payment.`
+      : `${n} orders are waiting for you to confirm their payment: ${onPfis(d.payments)}.`);
+  }
+  const t = total(d.tickets);
+  if (t > 0) {
+    out.push(d.tickets.length === 1
+      ? `${t} paid order${t === 1 ? "" : "s"} on ${d.tickets[0].pfi} ${t === 1 ? "is" : "are"} not ticketed yet. Please write ${t === 1 ? "its" : "their"} ticket${t === 1 ? "" : "s"}.`
+      : `${t} paid orders are not ticketed yet: ${onPfis(d.tickets)}. Please write their tickets.`);
+  }
+  const x = total(d.exits);
+  if (x > 0) {
+    out.push(d.exits.length === 1
+      ? `${x} ticketed truck${x === 1 ? " on " + d.exits[0].pfi + " has" : "s on " + d.exits[0].pfi + " have"} not been gated out yet. Please record ${x === 1 ? "its" : "their"} exit.`
+      : `${x} ticketed trucks have not been gated out yet: ${onPfis(d.exits)}. Please record their exit.`);
+  }
+  return out;
+};
+
+/** "Hello Musa, " — or nothing, and the sentence then starts with a capital. */
+const hello = (d, rest) =>
+  d.firstName ? `Hello ${d.firstName}, ${rest}` : `${rest.charAt(0).toUpperCase()}${rest.slice(1)}`;
+
+/** "daily sales report for PFI 47, gate report for PFI 37 and PFI 46" */
+const reportsList = (d) =>
+  (d.reports || []).map((r) => `${r.name} for ${andList(r.pfis || [])}`).join(", ");
+
+/** "PFI 47 at Liquid Bulk Calabar and PFI 49" */
+const quietPfis = (d) =>
+  andList((d.pfis || []).map((p) => (p.location ? `${p.pfi} at ${p.location}` : p.pfi)));
+
 const CATALOG = {
   // ═══ Orders (customer) ════════════════════════════════════════════════════
 
@@ -1691,42 +1748,66 @@ const CATALOG = {
   },
 
   /**
-   * Everything waiting on one person, every two hours until it is done.
-   * services/workReminders.service.js decides who owes what; the lines are
-   * its phrases ("4 orders to ticket, oldest 6h"), listed here.
+   * The work waiting on one person, every two hours until it is done — the
+   * owner's rules of 6 Oct 2026 (services/workReminders.service.js decides
+   * who; reminderSentences above says it). One per person per round: the
+   * round ("2026-10-06 10:00") is the dedupe key, so a retried job or "Send
+   * now" in the same hour cannot text twice.
    *
-   * One per person per round: the round ("2026-10-05 10:00") is the dedupe
-   * key, so a retried job or "Send now" in the same hour cannot text twice.
-   *
-   * data: round, firstName, lines[], total, path
+   * data: round, firstName, expenseVerify, expenseCfo, expenseFinal, expensePay,
+   *       expenseChanges (counts), payments[], tickets[], exits[] ({pfi, count}), path
    */
   "staff.work_reminder": {
     audience: "staff",
     category: "operations",
     priority: "normal",
     channels: APP_AND_SMS,
-    title: (d) =>
-      (d.lines || []).length === 1
-        ? `Waiting on you: ${d.lines[0]}`
-        : `Waiting on you: ${(d.lines || []).length} things to clear`,
-    body: (d) => {
-      const lines = (d.lines || []).map((l) => `${l.charAt(0).toUpperCase()}${l.slice(1)}`);
-      return `${lines.join(". ")}.`;
-    },
-    sms: (d) => {
-      // Five lines fit two SMS pages; anything past that is on the dashboard.
-      const lines = d.lines || [];
-      const shown = lines.slice(0, 5);
-      const more = lines.length - shown.length;
-      return (
-        `${d.firstName ? `Hello ${d.firstName}, ` : ""}waiting on you on the dashboard: ` +
-        `${shown.join("; ")}${more > 0 ? `; and ${more} more` : ""}. Please clear them.`
-      ).replace(/^w/, "W");
-    },
+    title: () => "Work waiting on you",
+    body: (d) => reminderSentences(d).join(" "),
+    sms: (d) => hello(d, reminderSentences(d).join(" ")),
     entity: (d) => ({ type: "work_reminder", id: String(d.round || "") }),
     data: () => ({ screen: "Home" }),
     actionUrl: (d) => adminLink(d.path || "/"),
     dedupe: (d) => (d.round ? `staff.work_reminder:${d.round}` : null),
+  },
+
+  /**
+   * Today's daily report is not in — at 20:00 and 22:00, to its officers.
+   *
+   * data: round, firstName, day ("Mon 6 Oct"), reports[] ({name, pfis[]}), path
+   */
+  "staff.report_reminder": {
+    audience: "staff",
+    category: "reports",
+    priority: "normal",
+    channels: APP_AND_SMS,
+    title: () => "Please enter your report",
+    body: (d) => `Your report for today, ${d.day}, is not in yet: ${reportsList(d)}.`,
+    sms: (d) => hello(d, `please enter your report for today, ${d.day}: ${reportsList(d)}.`),
+    entity: (d) => ({ type: "report_reminder", id: String(d.round || "") }),
+    data: () => ({ screen: "MyReport" }),
+    actionUrl: () => adminLink("/my-report"),
+    dedupe: (d) => (d.round ? `staff.report_reminder:${d.round}` : null),
+  },
+
+  /**
+   * An active depot-sales PFI has raised no order today — at 18:00, to every
+   * officer on it.
+   *
+   * data: round, firstName, day, pfis[] ({pfi, location}), path
+   */
+  "staff.no_orders_alert": {
+    audience: "staff",
+    category: "operations",
+    priority: "normal",
+    channels: APP_AND_SMS,
+    title: () => "No orders raised today",
+    body: (d) => `No orders have been raised today, ${d.day}, on ${quietPfis(d)}. What is the issue?`,
+    sms: (d) => hello(d, `no orders have been raised today, ${d.day}, on ${quietPfis(d)}. What is the issue?`),
+    entity: (d) => ({ type: "no_orders_alert", id: String(d.round || "") }),
+    data: () => ({ screen: "Orders" }),
+    actionUrl: () => adminLink("/orders"),
+    dedupe: (d) => (d.round ? `staff.no_orders_alert:${d.round}` : null),
   },
 
   /** data: orderId, reference, customerName, totalAmount, depotName, product, quantity, unit */

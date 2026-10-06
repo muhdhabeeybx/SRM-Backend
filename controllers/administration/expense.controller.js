@@ -1112,7 +1112,11 @@ const deleteExpense = asyncHandler(async (req, res) => {
 const decorate = (rows, user) =>
   rows.map((e) => {
     const { actions, reason } = chain.availableActions(
-      { status: e.status, addedBy: e.added_by, recordedBy: e.recorded_by },
+      {
+        status: e.status, addedBy: e.added_by, recordedBy: e.recorded_by,
+        // Which expenditure officer it belongs to — lib/expenseOfficers.js.
+        deliveryCustomerId: e.delivery_customer_id, lpgStationId: e.lpg_station_id,
+      },
       user,
     );
     return {
@@ -1309,7 +1313,10 @@ const reviewExpense = asyncHandler(async (req, res) => {
   if (!existing || existing.deleted_at) throw httpErr(404, "Expense not found");
 
   const check = chain.checkTransition(
-    { status: existing.status, addedBy: existing.added_by, recordedBy: existing.recorded_by },
+    {
+      status: existing.status, addedBy: existing.added_by, recordedBy: existing.recorded_by,
+      deliveryCustomerId: existing.delivery_customer_id, lpgStationId: existing.lpg_station_id,
+    },
     action,
     req.user,
     note,

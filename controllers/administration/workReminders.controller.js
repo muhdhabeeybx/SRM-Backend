@@ -5,9 +5,9 @@ const { staffActor } = require("../../utils/actor");
 /**
  * The two-hourly reminders of waiting work.
  *
- * GET  /dashboard/work-reminders        who would be reminded of what right
- *                                       now, the exact text, and past rounds
- * POST /dashboard/work-reminders/send   send this hour's round now
+ * GET  /dashboard/work-reminders        who would be reminded of what, the
+ *                                       exact text, and past rounds
+ * POST /dashboard/work-reminders/send   send what is due now
  *
  * Both admin-only (enforceRole on the route): the page names individual staff
  * and what each is holding up, and sending texts people.
@@ -36,7 +36,9 @@ const sendWorkReminders = asyncHandler(async (req, res) => {
   ].filter(Boolean);
   res.json({
     success: true,
-    message: result.people ? `Reminded ${result.people} people: ${parts.join(", ")}` : "Nothing is waiting on anybody",
+    message: result.messages
+      ? `${result.messages} reminder${result.messages === 1 ? "" : "s"} to ${result.people} ${result.people === 1 ? "person" : "people"}: ${parts.join(", ")}`
+      : "Nothing is waiting on anybody assigned to it",
     data: result,
   });
 });

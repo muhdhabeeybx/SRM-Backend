@@ -51,6 +51,9 @@ const base = {
   enteredBy: optionalString("Entered by", 255),
   allocationCode: optionalString("Allocation code", 64),
   paymentMethod: enumOf("Payment method", ["manual", "paystack_dva"]).optional(),
+  // The sales ledger's row or a station page's own entry (migration 0070).
+  // Left out, the server places it by lib/deliveryBook's rule.
+  book: enumOf("Book", ["trucking", "station"]).optional(),
 };
 
 /**

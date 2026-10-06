@@ -46,6 +46,10 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
   let otherFinance;
   let admin;
   const savedCfo = process.env.EXPENSE_CFO_STAFF_IDS;
+  const savedOfficer = process.env.EXPENSE_OFFICER_STAFF_IDS;
+  const savedStationOfficer = process.env.EXPENSE_OFFICER_STATION_STAFF_IDS;
+  let otherOfficer;
+  let stationOfficer;
 
   before(async () => {
     const make = async (roles, tag) => {
@@ -74,6 +78,12 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     admin = await make([chain.ROLE.ADMIN], "Admin");
     // The CFO is named, not the role: only `cfo` is the CFO here.
     process.env.EXPENSE_CFO_STAFF_IDS = String(cfo.id);
+    // Each expense has one named officer (lib/expenseOfficers.js); another
+    // holder of the role is not it.
+    otherOfficer = await make([chain.ROLE.OFFICER], "OtherOfficer");
+    stationOfficer = await make(["truck_sales"], "StationOfficer");
+    process.env.EXPENSE_OFFICER_STAFF_IDS = String(officer.id);
+    process.env.EXPENSE_OFFICER_STATION_STAFF_IDS = String(stationOfficer.id);
   });
 
   /**
@@ -94,6 +104,10 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
   after(async () => {
     if (savedCfo === undefined) delete process.env.EXPENSE_CFO_STAFF_IDS;
     else process.env.EXPENSE_CFO_STAFF_IDS = savedCfo;
+    if (savedOfficer === undefined) delete process.env.EXPENSE_OFFICER_STAFF_IDS;
+    else process.env.EXPENSE_OFFICER_STAFF_IDS = savedOfficer;
+    if (savedStationOfficer === undefined) delete process.env.EXPENSE_OFFICER_STATION_STAFF_IDS;
+    else process.env.EXPENSE_OFFICER_STATION_STAFF_IDS = savedStationOfficer;
     await db.delete(staff).where(sql`${staff.email} LIKE ${`notify-%-${RUN}@soroman.test`}`);
     await closeDb();
   });
@@ -150,12 +164,13 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     assert.ok(!recipients.includes(cfo.id), "the CFO who just acted is not notified of their own action");
   });
 
-  test("admin_approved: officer role + the submitter, not the admin who just gave final approval", async () => {
+  test("admin_approved: the named officer + the submitter, not the admin who just gave final approval", async () => {
     const expense = baseExpense();
     await notifyExpenseStage({ expense, stage: chain.STATUS.ADMIN_APPROVED, actorId: admin.id, actorName: "Admin" });
 
     const recipients = await waitForRecipients("expense.admin_approved", expense.id, [officer.id]);
-    assert.ok(recipients.includes(officer.id), "officer role recipient (they will make the payment)");
+    assert.ok(recipients.includes(officer.id), "the named officer (they will make the payment)");
+    assert.ok(!recipients.includes(otherOfficer.id), "another holder of the role is not this expense's officer");
     assert.ok(!recipients.includes(submitter.id), "the submitter is not told to pay it");
     assert.ok((await waitForRecipients("expense.progress", expense.id, [submitter.id])).includes(submitter.id));
     assert.ok(!recipients.includes(admin.id), "the admin who just acted is not notified of their own action");
@@ -182,17 +197,21 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     assert.ok(!recipients2.includes(cfo.id), "the actor-submitter is excluded, even as the role holder");
   });
 
-  test("pending reaches everyone who can verify, not the officer alone; paid still reaches every participant", async () => {
+  test("pending reaches the expense's named officer only; a station's goes to the station officer; paid still reaches every participant", async () => {
     const pendingExpense = baseExpense();
     await notifyExpenseStage({ expense: pendingExpense, stage: chain.STATUS.PENDING, actorId: submitter.id, actorName: "Submitter" });
-    const pendingRecipients = await waitForRecipients("expense.pending", pendingExpense.id, [officer.id, admin.id]);
+    const pendingRecipients = await waitForRecipients("expense.pending", pendingExpense.id, [officer.id]);
     assert.ok(pendingRecipients.includes(officer.id));
-    // The stage's recipients are read off TRANSITIONS.verify, so admin — who
-    // may verify — is told there is something to verify. Held as a separate
-    // list this is precisely what drifted: the role that could act on the
-    // queue was never told the queue existed.
-    assert.ok(pendingRecipients.includes(admin.id), "admin can verify, so admin hears about a new request");
+    // Only the named officer verifies now (6 Oct 2026) — not the admins, not
+    // another holder of the role.
+    assert.ok(!pendingRecipients.includes(admin.id), "admins no longer verify");
+    assert.ok(!pendingRecipients.includes(otherOfficer.id), "another holder of the role is not this expense's officer");
     assert.ok(!pendingRecipients.includes(submitter.id), "pending doesn't add the submitter — they are the one who just acted");
+
+    const stationExpense = { ...baseExpense(), delivery_customer_id: 1 };
+    await notifyExpenseStage({ expense: stationExpense, stage: chain.STATUS.PENDING, actorId: submitter.id, actorName: "Submitter" });
+    const stationRecipients = await waitForRecipients("expense.pending", stationExpense.id, [stationOfficer.id]);
+    assert.deepEqual(stationRecipients, [stationOfficer.id], "a station's expense is the station officer's, even without the role");
 
     const paidExpense = baseExpense();
     paidExpense.verified_by = officer.id;

@@ -5,7 +5,11 @@ const { expireStaleOrders } = require("../services/order.service");
 const { expireStaleRequests } = require("../services/requestExpiry.service");
 const { dispatchDailyReports, resolveRecipients } = require("../services/dailyReportDispatch.service");
 const { notify } = require("../notifications");
-const { runRound: runWorkReminders, cronExpression: workReminderCron } = require("../services/workReminders.service");
+const {
+  runRound: runWorkReminders,
+  cronExpression: workReminderCron,
+  settings: workReminderSettings,
+} = require("../services/workReminders.service");
 const { resetPricesForTheDay } = require("../services/priceReset.service");
 const { syncTermii } = require("../services/messageLog.service");
 
@@ -13,7 +17,7 @@ const { syncTermii } = require("../services/messageLog.service");
 // cron — not part of the WhatsApp queue set.
 const EXPIRY_QUEUE = "order-expiry-sweep";
 const DAILY_REPORT_QUEUE = "daily-report-send";
-/** Retired 2026-10-05 for the work reminders below; unscheduled at boot. */
+/** Retired 6 Oct 2026; its schedule is removed at boot. */
 const DESK_NUDGE_QUEUE = "desk-nudge-sweep";
 const WORK_REMINDER_QUEUE = "work-reminders";
 const PRICE_RESET_QUEUE = "depot-price-reset";
@@ -105,40 +109,49 @@ const start = async () => {
 
   // ── Reminders of waiting work ─────────────────────────────────────────────
   //
-  // Every two hours in the working day (WORK_REMINDER_HOURS, default 8–20),
-  // each member of staff with something waiting on them gets one text listing
-  // it all. See services/workReminders.service.js.
+  // The owner's rules of 6 Oct 2026 (services/workReminders.service.js): work
+  // reminders every two hours 8–20, daily reports at 20 and 22, no orders at
+  // 18 — to the people assigned, and nobody else. ON unless
+  // WORK_REMINDERS_ENABLED=false; while switched off nothing is scheduled.
   //
-  // It replaces the 08:00 desk nudge, which told only ticketing and the gates,
-  // only in the app, and only once a day. That schedule is removed here —
-  // pg-boss keeps a schedule in its own table until told otherwise. The manual
-  // desk-nudge buttons on the dashboard still work.
+  // The old 08:00 desk nudge is retired for good: it told every holder of a
+  // role, assigned or not. Its schedule is removed here, and so is the
+  // reminders' own while they are switched off — pg-boss keeps a schedule in its
+  // own table until told otherwise, so leaving one would fire it anyway.
   //
   // Swallows its own failure: a round that did not go out is followed by the
-  // next one two hours later, and a retry an hour late would only arrive as a
-  // duplicate of a queue that has since moved.
-  try {
-    const boss = await startQueue();
-    await boss.unschedule(DESK_NUDGE_QUEUE);
-  } catch {
-    // Never scheduled on this database — nothing to remove.
-  }
-  await registerWorker(WORK_REMINDER_QUEUE, async () => {
+  // next, and a retry an hour late would only arrive as a duplicate.
+  const unschedule = async (queue) => {
     try {
-      const result = await runWorkReminders({ trigger: "schedule" });
-      console.log(
-        result.skipped
-          ? `[scheduler] work reminders — ${result.reason}`
-          : `[scheduler] work reminders ${result.round} — ${result.people} people, ${result.texted} texted, ${result.failed} failed`
-      );
-      return { round: result.round, skipped: Boolean(result.skipped) };
-    } catch (err) {
-      console.error("[scheduler] work reminders failed:", err.message);
-      return { failed: true };
+      const boss = await startQueue();
+      await boss.unschedule(queue);
+    } catch {
+      // Never scheduled on this database — nothing to remove.
     }
-  });
-  await scheduleCron(WORK_REMINDER_QUEUE, workReminderCron(), {}, { tz: DAILY_REPORT_TZ });
-  console.log(`[scheduler] work reminders scheduled (${workReminderCron()} ${DAILY_REPORT_TZ})`);
+  };
+
+  await unschedule(DESK_NUDGE_QUEUE);
+  if (!workReminderSettings().enabled) {
+    await unschedule(WORK_REMINDER_QUEUE);
+    console.log("[scheduler] work reminders are switched off (WORK_REMINDERS_ENABLED=false)");
+  } else {
+    await registerWorker(WORK_REMINDER_QUEUE, async () => {
+      try {
+        const result = await runWorkReminders({ trigger: "schedule" });
+        console.log(
+          result.skipped
+            ? `[scheduler] work reminders — ${result.reason}`
+            : `[scheduler] work reminders ${result.round} — ${result.messages} messages to ${result.people} people, ${result.texted} texted, ${result.failed} failed`
+        );
+        return { round: result.round, skipped: Boolean(result.skipped) };
+      } catch (err) {
+        console.error("[scheduler] work reminders failed:", err.message);
+        return { failed: true };
+      }
+    });
+    await scheduleCron(WORK_REMINDER_QUEUE, workReminderCron(), {}, { tz: DAILY_REPORT_TZ });
+    console.log(`[scheduler] work reminders scheduled (${workReminderCron()} ${DAILY_REPORT_TZ})`);
+  }
   console.log(
     `[scheduler] daily report scheduled (${DAILY_REPORT_CRON} ${DAILY_REPORT_TZ})`
   );
