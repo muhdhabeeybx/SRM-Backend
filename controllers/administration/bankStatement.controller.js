@@ -78,6 +78,25 @@ async function getMapping(req, res) {
   return ok(res, { mapping });
 }
 
+/**
+ * The first row dated where no statement of ours can be, or null.
+ *
+ * A format whose date column points at the wrong column reads "0" — Union
+ * Bank's withdrawal on every credit — and a browser turns that into 1 January
+ * 2000. Twenty-two credits went in that way (upload 764, October 2026). The
+ * dashboard no longer reads a number as a date; this stops an older tab.
+ */
+const implausibleDate = (rows) => {
+  const last = new Date().getFullYear() + 1;
+  const i = (rows || []).findIndex((r) => {
+    const y = Number(String(r?.txnDate ?? "").slice(0, 4));
+    return !(y >= 2015 && y <= last);
+  });
+  if (i < 0) return null;
+  return `Row ${i + 1} is dated ${String(rows[i].txnDate).slice(0, 10)}, which cannot be right — `
+    + "this account's statement format is probably reading the wrong column as the date. Check the format against this file.";
+};
+
 /** PUT /api/bank-statements/mapping/:bankAccountId */
 async function saveMapping(req, res) {
   const bankAccountId = Number(req.params.bankAccountId);
@@ -116,6 +135,8 @@ async function uploadStatement(req, res) {
   if (!Array.isArray(rows) || rows.length === 0) {
     return fail(res, 400, "No usable credit rows were found in that statement");
   }
+  const badDate = implausibleDate(rows);
+  if (badDate) return fail(res, 400, badDate);
 
   const result = await repo.ingest({
     bankAccountId: Number(bankAccountId),
@@ -164,6 +185,18 @@ async function uploadStatement(req, res) {
     ? `, ${result.excluded} reversal/charge row${result.excluded === 1 ? "" : "s"} left out`
     : "";
 
+  /**
+   * References given to credits already on file, said apart from duplicates:
+   * nothing was imported for them, but something did change.
+   */
+  const refs = result.referencesAdded
+    ? `${result.referencesAdded} reference${result.referencesAdded === 1 ? "" : "s"} added to credits already on file`
+    : "";
+
+  if (result.added === 0 && refs) {
+    return ok(res, result, `No new rows — ${refs}${left}`);
+  }
+
   if (result.added === 0) {
     const why = result.excluded && !result.duplicates
       ? `Every row in that file is a reversal or a bank charge (${result.excluded} left out) — there is no payment in it to import`
@@ -174,7 +207,7 @@ async function uploadStatement(req, res) {
   return ok(
     res,
     result,
-    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped${repeats}${left}`,
+    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped${repeats}${refs ? `, ${refs}` : ""}${left}`,
   );
 }
 
@@ -201,6 +234,8 @@ async function previewStatement(req, res) {
   if (!Array.isArray(rows) || rows.length === 0) {
     return fail(res, 400, "No usable credit rows were found in that statement");
   }
+  const badDate = implausibleDate(rows);
+  if (badDate) return fail(res, 400, badDate);
 
   const result = await repo.previewIngest({
     bankAccountId: Number(bankAccountId),
@@ -222,6 +257,8 @@ async function previewStatement(req, res) {
       // Reversals and bank fees, counted apart from duplicates: the two are
       // dropped for entirely different reasons and the screen says so.
       excluded: result.excluded,
+      // Credits already on file that this file gives a reference to.
+      referencesAdded: result.adopted.length,
     },
     total: result.fresh.reduce((sum, r) => sum + Number(r.amount || 0), 0),
   });

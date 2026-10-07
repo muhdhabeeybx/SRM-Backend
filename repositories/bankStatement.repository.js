@@ -145,12 +145,102 @@ const bankOwnEntry = (r) => {
   return null;
 };
 
+/**
+ * The running balance a statement prints beside a row, read off its raw cells.
+ *
+ * The balance after a credit is the one thing two exports of the same account
+ * always agree on, whatever else they disagree about: Union Bank's two layouts
+ * word the payer the same, but only one carries a reference, and both end the
+ * row with the balance. Read as the last number in the row; a row whose last
+ * number is its own amount (or nought) has no balance column to speak of.
+ */
+const balanceOf = (rawRow, amount) => {
+  const cells = Array.isArray(rawRow) ? rawRow : [];
+  for (let i = cells.length - 1; i >= 0; i--) {
+    const s = String(cells[i] ?? "").replace(/[,\s"'₦]/g, "");
+    if (!/^-?\d+(\.\d+)?$/.test(s)) continue;
+    const n = Math.round(Number(s) * 100) / 100;
+    return n !== 0 && Math.abs(n - Number(amount)) > 0.005 ? n : null;
+  }
+  return null;
+};
+
+const dayNumber = (d) => Math.round(Date.parse(`${String(d).slice(0, 10)}T00:00:00Z`) / 86_400_000);
+const payerKey = (r) => String(r.depositor || r.narration || "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 24);
+const pairKey = (amount, balance) => `${Number(amount).toFixed(2)}|${balance}`;
+
+/** How far apart two exports may date the same credit and still be it. */
+const SAME_CREDIT_DAYS = 3;
+
 async function partitionRows({ bankAccountId, rows }) {
   const prepared = rows.map((r) => ({
     ...r,
     amount: Number(r.amount),
     dedup: dedupKey(r),
+    balance: balanceOf(r.rawRow, r.amount),
   }));
+
+  /**
+   * The lines already on file around this file's dates, for the one question
+   * the reference cannot answer: is this the credit an earlier upload brought
+   * in WITHOUT its reference?
+   *
+   * Union Bank exports two layouts and only one has a reference column, so the
+   * same credit arrived once bare and once referenced, and — the reference
+   * being new and the fingerprint containing it — came in twice: 18 credits,
+   * ₦180,577,925, on account 54 in October 2026, each sitting unmatched beside
+   * the twin a truck sale had already used.
+   *
+   * Same amount and same running balance, within a few days, is the same
+   * credit. A referenced row that finds such a line with no reference GIVES it
+   * the reference instead of being imported; a row that finds one any other
+   * way is already on record. Only a one-to-one match counts — two rows or two
+   * lines that could be it are left exactly as before, never guessed between.
+   */
+  const days = prepared.map((r) => dayNumber(r.txnDate)).filter(Number.isFinite);
+  const nearby = days.length
+    ? await client`
+        SELECT id, txn_date::text AS txn_date, amount, bank_ref, depositor, narration, raw_row
+          FROM bank_statement_lines
+         WHERE bank_account_id = ${bankAccountId}
+           AND txn_date BETWEEN (${new Date(Math.min(...days) * 86_400_000).toISOString().slice(0, 10)}::date - ${SAME_CREDIT_DAYS}::int)
+                            AND (${new Date(Math.max(...days) * 86_400_000).toISOString().slice(0, 10)}::date + ${SAME_CREDIT_DAYS}::int)`
+    : [];
+  const onFile = new Map();
+  for (const l of nearby) {
+    const b = balanceOf(l.raw_row, l.amount);
+    if (b == null) continue;
+    const k = pairKey(l.amount, b);
+    onFile.set(k, [...(onFile.get(k) || []), l]);
+  }
+  const inFile = new Map();
+  for (const r of prepared) {
+    if (r.balance == null) continue;
+    const k = pairKey(r.amount, r.balance);
+    inFile.set(k, (inFile.get(k) || 0) + 1);
+  }
+  const taken = new Set();
+  const adopted = [];
+
+  /** The one line on file this row is, or null when there is none or more than one. */
+  const sameCredit = (r) => {
+    const near = (l) => !taken.has(l.id) && Math.abs(dayNumber(l.txn_date) - dayNumber(r.txnDate)) <= SAME_CREDIT_DAYS;
+    if (r.balance != null) {
+      const k = pairKey(r.amount, r.balance);
+      if (inFile.get(k) !== 1) return null;
+      const lines = (onFile.get(k) || []).filter(near);
+      return lines.length === 1 ? lines[0] : null;
+    }
+    // No balance to go by: only a bare line on the same day, from the same
+    // payer, for the same amount — and only to give it a reference.
+    if (!paymentReference(r.bankRef)) return null;
+    const same = (x) =>
+      Math.abs(Number(x.amount) - r.amount) < 0.005 && String(x.txnDate ?? x.txn_date).slice(0, 10) === String(r.txnDate).slice(0, 10)
+      && payerKey(x) && payerKey(x) === payerKey(r);
+    if (prepared.filter(same).length !== 1) return null;
+    const lines = nearby.filter((l) => !paymentReference(l.bank_ref) && !taken.has(l.id) && same(l));
+    return lines.length === 1 ? lines[0] : null;
+  };
 
   const existing = await client`
     SELECT dedup_key, bank_ref FROM bank_statement_lines
@@ -201,12 +291,27 @@ async function partitionRows({ bankAccountId, rows }) {
       });
       continue;
     }
+    const twin = sameCredit(r);
+    if (twin) {
+      taken.add(twin.id);
+      if (reference && !paymentReference(twin.bank_ref)) {
+        // Not imported: the line already on file is this credit, and now it
+        // has its reference — which is also what catches the next upload.
+        adopted.push({ lineId: Number(twin.id), reference: String(r.bankRef).trim(), row: r });
+        seenReferences.add(reference);
+        skipped.push({ ...r, reason: "reference added", lineId: Number(twin.id) });
+      } else {
+        duplicates++;
+        skipped.push({ ...r, reason: "on record", lineId: Number(twin.id) });
+      }
+      continue;
+    }
     seenKeys.add(r.dedup);
     if (reference) seenReferences.add(reference);
     fresh.push(r);
   }
 
-  return { fresh, skipped, duplicates, repeatedReferences, excluded };
+  return { fresh, skipped, duplicates, repeatedReferences, excluded, adopted };
 }
 
 const bankStatementRepo = {
@@ -279,7 +384,7 @@ const bankStatementRepo = {
    * rejected by the caller rather than stored empty.
    */
   async ingest({ bankAccountId, filename, uploadedBy, rows }) {
-    const { fresh, skipped, duplicates, repeatedReferences, excluded } = await partitionRows({
+    const { fresh, skipped, duplicates, repeatedReferences, excluded, adopted } = await partitionRows({
       bankAccountId,
       rows,
     });
@@ -288,8 +393,10 @@ const bankStatementRepo = {
     // rather than report a row count that quietly does not add up.
     const excludedRows = skipped.filter((r) => r.reason === "reversal" || r.reason === "bank charge");
 
+    const referencesAdded = await bankStatementRepo.addReferences({ adopted, filename, uploadedBy });
+
     if (!fresh.length) {
-      return { added: 0, duplicates, repeatedReferences, excluded, excludedRows, statement: null };
+      return { added: 0, duplicates, repeatedReferences, excluded, excludedRows, referencesAdded, statement: null };
     }
 
     /**
@@ -329,7 +436,37 @@ const bankStatementRepo = {
       `;
     }
 
-    return { added: fresh.length, duplicates, repeatedReferences, excluded, excludedRows, statement };
+    return { added: fresh.length, duplicates, repeatedReferences, excluded, excludedRows, referencesAdded, statement };
+  },
+
+  /**
+   * Gives lines already on file the references a later export carried — see
+   * partitionRows. Only ever onto a line that has none, so a line somebody
+   * referenced in between is left alone; the payments that used the line get
+   * it too, where their copy of the bank line has no reference either.
+   */
+  async addReferences({ adopted, filename, uploadedBy }) {
+    let n = 0;
+    for (const a of adopted || []) {
+      const [line] = await client`
+        UPDATE bank_statement_lines SET bank_ref = ${a.reference}
+         WHERE id = ${a.lineId} AND btrim(bank_ref) = ''
+        RETURNING id`;
+      if (!line) continue;
+      n++;
+      await client`
+        UPDATE delivery_sales SET bank_ref = ${a.reference}, updated_at = now()
+         WHERE statement_line_id = ${a.lineId} AND btrim(coalesce(bank_ref, '')) = ''`;
+      await client`
+        UPDATE order_payments SET bank_ref = ${a.reference}
+         WHERE statement_line_id = ${a.lineId} AND btrim(coalesce(bank_ref, '')) = ''`;
+      await client`
+        INSERT INTO audit_logs (entity_type, entity_id, action, actor_type, actor_staff_id, metadata)
+        VALUES ('bank_statement_line', ${a.lineId}, 'bank_statement_line.reference_added',
+                ${uploadedBy ? "staff" : "system"}, ${uploadedBy ?? null},
+                ${JSON.stringify({ reference: a.reference, filename: filename || "", txnDate: String(a.row.txnDate).slice(0, 10), amount: a.row.amount, balance: a.row.balance, bankRow: a.row.rawRow || [] })}::jsonb)`;
+    }
+    return n;
   },
 
   async listStatements(bankAccountId) {

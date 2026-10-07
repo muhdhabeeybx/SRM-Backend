@@ -400,7 +400,9 @@ const bankStatementMapping = z.object({
   depositorColumn: columnIndex("Depositor column").optional().nullable(),
   referenceColumn: columnIndex("Reference column").optional().nullable(),
   narrationColumn: columnIndex("Narration column").optional().nullable(),
-  sampleHeaders: z.array(z.string()).optional(),
+  // A blank heading cell arrives as null from dashboards before the fix to
+  // readGrid; it is a column with no name, not a reason to refuse the format.
+  sampleHeaders: z.array(z.string().nullable().transform((v) => v ?? "")).optional(),
 });
 const matchBankLines = z.object({
   lineIds: z.array(id("Line id")).min(1, "At least one line is required"),
