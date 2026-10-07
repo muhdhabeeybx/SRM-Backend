@@ -1910,53 +1910,6 @@ const CATALOG = {
     dedupe: (d) => (d.refundId && d.outcome ? `staff.refund_decided:${d.refundId}:${d.outcome}` : null),
   },
 
-  /**
-   * A surplus transfer between orders is waiting for approval — to the named
-   * approvers and super admins (lib/transferApprovers), never whoever asked.
-   * data: requestId, kind, orderId, amount, fromOrder, toOrder, fromCustomer,
-   *       toCustomer, reason, requestedByName
-   */
-  "staff.transfer_requested": {
-    audience: "staff",
-    category: "payments",
-    priority: "high",
-    channels: APP_AND_SMS,
-    title: (d) => `${d.kind === "reversal" ? "Transfer reversal" : "Surplus transfer"} to approve — ${formatMoney(d.amount, { decimals: 0 })}`,
-    body: (d) =>
-      `${d.requestedByName || "Finance"} asks to move ${formatMoney(d.amount, { decimals: 0 })} from ${d.fromOrder} ` +
-      `(${d.fromCustomer || "customer"}) to ${d.toOrder} (${d.toCustomer || "customer"}). Reason: ${d.reason}. ` +
-      "Approve or reject it on Surplus Transfers.",
-    sms: (d) =>
-      `Soroman: ${d.requestedByName || "Finance"} asks to move ${formatMoney(d.amount, { decimals: 0 })} from ${d.fromOrder} to ${d.toOrder}. ` +
-      "Please approve or reject on Surplus Transfers.",
-    entity: (d) => ({ type: "order", id: d.orderId }),
-    data: (d) => ({ screen: "SurplusTransfers", requestId: d.requestId }),
-    actionUrl: () => adminLink("/surplus-transfers"),
-    dedupe: (d) => (d.requestId ? `staff.transfer_requested:${d.requestId}` : null),
-  },
-
-  /**
-   * How a transfer request ended, to whoever asked for it.
-   * data: requestId, kind, orderId, amount, fromOrder, toOrder, outcome
-   *       ('approved' | 'rejected'), decidedByName, decisionNote
-   */
-  "staff.transfer_decided": {
-    audience: "staff",
-    category: "payments",
-    priority: "normal",
-    channels: APP_ONLY,
-    title: (d) => `Transfer ${d.outcome === "approved" ? "approved" : "rejected"} — ${d.fromOrder} to ${d.toOrder}`,
-    body: (d) =>
-      d.outcome === "approved"
-        ? `${formatMoney(d.amount, { decimals: 0 })} moved from ${d.fromOrder} to ${d.toOrder}${d.decidedByName ? `, approved by ${d.decidedByName}` : ""}.`
-        : `The ${formatMoney(d.amount, { decimals: 0 })} transfer from ${d.fromOrder} to ${d.toOrder} was rejected` +
-          `${d.decidedByName ? ` by ${d.decidedByName}` : ""}${d.decisionNote ? `: ${d.decisionNote}` : "."}`,
-    entity: (d) => ({ type: "order", id: d.orderId }),
-    data: (d) => ({ screen: "SurplusTransfers", requestId: d.requestId }),
-    actionUrl: () => adminLink("/surplus-transfers"),
-    dedupe: (d) => (d.requestId && d.outcome ? `staff.transfer_decided:${d.requestId}:${d.outcome}` : null),
-  },
-
   "staff.payment_received": {
     audience: "staff",
     category: "payments",

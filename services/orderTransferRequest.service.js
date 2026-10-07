@@ -3,7 +3,7 @@ const { db } = require("../config/db");
 const auditLogRepo = require("../repositories/auditLog.repository");
 const { transferSurplus, httpError } = require("./orderPayment.service");
 const { realSurplus } = require("./orderRefund.service");
-const { mayApprove, approverIds, isSuperAdmin } = require("../lib/transferApprovers");
+const { mayApprove, isSuperAdmin } = require("../lib/transferApprovers");
 const { scopedPfiIds } = require("../lib/pfiBankScope");
 
 /**
@@ -34,6 +34,9 @@ const { scopedPfiIds } = require("../lib/pfiBankScope");
  * orders' figures as the approver was shown them and as they ended. Each step
  * is an audit row on both orders. The payment legs say which request they came
  * from and who approved it, and the transfer row names the request.
+ *
+ * Nobody is notified — the owner's choice (7 October 2026). Requests wait on
+ * the Surplus Transfers page for an approver to open it.
  */
 
 const OPEN = "requested";
@@ -181,7 +184,6 @@ async function requestTransfer({ fromOrderId, toOrderId, amount, reason, note = 
     });
     return request;
   });
-  announce(created.id, "requested");
   return created;
 }
 
@@ -225,7 +227,6 @@ async function requestReversal({ transferId, reason, note = "", user }) {
     });
     return request;
   });
-  announce(created.id, "requested");
   return created;
 }
 
@@ -286,7 +287,6 @@ async function approve({ requestId, note = "", user }) {
     });
     return updated;
   });
-  announce(done.id, "approved");
   return done;
 }
 
@@ -309,7 +309,6 @@ async function reject({ requestId, note, user }) {
     await auditBoth(trx, updated, "order.transfer_rejected", user.id, { note: why });
     return updated;
   });
-  announce(done.id, "rejected");
   return done;
 }
 
@@ -406,49 +405,6 @@ async function spareOn(orderId, user) {
   if (!f) throw httpError(404, "Order not found");
   assertInScope(user, f.pfiId);
   return f;
-}
-
-// ── Telling people ──────────────────────────────────────────────────────────
-
-/**
- * The approvers hear of a new request; whoever asked hears how it ended.
- * After the commit, and never thrown: a notice that fails must not undo a
- * decision about money.
- */
-async function announce(requestId, event) {
-  try {
-    const { notify } = require("../notifications");
-    const [r] = rowsOf(await db.execute(sql`
-      SELECT r.id, r.kind, r.status, r.amount::text AS amount, r.reason, r.decision_note, r.requested_by,
-             fo.id AS from_id, fo.order_number AS from_number, tor.order_number AS to_number,
-             COALESCE(NULLIF(fc.company_name, ''), fc.name) AS from_customer,
-             COALESCE(NULLIF(tc.company_name, ''), tc.name) AS to_customer,
-             trim(rq.first_name || ' ' || rq.surname) AS requested_by_name,
-             trim(dc.first_name || ' ' || dc.surname) AS decided_by_name
-        FROM order_transfer_requests r
-        JOIN orders fo ON fo.id = r.from_order_id JOIN customers fc ON fc.id = fo.customer_id
-        JOIN orders tor ON tor.id = r.to_order_id JOIN customers tc ON tc.id = tor.customer_id
-        LEFT JOIN staff rq ON rq.id = r.requested_by LEFT JOIN staff dc ON dc.id = r.decided_by
-       WHERE r.id = ${Number(requestId)}`));
-    if (!r || r.status !== (event === "requested" ? OPEN : event)) return;
-    const data = {
-      requestId: Number(r.id), kind: r.kind, orderId: Number(r.from_id), amount: Number(r.amount),
-      fromOrder: r.from_number, toOrder: r.to_number, fromCustomer: r.from_customer || "", toCustomer: r.to_customer || "",
-      reason: r.reason, requestedByName: r.requested_by_name || "", decidedByName: r.decided_by_name || "",
-      decisionNote: r.decision_note || "", outcome: event,
-    };
-    if (event === "requested") {
-      const named = rowsOf(await db.execute(sql`
-        SELECT id FROM staff WHERE is_active = true
-           AND (id IN ${intsIn(approverIds())} OR 'super_admin' = ANY(roles))
-           AND id <> ${Number(r.requested_by) || 0}`)).map((s) => ({ staffId: Number(s.id) }));
-      if (named.length) await notify("staff.transfer_requested", { to: named, data });
-    } else if (r.requested_by) {
-      await notify("staff.transfer_decided", { to: { staffId: Number(r.requested_by) }, data });
-    }
-  } catch (err) {
-    console.error(`[transfers] could not announce request ${requestId} ${event}:`, err.message);
-  }
 }
 
 module.exports = {

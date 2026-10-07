@@ -93,15 +93,6 @@ const CHOICES = [
     orderScoped: true,
   },
   {
-    // Sent to the named approvers and super admins (lib/transferApprovers);
-    // the roles here only decide who may switch it off.
-    key: "transfers_to_approve",
-    label: "Surplus transfers to approve",
-    description: "Finance asks to move an overpayment from one order to another, and it waits for approval.",
-    types: ["staff.transfer_requested"],
-    roles: ["finance", "admin", "super_admin"],
-  },
-  {
     key: "requests_submitted",
     label: "Dangote and LPG requests",
     description: "A Dangote or LPG request is submitted.",
@@ -192,7 +183,7 @@ const CHOICES = [
     types: [
       "staff.daily_report_approved", "staff.daily_report_rejected",
       "staff.incident_updated", "staff.offline_sale_updated",
-      "staff.pfi_allocation_decided", "staff.refund_decided", "staff.transfer_decided",
+      "staff.pfi_allocation_decided", "staff.refund_decided",
     ],
     personal: true,
   },
