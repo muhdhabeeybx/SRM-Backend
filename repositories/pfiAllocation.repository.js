@@ -1,7 +1,8 @@
 const { eq, and, desc, inArray, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { pfiTruckAllocations, pfis, fleetTrucks, drivers, customers } = require("../db/schema");
+const { pfiTruckAllocations, pfis, fleetTrucks, drivers, customers, deliveryCustomers } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
+const { STATION_TYPES } = require("../lib/customerTypes");
 
 /**
  * Reads and writes for pfi_truck_allocations. The rules — who may raise,
@@ -165,6 +166,29 @@ const fleetTrucksByIds = async (ids) => {
     .where(inArray(fleetTrucks.id, list));
 };
 
+/** Our own stations and plants still trading — what litres can be allocated to. */
+const activeStations = () =>
+  db
+    .select({ id: deliveryCustomers.id, name: deliveryCustomers.name, customerType: deliveryCustomers.customerType })
+    .from(deliveryCustomers)
+    .where(and(inArray(deliveryCustomers.customerType, STATION_TYPES), eq(deliveryCustomers.status, "active")))
+    .orderBy(deliveryCustomers.name);
+
+/** One station or plant by id, whatever its state — the caller says what it may be. */
+const stationById = async (id) => {
+  const [row] = await db
+    .select({
+      id: deliveryCustomers.id,
+      name: deliveryCustomers.name,
+      customerType: deliveryCustomers.customerType,
+      status: deliveryCustomers.status,
+    })
+    .from(deliveryCustomers)
+    .where(eq(deliveryCustomers.id, Number(id)))
+    .limit(1);
+  return row || null;
+};
+
 /**
  * The house customer for one purpose, created the first time it is asked for.
  *
@@ -209,6 +233,8 @@ module.exports = {
   create,
   update,
   fleetTrucksByIds,
+  activeStations,
+  stationById,
   ensureHouseCustomer,
   insertPfi,
 };

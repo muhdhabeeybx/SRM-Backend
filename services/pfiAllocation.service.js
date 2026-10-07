@@ -32,12 +32,25 @@
  * have counted them twice. Here the parent SELLS them — its sold figure goes
  * up by the order — and the trucking PFI starts with what the parent no longer
  * has. The same litres are on one PFI's shelf at a time.
+ *
+ * ── To a station, with no trucks ───────────────────────────────────────────
+ *
+ * Off a batch with no loading desk (gantry, delivery) litres can instead go
+ * straight to one of our own stations or plants: the station and how much,
+ * nothing else. Dangote loads it, so there is no fleet truck to name and no
+ * Soroman desk that would ever see one. The allocation then carries ONE load,
+ * named DANGOTE DELIVERY wherever a truck, a driver or a company is asked for,
+ * already assigned to the station. Everything else is the same request:
+ * approval places the order on the parent and raises the lettered PFI, and
+ * "Start selling" writes the load to the inventory and the sales ledger under
+ * that PFI's code, assigned to the station (repositories/pfi.repository.js).
  */
 const { db } = require("../config/db");
 const { pfiRepo, depotRepo, orderRepo, auditLogRepo, pfiExpenseRepo } = require("../repositories");
 const allocationRepo = require("../repositories/pfiAllocation.repository");
 const { familyOf, memberName, allocationCodeFor, nextLetter, lettersUsed } = require("../lib/pfiFamily");
 const { sellableQty } = require("../lib/pfiStock");
+const { isStationType } = require("../lib/customerTypes");
 const { orderKey } = require("../lib/allocationOrders");
 const { notify } = require("../notifications");
 const { rolesFor } = require("../notifications/staffChoices");
@@ -49,6 +62,19 @@ const ALLOCATABLE_TYPES = new Set(["coastal", "gantry", "delivery"]);
 
 /** One tanker, the same ceiling order_trucks enforces. */
 const MAX_LOAD = 60000;
+
+/**
+ * Where litres may go to a station with no truck named: off a batch nobody
+ * loads at a Soroman desk. A coastal cargo is loaded by the ticketing desk
+ * onto real trucks, which an allocation of no trucks would leave it unable to.
+ */
+const STATION_PARENT_TYPES = new Set(["gantry", "delivery"]);
+
+/** What a station's load is called where a truck, a driver or a company is asked for. */
+const STATION_LOAD = { plateNumber: "DANGOTE DELIVERY", name: "Dangote Delivery" };
+
+/** The station an allocation's litres go to, or null when it is a list of trucks. */
+const stationOf = (trucks) => (Array.isArray(trucks) ? trucks : []).find((t) => t?.customerId != null) || null;
 
 const APPROVER_ROLES = ["admin", "super_admin"];
 const isApprover = (user) => (user?.roles || []).some((r) => APPROVER_ROLES.includes(r));
@@ -116,6 +142,8 @@ async function preview(parentId) {
     if (entry && Number(entry.currentPrice) > 0) dayPrice = Number(entry.currentPrice);
   }
 
+  const stationAllowed = !problem && STATION_PARENT_TYPES.has(parent.pfiType);
+
   return {
     parent: {
       id: parent.id,
@@ -134,6 +162,8 @@ async function preview(parentId) {
     pendingQty,
     available,
     dayPrice,
+    stationAllowed,
+    stations: stationAllowed ? await allocationRepo.activeStations() : [],
   };
 }
 
@@ -173,16 +203,43 @@ async function resolveTrucks(rawTrucks) {
   });
 }
 
-async function raise({ parentId, loadingDate, price, trucks, note = "", user }) {
+/**
+ * A station's litres as the one load the allocation carries: no fleet truck,
+ * DANGOTE DELIVERY for its plate and driver, and the station it is assigned to.
+ */
+async function resolveStation(raw) {
+  const customerId = Number(raw?.customerId);
+  if (!Number.isInteger(customerId) || customerId <= 0) throw httpError(400, "Pick the station");
+  const station = await allocationRepo.stationById(customerId);
+  if (!station || !isStationType(station.customerType)) throw httpError(400, "That is not one of our stations or plants");
+  if (station.status !== "active") throw httpError(400, `${station.name} is not active`);
+  const qty = Number(raw?.quantity);
+  // Whole units, for the same reason as a truck's: the order is.
+  if (!Number.isInteger(qty) || qty <= 0) throw httpError(400, `Enter a whole quantity for ${station.name}`);
+  return [{
+    truckId: null,
+    plateNumber: STATION_LOAD.plateNumber,
+    driverName: STATION_LOAD.name,
+    driverPhone: "",
+    loadedQty: qty,
+    customerId: station.id,
+    customerName: station.name,
+  }];
+}
+
+async function raise({ parentId, loadingDate, price, trucks, station, note = "", user }) {
   const parent = await pfiRepo.findById(parentId);
   const problem = refusal(parent);
   if (problem) throw httpError(parent ? 409 : 404, problem);
+  if (station && !STATION_PARENT_TYPES.has(parent.pfiType)) {
+    throw httpError(409, `${parent.pfiNumber} is loaded by the ticketing desk, so allocate the trucks that carry it`);
+  }
 
-  if (!isDay(loadingDate)) throw httpError(400, "Enter the day the trucks load");
+  if (!isDay(loadingDate)) throw httpError(400, station ? "Enter the day it loaded" : "Enter the day the trucks load");
   const unitPrice = Number(price);
   if (!(unitPrice > 0)) throw httpError(400, "Enter the day's price");
 
-  const resolved = await resolveTrucks(trucks);
+  const resolved = station ? await resolveStation(station) : await resolveTrucks(trucks);
   const quantity = resolved.reduce((s, t) => s + t.loadedQty, 0);
 
   /**
@@ -233,6 +290,7 @@ async function raise({ parentId, loadingDate, price, trucks, note = "", user }) 
         actor: { type: "staff", staffId: user?.id ?? null },
         metadata: {
           allocationId: row.id, pfiNumber: next.pfiNumber, quantity, price: unitPrice, trucks: resolved.length,
+          ...(station ? { stationId: resolved[0].customerId, stationName: resolved[0].customerName } : {}),
         },
       }, tx);
       return row;
@@ -301,6 +359,7 @@ async function approve({ allocationId, user, note = "" }) {
     const house = await allocationRepo.ensureHouseCustomer(HOUSE_PURPOSE, HOUSE_CUSTOMER);
     const trucks = Array.isArray(locked.trucks) ? locked.trucks : [];
     const price = Number(locked.pricePerUnit);
+    const station = stationOf(trucks);
 
     const { order } = await placeOrder({
       customerId: house.id,
@@ -309,10 +368,12 @@ async function approve({ allocationId, user, note = "" }) {
       productId: locked.productId || parent.productId,
       quantity: locked.quantity,
       deliveryType: "delivery",
-      deliveryAddress: `Trucks for ${locked.pfiNumber}`,
-      companyName: locked.pfiNumber,
-      expectedTrucks: trucks.length,
-      trucks: trucks.map((t) => ({
+      deliveryAddress: station ? `${station.customerName} — ${locked.pfiNumber}` : `Trucks for ${locked.pfiNumber}`,
+      companyName: station ? STATION_LOAD.name : locked.pfiNumber,
+      // A station's litres name no truck. The parent has no loading desk, so
+      // the order completes on payment and never waits for one.
+      expectedTrucks: station ? null : trucks.length,
+      trucks: station ? [] : trucks.map((t) => ({
         truckId: t.truckId,
         truckNumber: t.plateNumber,
         quantity: t.loadedQty,
@@ -330,7 +391,9 @@ async function approve({ allocationId, user, note = "" }) {
       pfiType: "trucking",
       status: "not_started",
       parentPfiId: parent.id,
-      description: `Trucks allocated from ${parent.pfiNumber}`,
+      description: station
+        ? `Allocated to ${station.customerName} from ${parent.pfiNumber}`
+        : `Trucks allocated from ${parent.pfiNumber}`,
       pfiDate: new Date(`${locked.loadingDate}T00:00:00Z`),
       collectionsOpenFrom: locked.loadingDate,
       locationId: parent.locationId,
@@ -352,7 +415,14 @@ async function approve({ allocationId, user, note = "" }) {
         depotName: depot.name || "",
         productName: parent.productName || "",
         dateAllocated: locked.loadingDate,
-        trucks: trucks.map((t) => ({ truckId: t.truckId, plateNumber: t.plateNumber, loadedQty: t.loadedQty })),
+        // A station's load keeps its station, so activation writes it
+        // already assigned — on the inventory and the sales ledger both.
+        trucks: trucks.map((t) => ({
+          truckId: t.truckId,
+          plateNumber: t.plateNumber,
+          loadedQty: t.loadedQty,
+          ...(t.customerId != null ? { customerId: t.customerId, customerName: t.customerName || "" } : {}),
+        })),
       },
       allocationCode: locked.allocationCode,
     }, tx);
@@ -372,6 +442,7 @@ async function approve({ allocationId, user, note = "" }) {
       allocationId: locked.id, parentPfiId: parent.id, parentPfiNumber: parent.pfiNumber,
       pfiNumber: sub.pfiNumber, subPfiId: sub.id, orderId: order.id,
       quantity: locked.quantity, price, trucks: trucks.length,
+      ...(station ? { stationId: station.customerId, stationName: station.customerName } : {}),
     };
     await auditLogRepo.record({ entityType: "pfi", entityId: parent.id, action: "pfi.trucks_allocation_approved", actor, metadata }, tx);
     await auditLogRepo.record({ entityType: "pfi", entityId: sub.id, action: "pfi.raised_from_allocation", actor, metadata }, tx);
@@ -488,5 +559,6 @@ module.exports = {
   isApprover,
   // For tests.
   HOUSE_PURPOSE,
+  STATION_LOAD,
   orderKey,
 };

@@ -1,7 +1,7 @@
 const { eq, and, or, ilike, desc, asc, count, sql, gte, lte, inArray } = require("drizzle-orm");
 const { setAssignmentContext } = require("../lib/pfiAssignmentContext");
 const { db } = require("../config/db");
-const { pfis, depots, products, staff, pfiStaff, bankAccounts, deliveryInventory } = require("../db/schema");
+const { pfis, depots, products, staff, pfiStaff, bankAccounts, deliveryInventory, deliverySales } = require("../db/schema");
 const { lpgStations } = require("../db/schema/lpgStation");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
@@ -211,7 +211,7 @@ const create = async (data) => {
  * see, and a batch written to inventory under a PFI that failed to activate is
  * stock owed against nothing.
  */
-const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy, note = "", context = {} }) => {
+const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy, activatedByName = "", note = "", context = {} }) => {
   return db.transaction(async (tx) => {
     // For the PFI assignment record (migration 0060): the officers below are
     // assigned by whoever released the PFI.
@@ -283,9 +283,15 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
       let loadedTotal = 0;
 
       const inventoryIds = [];
+      const stationLoads = [];
       for (const truck of pending.trucks) {
         const loaded = Number(truck.loadedQty) || 0;
         loadedTotal += loaded;
+        // Litres allocated straight to one of our stations arrive assigned
+        // to it (services/pfiAllocation.service.js, "To a station").
+        const station = truck.customerId != null
+          ? { id: Number(truck.customerId), name: String(truck.customerName || "") }
+          : null;
         const [written] = await tx.insert(deliveryInventory).values({
           allocationCode: code,
           // Stamped so the batch names its PFI rather than the two being
@@ -299,8 +305,32 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
           quantityAllocated: loaded,
           dateAllocated: pending.dateAllocated || null,
           loadingStatus: "loaded",
+          ...(station ? { customerId: station.id, customerName: station.name, location: station.name } : {}),
         }).returning({ id: deliveryInventory.id });
-        inventoryIds.push(written.id);
+
+        if (!station) {
+          inventoryIds.push(written.id);
+          continue;
+        }
+        /**
+         * The row the sales ledger's "assign customer" would have written:
+         * the load on the station, no rate. From PFI-47B on a station's share
+         * is priced by the desk alone, so it reads ₦0, pending, until then —
+         * and the station's own pump sales and deposits stay on its page.
+         */
+        await tx.insert(deliverySales).values({
+          truckNumber: truck.plateNumber || "",
+          dateLoaded: pending.dateAllocated || "",
+          depotLoaded: pending.depotName || "",
+          customerId: station.id,
+          customerName: station.name,
+          location: station.name,
+          quantity: loaded,
+          allocationCode: code,
+          book: "trucking",
+          enteredBy: activatedByName,
+        });
+        stationLoads.push(written.id);
       }
 
       /**
@@ -331,7 +361,9 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
       }
 
       // The load ids, so the caller can tell each driver once this commits.
-      batch = { code, trucks: pending.trucks.length, loadedTotal, inventoryIds };
+      // A station's load has no driver and needs no truck sales desk — it is
+      // already assigned — so it is kept out of that list.
+      batch = { code, trucks: pending.trucks.length, loadedTotal, inventoryIds, stationLoads };
     }
 
     const [finalPfi] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).limit(1);

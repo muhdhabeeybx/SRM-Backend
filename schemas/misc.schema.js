@@ -964,6 +964,9 @@ const updatePfiNote = z.object({
  * units because the order approval places is sold in whole units; the price is
  * the day's rate per unit. Everything else — the letter, the name, the
  * drivers — is worked out on the server, never taken from here.
+ *
+ * Off a gantry or delivery batch the litres may instead go to a station with
+ * no truck named: `station` in place of `trucks`, one or the other.
  */
 const PFI_ALLOCATION_STATUSES = ["pending", "approved", "rejected", "withdrawn", "all"];
 const listPfiAllocations = z.object({
@@ -980,8 +983,15 @@ const raisePfiAllocation = z.object({
       error: "Pick at least one truck",
     })
     .min(1, "Pick at least one truck")
-    .max(100, "At most 100 trucks in one allocation"),
+    .max(100, "At most 100 trucks in one allocation")
+    .optional(),
+  station: z
+    .object({ customerId: id("Station"), quantity: quantity("Quantity") })
+    .optional(),
   note: optionalString("Note", 1000),
+}).superRefine((v, ctx) => {
+  if (!v.trucks && !v.station) ctx.addIssue({ code: "custom", path: ["trucks"], message: "Pick at least one truck" });
+  if (v.trucks && v.station) ctx.addIssue({ code: "custom", path: ["station"], message: "Allocate trucks or a station, not both" });
 });
 const decidePfiAllocation = z
   .object({ note: optionalString("Note", 1000) })

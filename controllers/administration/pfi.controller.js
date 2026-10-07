@@ -590,6 +590,8 @@ const activatePfi = asyncHandler(async (req, res) => {
     bankAccountIds,
     officers,
     activatedBy: req.user?.id ?? null,
+    // Written as who entered a station's load on the sales ledger.
+    activatedByName: req.user?.name || [req.user?.firstName, req.user?.surname].filter(Boolean).join(" ") || req.user?.email || "",
     context: contextFromRequest(req, SOURCES.PFI_ACTIVATION, "Named as an officer when the PFI was released to trade"),
     note: req.body.note || "",
   });

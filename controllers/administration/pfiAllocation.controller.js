@@ -25,6 +25,7 @@ const raiseAllocation = asyncHandler(async (req, res) => {
     loadingDate: req.body.loadingDate,
     price: req.body.price,
     trucks: req.body.trucks,
+    station: req.body.station,
     note: req.body.note,
     user: req.user,
   });

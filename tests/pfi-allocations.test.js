@@ -10,7 +10,7 @@ const app = require("../app");
 const { db } = require("../config/db");
 const {
   pfis, depots, products, bankAccounts, fleetTrucks, drivers, orders, orderTrucks, customers,
-  pfiTruckAllocations, deliveryInventory,
+  pfiTruckAllocations, deliveryInventory, deliverySales, deliveryCustomers,
 } = require("../db/schema");
 const { closeDb, staffToken, staffTokenWithRoles } = require("./helpers");
 const orderService = require("../services/order.service");
@@ -29,6 +29,9 @@ const RUN = Date.now();
 // A serial nobody else in the test database uses, so the family is ours.
 const SERIAL = String(700000 + (RUN % 290000));
 const PARENT_NAME = `PFI/${SERIAL}/26/TEST CARGO/${RUN}`;
+// A delivery batch beside it, for litres allocated straight to a station.
+const DELIVERY_SERIAL = String(Number(SERIAL) + 1);
+const DELIVERY_NAME = `PFI/${DELIVERY_SERIAL}/26/TEST DELIVERY/${RUN}`;
 
 let admin;      // super_admin + admin
 let desk;       // raises, cannot approve
@@ -40,6 +43,8 @@ let account;
 let truckA;
 let truckB;
 let driver;
+let deliveryParent;
+let station;
 const extraPfiIds = [];
 
 const as = (token) => ({
@@ -84,26 +89,39 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     [truckB] = await db.insert(fleetTrucks).values({
       plateNumber: `BL${String(RUN).slice(-8)}`, maxCapacity: 33000,
     }).returning();
+    [deliveryParent] = await db.insert(pfis).values({
+      pfiNumber: DELIVERY_NAME, pfiType: "delivery", status: "active",
+      locationId: depot.id, locationName: depot.name, productId: product.id, productName: product.name,
+      startingQtyLitres: 100000, soldQtyLitres: 0,
+    }).returning();
+    [station] = await db.insert(deliveryCustomers).values({
+      customerType: "filling_station", name: `Alloc Station ${RUN}`, phoneNumber: `0806${String(RUN).slice(-7)}`,
+    }).returning();
   });
 
   after(async () => {
     try {
-      const allocs = await db.select().from(pfiTruckAllocations).where(eq(pfiTruckAllocations.parentPfiId, parent.id));
+      const parentIds = [parent.id, deliveryParent.id];
+      const allocs = await db.select().from(pfiTruckAllocations).where(inArray(pfiTruckAllocations.parentPfiId, parentIds));
       const orderIds = allocs.map((a) => a.orderId).filter(Boolean);
       const subIds = allocs.map((a) => a.subPfiId).filter(Boolean);
-      await db.delete(pfiTruckAllocations).where(eq(pfiTruckAllocations.parentPfiId, parent.id));
-      await db.delete(deliveryInventory).where(sql`${deliveryInventory.allocationCode} LIKE ${`PFI-${SERIAL}%`}`);
+      await db.delete(pfiTruckAllocations).where(inArray(pfiTruckAllocations.parentPfiId, parentIds));
+      for (const serial of [SERIAL, DELIVERY_SERIAL]) {
+        await db.delete(deliverySales).where(sql`${deliverySales.allocationCode} LIKE ${`PFI-${serial}%`}`);
+        await db.delete(deliveryInventory).where(sql`${deliveryInventory.allocationCode} LIKE ${`PFI-${serial}%`}`);
+      }
       if (orderIds.length) {
         await db.delete(orderTrucks).where(inArray(orderTrucks.orderId, orderIds));
         await db.execute(sql`DELETE FROM order_pfi_allocations WHERE order_id IN ${sql`(${sql.join(orderIds.map((i) => sql`${i}`), sql`, `)})`}`);
         await db.delete(orders).where(inArray(orders.id, orderIds));
       }
-      const pfiIds = [...subIds, ...extraPfiIds, parent.id];
+      const pfiIds = [...subIds, ...extraPfiIds, parent.id, deliveryParent.id];
       await db.execute(sql`DELETE FROM expense_categories WHERE pfi_id IN ${sql`(${sql.join(pfiIds.map((i) => sql`${i}`), sql`, `)})`}`).catch(() => {});
       await db.delete(pfis).where(inArray(pfis.id, pfiIds));
       await db.delete(bankAccounts).where(eq(bankAccounts.id, account.id));
       await db.delete(fleetTrucks).where(inArray(fleetTrucks.id, [truckA.id, truckB.id]));
       await db.delete(drivers).where(eq(drivers.id, driver.id));
+      await db.delete(deliveryCustomers).where(eq(deliveryCustomers.id, station.id));
       await db.delete(depots).where(eq(depots.id, depot.id));
       await db.delete(products).where(eq(products.id, product.id));
     } catch (err) {
@@ -329,5 +347,114 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     const res = await as(desk).post(`${API}/${sub.id}/allocations`, raiseBody());
     assert.equal(res.status, 409);
     assert.match(res.body.message, /not off a batch of trucks/);
+  });
+
+  // ── To a station, with no trucks ──────────────────────────────────────────
+
+  const stationBody = (overrides = {}) => ({
+    loadingDate: "2026-09-20",
+    price: 1265,
+    station: { customerId: station.id, quantity: 50000 },
+    ...overrides,
+  });
+
+  test("litres go to a station only off a batch with no loading desk", async () => {
+    const cargo = await as(desk).get(`${API}/${parent.id}/allocations`);
+    assert.equal(cargo.body.data.form.stationAllowed, false, "a coastal cargo is loaded onto real trucks");
+    assert.deepEqual(cargo.body.data.form.stations, []);
+    const refused = await as(desk).post(`${API}/${parent.id}/allocations`, stationBody());
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.match(refused.body.message, /allocate the trucks/);
+
+    const delivery = await as(desk).get(`${API}/${deliveryParent.id}/allocations`);
+    assert.equal(delivery.body.data.form.stationAllowed, true);
+    assert.ok(delivery.body.data.form.stations.some((s) => s.id === station.id), "our station is offered");
+  });
+
+  test("a station allocation needs one of our stations and a whole quantity", async () => {
+    const notStation = await as(desk).post(`${API}/${deliveryParent.id}/allocations`, stationBody({
+      station: { customerId: 0, quantity: 50000 },
+    }));
+    assert.equal(notStation.status, 400);
+    const fraction = await as(desk).post(`${API}/${deliveryParent.id}/allocations`, stationBody({
+      station: { customerId: station.id, quantity: 100.5 },
+    }));
+    assert.equal(fraction.status, 400);
+  });
+
+  let toStation;
+  let stationSub;
+
+  test("raising to a station names no truck — one DANGOTE DELIVERY load on the station", async () => {
+    const res = await as(desk).post(`${API}/${deliveryParent.id}/allocations`, stationBody());
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    toStation = res.body.data.allocation;
+    assert.equal(toStation.suffix, "B");
+    assert.equal(toStation.quantity, 50000);
+    assert.equal(toStation.trucks.length, 1);
+    const [load] = toStation.trucks;
+    assert.equal(load.truckId, null);
+    assert.equal(load.plateNumber, "DANGOTE DELIVERY");
+    assert.equal(load.driverName, "Dangote Delivery");
+    assert.equal(load.customerId, station.id);
+    assert.equal(load.customerName, station.name);
+  });
+
+  test("approval places a truckless order on the delivery batch and raises its lettered PFI", async () => {
+    const res = await as(admin).post(`${API}/allocations/${toStation.id}/approve`);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const approved = res.body.data.allocation;
+
+    const [o] = await db.select().from(orders).where(eq(orders.id, approved.orderId));
+    assert.equal(o.pfiId, deliveryParent.id);
+    assert.equal(o.quantity, 50000);
+    assert.equal(Number(o.price), 1265);
+    assert.equal(o.companyName, "Dangote Delivery");
+    assert.equal(o.expectedTrucks, null);
+    assert.match(o.deliveryAddress, new RegExp(station.name));
+    const loads = await db.select().from(orderTrucks).where(eq(orderTrucks.orderId, o.id));
+    assert.equal(loads.length, 0, "no truck on the order: nobody gates one");
+
+    [stationSub] = await db.select().from(pfis).where(eq(pfis.id, approved.subPfiId));
+    assert.equal(stationSub.pfiNumber, `PFI/${DELIVERY_SERIAL}B/26/TEST DELIVERY/${RUN}`);
+    assert.equal(stationSub.pfiType, "trucking");
+    assert.equal(stationSub.startingQtyLitres, 50000);
+    assert.match(stationSub.description, new RegExp(station.name));
+    assert.equal(stationSub.pendingBatch.trucks[0].customerId, station.id);
+  });
+
+  test("Start selling writes the load to the inventory and the sales ledger, on the station", async () => {
+    const res = await as(admin).post(`${API}/${stationSub.id}/activate`, {
+      bankAccountIds: [account.id],
+      officers: { auditOfficerId: deskStaff.id, salesManagerId: deskStaff.id },
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.data.batch.inventoryIds, [], "no driver to tell and no truck sales desk to wake");
+
+    const code = `PFI-${DELIVERY_SERIAL}B`;
+    const inventory = await db.select().from(deliveryInventory).where(eq(deliveryInventory.allocationCode, code));
+    assert.equal(inventory.length, 1);
+    assert.equal(inventory[0].pfiId, stationSub.id);
+    assert.equal(inventory[0].truckId, null);
+    assert.equal(inventory[0].truckNumber, "DANGOTE DELIVERY");
+    assert.equal(inventory[0].customerId, station.id);
+    assert.equal(inventory[0].customerName, station.name);
+    assert.equal(Number(inventory[0].quantityAllocated), 50000);
+    assert.equal(inventory[0].dateAllocated, "2026-09-20");
+
+    const ledger = await db.select().from(deliverySales).where(eq(deliverySales.allocationCode, code));
+    assert.equal(ledger.length, 1);
+    const [row] = ledger;
+    assert.equal(row.truckNumber, "DANGOTE DELIVERY");
+    assert.equal(row.dateLoaded, "2026-09-20");
+    assert.equal(row.customerId, station.id);
+    assert.equal(row.location, station.name);
+    assert.equal(Number(row.quantity), 50000);
+    assert.equal(Number(row.rate), 0, "a station's share waits for the desk's rate");
+    assert.equal(Number(row.salesValue), 0);
+    assert.equal(row.book, "trucking", "the load is the ledger's, not the station's own entry");
+
+    const [sold] = await db.select().from(pfis).where(eq(pfis.id, stationSub.id));
+    assert.equal(sold.soldQtyLitres, 50000, "the litres have left for the station");
   });
 });
