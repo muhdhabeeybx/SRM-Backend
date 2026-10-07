@@ -181,6 +181,8 @@ const loadFacts = async (ids, tx) => {
       (SELECT COUNT(*) FROM order_refunds r WHERE r.order_id = o.id)::int AS refunds,
       (SELECT COUNT(*) FROM order_refunds r
         WHERE r.order_id = o.id AND r.status = 'requested')::int AS "openRefunds",
+      (SELECT COUNT(*) FROM order_transfer_requests tr
+        WHERE (tr.from_order_id = o.id OR tr.to_order_id = o.id) AND tr.status = 'requested')::int AS "openTransfers",
       (SELECT COUNT(*) FROM wallet_holds h WHERE h.order_id = o.id)::int AS "walletHolds",
       (SELECT COUNT(*) FROM commissions cm
         WHERE cm.order_id = o.id AND cm.status = 'paid')::int AS "paidCommissions",
@@ -235,6 +237,11 @@ const ownBlockers = (order, facts) => {
   if (facts?.openRefunds > 0) {
     out.push(
       `${ref} has a refund request waiting to be paid. Pay or cancel it first — the merged order's overpayment will be a different figure.`,
+    );
+  }
+  if (facts?.openTransfers > 0) {
+    out.push(
+      `${ref} has a surplus transfer waiting for approval. Have it approved, rejected or withdrawn first — it names this order.`,
     );
   }
   return out;

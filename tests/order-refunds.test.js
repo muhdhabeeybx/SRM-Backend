@@ -575,10 +575,10 @@ describe("transfers and refunds run side by side", () => {
       .set("Authorization", `Bearer ${token}`)
       .send({ toOrderId: Number(o.id), amount: 1, reason: "same order on purpose" });
 
-    // Reachable, and refused on its own merits — an order cannot transfer to
-    // itself — rather than with the 410 that meant the route was gone.
-    assert.notEqual(res.status, 410, "the transfer endpoint must not be retired");
-    assert.ok(res.status === 400 || res.status === 409, `expected a validation refusal, got ${res.status}`);
+    // Retired on 7 October 2026: a transfer is now requested and approved
+    // (tests/order-transfer-requests.test.js). The route says where to go.
+    assert.equal(res.status, 410, JSON.stringify(res.body));
+    assert.match(res.body.message, /approval/i);
   });
 
   test("the refunds endpoints are reachable", async () => {

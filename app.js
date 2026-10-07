@@ -102,6 +102,8 @@ app.use("/api/orders", require("./routes/administration/order.route"));
 // Overpayment sent back to the customer. Its own mount rather than a path
 // under /api/orders, where it would have to be matched above /:id.
 app.use("/api/order-refunds", require("./routes/administration/orderRefund.route"));
+// Surplus moved between orders by request and approval (migration 0071).
+app.use("/api/order-transfer-requests", require("./routes/administration/orderTransferRequest.route"));
 app.use("/api/tickets", require("./routes/administration/ticket.route"));
 app.use("/api/deposits", require("./routes/administration/deposit.route"));
 app.use("/api/expected-payments", require("./routes/administration/expectedPayment.route"));

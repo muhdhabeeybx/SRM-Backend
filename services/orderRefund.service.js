@@ -748,10 +748,27 @@ const requestRefund = async ({
     );
   }
 
-  const value = amount == null ? surplus : round2(amount);
-  if (!(value > 0)) throw httpError(400, "A refund must be more than ₦0.");
-  if (value > surplus + 0.005) {
-    throw httpError(400, `${order.orderNumber} holds ₦${surplus.toLocaleString("en-NG")} beyond its value. A refund cannot be larger than that.`);
+  /*
+   * A surplus transfer waiting for approval holds its amount on the order
+   * (orderTransferRequest.service), so a refund can only reach what is left —
+   * otherwise one overpayment could be both refunded and moved.
+   */
+  const heldResult = await db.execute(sql`
+    SELECT COALESCE(SUM(amount), 0)::numeric AS held FROM order_transfer_requests
+     WHERE from_order_id = ${order.id} AND status = 'requested'`);
+  const heldForTransfers = round2((heldResult.rows ?? heldResult)[0]?.held);
+  const refundable = Math.max(0, round2(surplus - heldForTransfers));
+
+  const value = amount == null ? refundable : round2(amount);
+  if (!(value > 0)) {
+    throw httpError(heldForTransfers > 0 ? 409 : 400, heldForTransfers > 0
+      ? `${order.orderNumber}'s overpayment is held by a surplus transfer waiting for approval (₦${heldForTransfers.toLocaleString("en-NG")}). Decide that first.`
+      : "A refund must be more than ₦0.");
+  }
+  if (value > refundable + 0.005) {
+    throw httpError(400, heldForTransfers > 0
+      ? `${order.orderNumber} holds ₦${surplus.toLocaleString("en-NG")} beyond its value, ₦${heldForTransfers.toLocaleString("en-NG")} of it held by a surplus transfer waiting for approval. A refund can be up to ₦${refundable.toLocaleString("en-NG")}.`
+      : `${order.orderNumber} holds ₦${surplus.toLocaleString("en-NG")} beyond its value. A refund cannot be larger than that.`);
   }
 
   try {

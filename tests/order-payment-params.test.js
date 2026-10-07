@@ -46,14 +46,14 @@ describe("order payment routes — the id in the path must reach the controller"
     assert.match(res.body.message, /not found/i);
   });
 
-  test("reversing a transfer reports it missing, not an invalid id", async () => {
+  test("reversing a transfer straight away is retired — it is requested and approved", async () => {
     const token = await staffToken(request, app);
     const res = await request(app)
       .delete("/api/orders/1/payments/transfer/99999999")
       .set("Authorization", `Bearer ${token}`)
       .send({});
 
-    assert.equal(res.status, 404, JSON.stringify(res.body));
+    assert.equal(res.status, 410, JSON.stringify(res.body));
   });
 
   test("reviewing a payment reports it missing, not an invalid id", async () => {
