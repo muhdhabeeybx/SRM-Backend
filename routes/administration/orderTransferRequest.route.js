@@ -7,6 +7,20 @@ const s = require("../../schemas/orderTransferRequest.schema");
 const c = require("../../controllers/administration/orderTransferRequest.controller");
 
 /**
+ * Switched off for now — the owner's call, 7 October 2026: overpayment goes
+ * back to the customer through refunds only. SURPLUS_TRANSFERS_ENABLED=true
+ * turns every route below back on; nothing else needs to change.
+ */
+const transfersOn = () => process.env.SURPLUS_TRANSFERS_ENABLED === "true";
+router.use((req, res, next) => {
+  if (transfersOn()) return next();
+  return res.status(410).json({
+    success: false,
+    message: "Moving surplus between orders is switched off for now. Refund the overpayment instead.",
+  });
+});
+
+/**
  * Surplus transfers between orders, by request and approval — the owner's
  * rule of 7 October 2026. Finance or an admin asks (enforced); deciding is
  * checked in the service against the named approvers (lib/transferApprovers),

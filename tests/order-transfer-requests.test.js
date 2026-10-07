@@ -21,6 +21,9 @@ describe("surplus transfers by request and approval", () => {
   let pfiA, pfiB, cust, orderFrom, orderTo, orderOther;
   let asker, askerId, approver, approverId, plain, superAdmin;
   const savedApprovers = process.env.TRANSFER_APPROVER_STAFF_IDS;
+  // Switched off by default (routes/administration/orderTransferRequest.route.js);
+  // these tests are the feature, so they turn it on.
+  const savedSwitch = process.env.SURPLUS_TRANSFERS_ENABLED;
   let ready = false;
 
   const as = (token) => ({
@@ -75,6 +78,7 @@ describe("surplus transfers by request and approval", () => {
       // The asker is named too, so refusing their own request is the rule
       // being tested, not merely their not being an approver.
       process.env.TRANSFER_APPROVER_STAFF_IDS = `${approverId},${askerId}`;
+      process.env.SURPLUS_TRANSFERS_ENABLED = "true";
       ready = true;
     } catch (e) {
       console.error("transfer-request fixtures unavailable:", e.message);
@@ -84,6 +88,8 @@ describe("surplus transfers by request and approval", () => {
   after(async () => {
     if (savedApprovers === undefined) delete process.env.TRANSFER_APPROVER_STAFF_IDS;
     else process.env.TRANSFER_APPROVER_STAFF_IDS = savedApprovers;
+    if (savedSwitch === undefined) delete process.env.SURPLUS_TRANSFERS_ENABLED;
+    else process.env.SURPLUS_TRANSFERS_ENABLED = savedSwitch;
     if (ready) {
       const ids = [orderFrom.id, orderTo.id, orderOther.id];
       await client`DELETE FROM order_refunds WHERE order_id = ANY(${ids})`.catch(() => {});
@@ -259,6 +265,22 @@ describe("surplus transfers by request and approval", () => {
     const first = listed.body.data.requests.find((r) => r.id === firstId);
     assert.equal(first.reversed, true);
     assert.equal(first.canReverse, false);
+  });
+
+  test("switched off, every transfer route refuses — a refund is the only way", async (t) => {
+    if (skip(t)) return;
+    process.env.SURPLUS_TRANSFERS_ENABLED = "false";
+    try {
+      const ask = await as(asker).post("/api/order-transfer-requests", {
+        fromOrderId: orderFrom.id, toOrderId: orderTo.id, amount: 1000, reason: "Switched off on purpose",
+      });
+      assert.equal(ask.status, 410, JSON.stringify(ask.body));
+      assert.match(ask.body.message, /Refund/);
+      const list = await as(approver).get("/api/order-transfer-requests");
+      assert.equal(list.status, 410);
+    } finally {
+      process.env.SURPLUS_TRANSFERS_ENABLED = "true";
+    }
   });
 
   test("the old move-it-now routes are retired", async (t) => {
