@@ -104,6 +104,8 @@ app.use("/api/orders", require("./routes/administration/order.route"));
 app.use("/api/order-refunds", require("./routes/administration/orderRefund.route"));
 // Surplus moved between orders by request and approval (migration 0071).
 app.use("/api/order-transfer-requests", require("./routes/administration/orderTransferRequest.route"));
+// An LPG plant's deliveries, recorded in full (migration 0072).
+app.use("/api/lpg-deliveries", require("./routes/administration/lpgDelivery.route"));
 app.use("/api/tickets", require("./routes/administration/ticket.route"));
 app.use("/api/deposits", require("./routes/administration/deposit.route"));
 app.use("/api/expected-payments", require("./routes/administration/expectedPayment.route"));

@@ -30,6 +30,14 @@ const deliveryInventory = pgTable(
     customerId: integer("customer_id").references(() => deliveryCustomers.id, { onDelete: "set null" }),
     customerName: varchar("customer_name", { length: 255 }).default(""),
     quantityAllocated: real("quantity_allocated").default(0),
+    /**
+     * What left the loading point, where it was recorded — quantityAllocated
+     * is what the customer received. NULL means not recorded, never "the
+     * same". LPG plant deliveries record both (migration 0072).
+     */
+    quantityLoaded: real("quantity_loaded"),
+    /** Who drove this load, as recorded with it (migration 0072). */
+    driverName: varchar("driver_name", { length: 255 }),
     rate: decimal("rate", { precision: 15, scale: 2 }).default("0"),
 
     // --- Trip costs, per truck --------------------------------------------
