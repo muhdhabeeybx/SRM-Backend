@@ -1780,6 +1780,9 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
         */
        AND ((o.total_amount - o.amount_paid) > 0 OR o.pricing_status = 'pending')
        AND (o.credit_qty > 0 OR o.status IN ('Loading', 'Completed'))
+       -- The company selling to itself (a truck allocation's order, on credit by
+       -- design) is not money a customer owes.
+       AND c.house_account IS NULL
        ${term ? sql`AND (${ref} ILIKE ${pattern} OR c.name ILIKE ${pattern} OR o.company_name ILIKE ${pattern} OR c.company_name ILIKE ${pattern})` : sql``}
      ORDER BY "exposedSince" ASC NULLS LAST
   `);

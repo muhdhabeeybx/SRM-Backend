@@ -11,11 +11,14 @@
  *   approve   an admin or super admin. In one act:
  *               1. an ORDER on the parent for the whole quantity at the day's
  *                  price, to the house trucking customer, with the trucks on
- *                  it as pending loads. It is an ordinary order from here —
- *                  finance records its payment, payment releases it, the
- *                  ticketing desk cuts its tickets, security gates the trucks
- *                  in and out. Placing it is what takes the litres off the
- *                  parent (reserveStock), the same way every sale does.
+ *                  it as pending loads — placed ON CREDIT, authorised by the
+ *                  approver: the company selling to itself is not paid for
+ *                  like a customer's order. It is born Released, so the
+ *                  ticketing desk cuts its tickets at once and security gates
+ *                  the trucks in and out; off a PFI with no loading desk it
+ *                  completes there and then. Placing it is what takes the
+ *                  litres off the parent (reserveStock), the same way every
+ *                  sale does.
  *               2. the lettered trucking PFI, raised not_started and holding
  *                  exactly those litres, with the trucks parked on it as its
  *                  pending batch — so it goes to the same review every other
@@ -384,6 +387,9 @@ async function approve({ allocationId, user, note = "" }) {
       idempotencyKey: orderKey(locked.id),
       pinned: { pfiId: parent.id, price },
       quiet: true,
+      // Never waits for payment: released to ticketing now (or completed, off
+      // a PFI with no desk), on credit the approver gives by approving.
+      onCredit: { reason: `Truck allocation ${locked.pfiNumber} off ${parent.pfiNumber}` },
     });
 
     const sub = await allocationRepo.insertPfi({

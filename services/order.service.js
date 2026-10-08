@@ -402,10 +402,36 @@ async function placeOrder({
    * For the house customer, which is the company itself. Staff notices still go.
    */
   quiet = false,
+  /**
+   * `{ reason }` — place it on credit: the whole quantity authorised to load
+   * before any payment, by `actor`, and born Released so the ticketing desk
+   * can cut its tickets at once. Off a PFI with no loading desk (gantry,
+   * delivery) nobody would ever cut them, so the order completes there and
+   * then, the way a paid one does (completeDesklessOrder).
+   *
+   * For the order approving a truck allocation places on its parent — the
+   * company selling to itself, which is never paid for like a customer's
+   * order (services/pfiAllocation.service.js). Staff only, and only with
+   * `pinned`: it is the same authorisation as release-on-credit, given at
+   * birth, with the same named person, reason and audit row.
+   */
+  onCredit = null,
 }) {
   if (pinned && (actor?.type !== "staff" || !actor.staffId)) {
     throw httpError(403, "Only a member of staff can place an order on a named PFI at an agreed price");
   }
+  if (onCredit) {
+    if (!pinned) throw httpError(400, "Only an order placed on a named PFI can be placed on credit");
+    if (!String(onCredit.reason || "").trim()) throw httpError(400, "A reason is required to place an order on credit");
+  }
+  /**
+   * Credit given at birth — by an unpriced order (loading before its price is
+   * agreed) or an order placed on credit. Either way the reason the
+   * authorisation carries, and null for every ordinary order.
+   */
+  const birthCredit = unpriced
+    ? String(unpriced.reason || "").trim()
+    : onCredit ? String(onCredit.reason).trim() : null;
 
   if (idempotencyKey) {
     const existing = await orderRepo.findByIdempotencyKey(idempotencyKey);
@@ -711,12 +737,11 @@ async function placeOrder({
          * it to load, and no second request that can fail and leave one half
          * standing on its own.
          */
-        ...(unpriced
+        ...(unpriced ? { pricingStatus: "pending", boardPrice } : {}),
+        ...(birthCredit
           ? {
-              pricingStatus: "pending",
-              boardPrice,
               creditQty: String(Number(quantity)),
-              creditReason: String(unpriced.reason).trim(),
+              creditReason: birthCredit,
               creditAuthorisedBy: actor.staffId,
               creditAuthorisedAt: new Date(),
             }
@@ -753,7 +778,7 @@ async function placeOrder({
          * order.created row records it, and the authorisation gets a row of its
          * own so the timeline reads the same as the two-step path.
          */
-        ...(unpriced
+        ...(birthCredit
           ? { status: "Released", releasedAt: new Date(), releasedBy: actor.staffId }
           : {}),
         virtualAccountNumber,
@@ -795,7 +820,7 @@ async function placeOrder({
      * into order.created would make credit raised this way invisible to the
      * query that finds credit raised the other way.
      */
-    if (unpriced) {
+    if (birthCredit) {
       await auditLogRepo.record(
         {
           entityType: "order",
@@ -805,10 +830,9 @@ async function placeOrder({
           metadata: {
             quantity: Number(quantity),
             previous: 0,
-            reason: String(unpriced.reason).trim(),
+            reason: birthCredit,
             orderQuantity: Number(quantity),
-            awaitingPrice: true,
-            viaUnpricedOrder: true,
+            ...(unpriced ? { awaitingPrice: true, viaUnpricedOrder: true } : { placedOnCredit: true }),
           },
         },
         tx
@@ -852,6 +876,20 @@ async function placeOrder({
       );
     }
 
+    /**
+     * On credit off a PFI with no loading desk: nobody will ever cut its
+     * tickets, so it completes now — the stock movement written and the order
+     * stepped through to Completed, exactly as payment does for a paid one.
+     */
+    if (onCredit && created.pfiId) {
+      const [batch] = await tx
+        .select({ pfiType: pfis.pfiType })
+        .from(pfis)
+        .where(eq(pfis.id, created.pfiId))
+        .limit(1);
+      if (batch?.pfiType) await completeDesklessOrder(created, { tx, actor, pfiType: batch.pfiType });
+    }
+
     return { order: created };
     }));
   } catch (err) {
@@ -886,7 +924,12 @@ async function placeOrder({
 
   // Finance on the order's PFI is asked to confirm its payment — priced or
   // not, since an unpriced order is theirs to price. Never throws.
-  stepNotices.orderPlaced(order.id);
+  //
+  // An order on credit has no payment to confirm. It was born Released, which
+  // no state transition announced, so the ticketing desk is told here — a
+  // no-op off a PFI with no desk, where it has already completed.
+  if (onCredit) stepNotices.orderArrived(order.id, "Released");
+  else stepNotices.orderPlaced(order.id);
 
   /**
    * An unpriced order sends the customer nothing at creation.

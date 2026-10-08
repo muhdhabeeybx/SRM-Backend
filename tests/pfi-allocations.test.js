@@ -224,8 +224,12 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(order.quantity, 78000);
     assert.equal(Number(order.price), 925, "at the approved price, not the board price");
     assert.equal(order.deliveryType, "delivery");
-    assert.equal(order.status, "Pending", "a normal order: it waits for its payment");
+    assert.equal(order.status, "Released", "on credit: straight to the ticketing desk, no payment first");
     assert.equal(order.paymentStatus, "Unpaid");
+    assert.equal(Number(order.creditQty), 78000, "the whole quantity on credit");
+    assert.equal(order.creditAuthorisedBy != null, true, "authorised by whoever approved it");
+    assert.match(order.creditReason, /Truck allocation/);
+    assert.equal(orderService.releasableQuantity(order), 78000, "every litre can be ticketed");
     assert.equal(order.expectedTrucks, 2);
 
     const [house] = await db.select().from(customers).where(eq(customers.id, order.customerId));
@@ -414,6 +418,11 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.match(o.deliveryAddress, new RegExp(station.name));
     const loads = await db.select().from(orderTrucks).where(eq(orderTrucks.orderId, o.id));
     assert.equal(loads.length, 0, "no truck on the order: nobody gates one");
+    assert.equal(o.status, "Completed", "on credit off a PFI with no desk: nothing to wait for");
+    assert.equal(Number(o.creditQty), 50000);
+    const movedRes = await db.execute(sql`SELECT qty_litres FROM pfi_movements WHERE order_id = ${o.id} AND action = 'RELEASE'`);
+    const [moved] = Array.isArray(movedRes) ? movedRes : movedRes.rows;
+    assert.equal(Number(moved.qty_litres), 50000, "the stock movement a desk would have written");
 
     [stationSub] = await db.select().from(pfis).where(eq(pfis.id, approved.subPfiId));
     assert.equal(stationSub.pfiNumber, `PFI/${DELIVERY_SERIAL}B/26/TEST DELIVERY/${RUN}`);
