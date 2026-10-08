@@ -4,6 +4,8 @@ const { authenticateStaff } = require("../../middleware/verifyStaff");
 const { requireExpenseRole, requireChartRole } = require("../../middleware/expenseAccess");
 const validate = require("../../middleware/validate");
 const misc = require("../../schemas/misc.schema");
+const trackerSchema = require("../../schemas/expenseTracker.schema");
+const { uploadTracker } = require("../../controllers/administration/expenseTracker.controller");
 const {
   listCategories,
   createCategory,
@@ -50,6 +52,8 @@ router.post("/:id/review", authenticateStaff, requireExpenseRole, validate({ par
 router.get("/:id/comments", authenticateStaff, validate({ params: misc.idParam }), listComments);
 router.post("/:id/comments", authenticateStaff, validate({ params: misc.idParam }), addComment);
 router.post("/", authenticateStaff, validate({ body: misc.createExpense }), createExpense);
+// The LPG plants' expenses tracker, as already-paid expenses — super admin only (the service checks).
+router.post("/tracker-upload", authenticateStaff, validate({ body: trackerSchema.upload }), uploadTracker);
 router.patch("/:id", authenticateStaff, validate({ params: misc.idParam }), updateExpense);
 router.delete("/:id", authenticateStaff, validate({ params: misc.idParam }), deleteExpense);
 
