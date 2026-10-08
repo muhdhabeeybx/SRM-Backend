@@ -40,7 +40,11 @@ function httpErr(status, message) {
 const withFinancials = async (rows) => {
   const many = Array.isArray(rows);
   const list = many ? rows : [rows];
-  const aggs = await pfiExpenseRepo.aggregatesFor(list.map((p) => p.id));
+  const ids = list.map((p) => p.id);
+  const [aggs, prices] = await Promise.all([
+    pfiExpenseRepo.aggregatesFor(ids),
+    pfiPriceRepo.summaryFor(ids),
+  ]);
   const decorated = list.map((pfi) => {
     const agg = aggs.get(Number(pfi.id)) || {};
     return {
@@ -48,6 +52,9 @@ const withFinancials = async (rows) => {
       financials: computeFinancials(pfi, agg),
       orderCount: agg.orderCount || 0,
       expenseCount: agg.expenseCount || 0,
+      // Null until the price is reviewed. A batch priced in Delivery Costing
+      // is costed at its PFI's price once that price has been reviewed.
+      priceReview: prices.get(Number(pfi.id)) || null,
     };
   });
   return many ? decorated : decorated[0];

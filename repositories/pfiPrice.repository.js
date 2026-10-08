@@ -16,6 +16,11 @@ const { pfis, pfiPriceReviews } = require("../db/schema");
  * the PFI was raised at, and every price since, stay on its file and report.
  * Only the latest live review can be taken back, which keeps the chain a
  * straight line: taking it back puts the price it replaced back on the PFI.
+ *
+ * Every kind of PFI may be reviewed. On a trucking or delivery batch priced
+ * truck by truck in Delivery Costing, a reviewed price is what the batch is
+ * costed at from then on — see batchEconomics in the frontend's
+ * lib/delivery-batches.ts, which reads `priceReview` off the PFI.
  */
 
 const httpError = (status, message) => Object.assign(new Error(message), { status, statusCode: status });
@@ -30,13 +35,6 @@ const httpError = (status, message) => Object.assign(new Error(message), { statu
 const noTable = (err) => err?.code === "42P01" || err?.cause?.code === "42P01";
 const reviewsUnavailable = () =>
   httpError(503, "Price reviews are not available yet — the database has not been updated for them (migration 0074).");
-
-/**
- * The kinds priced on the PFI itself. A trucking or delivery batch is priced
- * truck by truck in Delivery Costing; a review here would change a figure its
- * card and report do not read.
- */
-const REVIEWABLE_TYPES = new Set(["coastal", "gantry"]);
 
 const cents = (v) => Math.round((Number(v) || 0) * 100);
 const naira = (v) =>
@@ -79,9 +77,6 @@ const record = async ({ pfiId, price, effectiveOn, note = "", staffId = null, st
   try {
     return await db.transaction(async (tx) => {
       const pfi = await lockPfi(tx, pfiId);
-      if (!REVIEWABLE_TYPES.has(pfi.pfiType)) {
-        throw httpError(409, "This batch is priced truck by truck in Delivery Costing, so its price is changed there.");
-      }
 
       // A price nobody entered is entered, not reviewed — the edit form is
       // where a PFI gets its first price.
@@ -172,7 +167,8 @@ const voidEntry = async ({ pfiId, entryId, reason = "", staffId = null, staffNam
 
 /**
  * Per PFI with a live review: how many, the price it was raised at, and the
- * day the latest took effect — for the register and the cards.
+ * day the latest took effect — for the register, and on every PFI the API
+ * returns (pfi.controller withFinancials).
  *
  * @returns {Promise<Map<number, {reviews: number, initialPrice: number, lastReviewedOn: string}>>}
  */
@@ -205,4 +201,4 @@ const summaryFor = async (pfiIds) => {
   return out;
 };
 
-module.exports = { listFor, record, voidEntry, summaryFor, REVIEWABLE_TYPES };
+module.exports = { listFor, record, voidEntry, summaryFor };

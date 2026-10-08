@@ -18,8 +18,8 @@ const { closeDb, staffToken, staffTokenWithRoles } = require("./helpers");
  * What has to hold is that the reviewed price becomes the PFI's price — so the
  * cargo value and landing cost move with it — while every earlier price stays
  * on record; that only the latest review can be taken back, which restores the
- * price it replaced; and that once reviewed, the price cannot be typed over on
- * the edit form.
+ * price it replaced; that once reviewed, the price cannot be typed over on the
+ * edit form; and that every kind of PFI may be reviewed.
  */
 const API = "/api/pfis";
 const RUN = Date.now();
@@ -169,12 +169,22 @@ describe("PFI price review", () => {
     assert.match(res.body.message, /no price yet/);
   });
 
-  test("a trucking batch is priced in Delivery Costing, not here", async () => {
+  test("every kind of PFI may be reviewed — a trucking batch too", async () => {
     const res = await as(token).post(`${API}/${trucking.id}/prices`, {
-      price: 950, effectiveOn: "2026-10-08", note: "x",
+      price: 950, effectiveOn: "2026-10-08", note: "Supplier reviewed the trucked price",
     });
-    assert.equal(res.status, 409);
-    assert.equal(Number((await reload(trucking.id)).unitPrice), 900);
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal(Number((await reload(trucking.id)).unitPrice), 950);
+  });
+
+  test("every PFI the API returns says whether its price was reviewed", async () => {
+    const one = (await as(token).get(`${API}/${trucking.id}`)).body.data.pfi;
+    assert.deepEqual(one.priceReview, { reviews: 1, initialPrice: 900, lastReviewedOn: "2026-10-08" });
+    const never = (await as(token).get(`${API}/${unpriced.id}`)).body.data.pfi;
+    assert.equal(never.priceReview, null);
+    const list = (await as(token).get(`${API}?search=${encodeURIComponent(`PFI/PRICE/C/${RUN}`)}`)).body.data.pfis;
+    assert.equal(list.length, 1);
+    assert.equal(list[0].priceReview.reviews, 1);
   });
 
   test("a price, a date and a reason are required", async () => {
