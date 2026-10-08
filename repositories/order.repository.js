@@ -791,10 +791,20 @@ const findFinanceReport = async ({
   const conditions = [];
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
-  if (paymentStatus && paymentStatus !== "all") {
+  /**
+   * On credit by design: the company selling to itself — a truck allocation's
+   * order (services/pfiAllocation.service.js), placed on credit and never
+   * paid for like a customer's. Listed with the paid orders, marked ON CREDIT,
+   * and kept out of what is owed, which it is not. The first was placed on
+   * 2 October 2026, after the audit, so no audited figure includes one.
+   */
+  const onCreditHouse = sql`(${orders.creditQty} > 0 AND ${customers.houseAccount} IS NOT NULL AND ${orders.paymentStatus} <> 'Paid')`;
+  if (paymentStatus === "on_credit") {
+    conditions.push(onCreditHouse);
+  } else if (paymentStatus && paymentStatus !== "all") {
     conditions.push(eq(orders.paymentStatus, paymentStatus));
   } else if (!paymentStatus) {
-    conditions.push(inArray(orders.paymentStatus, ["Paid", "Part Paid"]));
+    conditions.push(or(inArray(orders.paymentStatus, ["Paid", "Part Paid"]), onCreditHouse));
   }
   if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
   if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));
@@ -891,6 +901,10 @@ const findFinanceReport = async ({
   const columns = {
     ...FULL_ORDER_COLUMNS,
     pfiLocationName: pfis.locationName,
+    /** Marked ON CREDIT on the report and left out of what is owed. */
+    onCredit: sql`${onCreditHouse}`.mapWith(Boolean),
+    /** Set on the company's own account, whose position is not a customer's. */
+    customerHouseAccount: customers.houseAccount,
   };
 
   const [rows, [totalsRow]] = await Promise.all([
@@ -962,9 +976,15 @@ const findFinanceReport = async ({
         totalSurplus: sql`COALESCE(SUM(GREATEST(0, (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         ) - ${orders.totalAmount}::numeric)), 0)`,
-        totalShortfall: sql`COALESCE(SUM(GREATEST(0, ${orders.totalAmount}::numeric - (
+        // Owed by customers — an order on credit by design is not, and is
+        // totalled on its own below.
+        totalShortfall: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN 0 ELSE GREATEST(0, ${orders.totalAmount}::numeric - (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
-        ))), 0)`,
+        )) END), 0)`,
+        totalOnCredit: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN GREATEST(0, ${orders.totalAmount}::numeric - (
+          SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
+        )) ELSE 0 END), 0)`,
+        onCreditCount: sql`COUNT(*) FILTER (WHERE ${onCreditHouse})::int`,
         reconciledCount: sql`COUNT(*) FILTER (WHERE ${hasStatement})::int`,
         partPaidCount: sql`COUNT(*) FILTER (WHERE ${orders.paymentStatus} = 'Part Paid')::int`,
         /**
@@ -1437,7 +1457,8 @@ const findFinanceReport = async ({
    * handful of people rather than the whole customer book.
    */
   const customerDifferentials = await findCustomerDifferentials(
-    [...new Set(rows.map((r) => r.customerId).filter((id) => id != null))],
+    // The company's own account is not a customer with a position to state.
+    [...new Set(rows.filter((r) => !r.customerHouseAccount).map((r) => r.customerId).filter((id) => id != null))],
     scopeUser,
   );
 
@@ -1469,6 +1490,9 @@ const findFinanceReport = async ({
       /** Summed per order, never netted — see the SQL above. */
       totalSurplus: Number(totalsRow.totalSurplus),
       totalShortfall: Number(totalsRow.totalShortfall),
+      /** Value on orders placed on credit by design — not owed by any customer. */
+      totalOnCredit: Number(totalsRow.totalOnCredit),
+      onCreditCount: Number(totalsRow.onCreditCount),
       /** How much of the book an external audit can actually check. */
       reconciledCount,
       unreconciledCount: total - reconciledCount,

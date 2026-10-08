@@ -273,6 +273,24 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(orderService.computeExpiresAt(aged), null);
   });
 
+  test("the finance report lists it, marked on credit, and not as owed", async () => {
+    const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}`);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const { orders: listed, totals, customerDifferentials } = res.body.data;
+    const row = listed.find((o) => o.id === order.id);
+    assert.ok(row, "in the normal view, beside the paid orders");
+    assert.equal(row.onCredit, true);
+    assert.equal(totals.onCreditCount, 1);
+    assert.equal(totals.totalOnCredit, 78000 * 925);
+    assert.equal(totals.totalShortfall, 0, "the company selling to itself owes nothing");
+    assert.ok(!customerDifferentials.some((c) => c.customerId === order.customerId), "not a customer's position");
+
+    const filtered = await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=on_credit`);
+    assert.deepEqual(filtered.body.data.orders.map((o) => o.id), [order.id]);
+    const paid = await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=Paid`);
+    assert.equal(paid.body.data.orders.length, 0);
+  });
+
   test("the order cannot be cancelled while the trucking PFI holds its litres", async () => {
     const res = await as(admin).post(`/api/orders/${order.id}/cancel`, { reason: "test" });
     assert.equal(res.status, 409, JSON.stringify(res.body));
