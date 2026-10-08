@@ -153,7 +153,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
       client`SELECT id, name, city, state FROM depots ORDER BY city ASC`,
       client`
         SELECT id, pfi_number, location_id, product_name, product_unit,
-               starting_qty_litres, evacuation_surplus_litres, sold_qty_litres, status
+               starting_qty_litres, evacuation_surplus_litres, operational_loss_litres, sold_qty_litres, status
         FROM pfis WHERE status = 'active'
       `,
       // Every column the five report forms can fill in, not the nine the email

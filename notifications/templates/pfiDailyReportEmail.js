@@ -251,12 +251,14 @@ const depotRow = (p) => {
     `<tr>` +
     idCell(p.pfiNumber) +
     cell(escapeHtml(up(p.location)) || "—") +
-    // An evacuation surplus is named under the initial figure rather
-    // than folded into it: initial is the batch as landed and never
-    // changes, and the surplus is why closing can exceed initial − sold.
+    // An evacuation surplus and an operational loss are named under the
+    // initial figure rather than folded into it: initial is the batch as
+    // landed and never changes, and these are why closing differs from
+    // initial − sold.
     stockCell(
       qty(p.stock.starting, p.unit) +
-        (p.stock.surplus > 0 ? `<br><span style="font-size:11px">+ ${qty(p.stock.surplus, p.unit)} surplus</span>` : "")
+        (p.stock.surplus > 0 ? `<br><span style="font-size:11px">+ ${qty(p.stock.surplus, p.unit)} surplus</span>` : "") +
+        (p.stock.loss > 0 ? `<br><span style="font-size:11px">− ${qty(p.stock.loss, p.unit)} operational loss</span>` : "")
     ) +
     stockCell(qty(p.stock.openingToday, p.unit)) +
     cell(sold, credit(sold)) +

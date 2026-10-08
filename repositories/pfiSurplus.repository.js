@@ -1,6 +1,7 @@
 const { eq, and, desc, isNull, inArray, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { pfis, pfiEvacuationSurpluses } = require("../db/schema");
+const { stockQty } = require("../lib/pfiStock");
 
 /**
  * Evacuation surplus: product found in the tank when a PFI is run down, over
@@ -90,7 +91,7 @@ const voidEntry = async ({ pfiId, entryId, reason = "", staffId = null, staffNam
      * PFI having sold litres it never had, and a negative balance nobody can
      * explain. The orders have to come off first.
      */
-    const stock = Number(pfi.startingQtyLitres) + Number(pfi.evacuationSurplusLitres);
+    const stock = stockQty(pfi);
     const afterVoid = stock - entry.qtyLitres;
     if (Number(pfi.soldQtyLitres) > afterVoid) {
       const short = Number(pfi.soldQtyLitres) - afterVoid;

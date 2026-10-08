@@ -18,6 +18,7 @@ module.exports = {
   pfiExpenseRepo: require("./pfiExpense.repository"),
   // Evacuation surplus entries, and the PFI total they keep. See migration 0053.
   pfiSurplusRepo: require("./pfiSurplus.repository"),
+  pfiLossRepo: require("./pfiLoss.repository"),
   // The file's narrative (migration 0058), and what the PFI file and its
   // reports read beside the PFI row.
   pfiNoteRepo: require("./pfiNote.repository"),

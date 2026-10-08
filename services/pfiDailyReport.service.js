@@ -92,7 +92,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
            -- ('Litres', 'Liters', 'kg'). Carried through so the report prints
            -- what the batch is actually traded in rather than assuming.
            product_unit,
-           starting_qty_litres, evacuation_surplus_litres, sold_qty_litres, unit_price::numeric AS unit_price,
+           starting_qty_litres, evacuation_surplus_litres, operational_loss_litres, sold_qty_litres, unit_price::numeric AS unit_price,
            ticket_count
       FROM pfis
      WHERE status = 'active'
@@ -333,6 +333,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     // found since, because that is what the batch has had to sell.
     const starting = num(p.starting_qty_litres);
     const surplus = num(p.evacuation_surplus_litres);
+    const loss = num(p.operational_loss_litres);
     const stock = stockQty(p);
     const sold = num(p.sold_qty_litres);
     const valueAll = num(o.value_all);
@@ -364,6 +365,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       stock: {
         starting,
         surplus,
+        loss,
         sold,
         openingToday: closing + soldToday,
         soldToday,

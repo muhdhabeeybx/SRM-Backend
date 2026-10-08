@@ -354,7 +354,7 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
         await tx
           .update(pfis)
           .set({
-            soldQtyLitres: sql`LEAST(${pfis.soldQtyLitres} + ${loadedTotal}, ${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres})`,
+            soldQtyLitres: sql`LEAST(${pfis.soldQtyLitres} + ${loadedTotal}, ${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.operationalLossLitres})`,
             updatedAt: new Date(),
           })
           .where(eq(pfis.id, pfiId));
@@ -397,7 +397,8 @@ const reserveStock = async (pfiId, quantity, tx = db) => {
         eq(pfis.id, pfiId),
         eq(pfis.status, "active"),
         // The surplus is stock like any other: found in the tank, sold from it.
-        sql`(${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.soldQtyLitres}) >= ${quantity}`
+        // A loss is the reverse: gone from the tank, never to be sold.
+        sql`(${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.operationalLossLitres} - ${pfis.soldQtyLitres}) >= ${quantity}`
       )
     )
     .returning();
@@ -435,7 +436,7 @@ const markFinishedIfComplete = async (pfiId, tx = db) => {
     .where(
       and(
         eq(pfis.id, pfiId),
-        sql`${pfis.soldQtyLitres} >= ${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres}`
+        sql`${pfis.soldQtyLitres} >= ${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.operationalLossLitres}`
       )
     )
     .returning();

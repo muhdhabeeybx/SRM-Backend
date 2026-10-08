@@ -159,6 +159,7 @@ const getMyPfis = async (user) => {
       stock: {
         landed: f.tankQtyLitres,
         evacuationSurplus: f.evacuationSurplusLitres,
+        operationalLoss: f.operationalLossLitres,
         total: f.stockQtyLitres,
       },
       sales,

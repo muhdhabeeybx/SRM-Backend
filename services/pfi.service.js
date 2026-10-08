@@ -43,6 +43,7 @@ async function getDepotCapacities(depotId) {
       productId: pfis.productId,
       startingQtyLitres: pfis.startingQtyLitres,
       evacuationSurplusLitres: pfis.evacuationSurplusLitres,
+      operationalLossLitres: pfis.operationalLossLitres,
       soldQtyLitres: pfis.soldQtyLitres,
     })
     .from(pfis)
@@ -94,6 +95,7 @@ async function getMultiDepotCapacities(depotIds) {
            p.product_id       AS "productId",
            p.starting_qty_litres AS "startingQtyLitres",
            p.evacuation_surplus_litres AS "evacuationSurplusLitres",
+           p.operational_loss_litres AS "operationalLossLitres",
            p.sold_qty_litres     AS "soldQtyLitres"
       FROM pfis p
       JOIN (

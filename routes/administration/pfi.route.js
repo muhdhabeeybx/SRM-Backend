@@ -26,6 +26,9 @@ const {
   getPfiSurpluses,
   addPfiSurplus,
   voidPfiSurplus,
+  getPfiLosses,
+  addPfiLoss,
+  voidPfiLoss,
   getPfiFile,
   getPfiRegister,
   listPfiNotes,
@@ -122,6 +125,22 @@ router.post(
   verifyStaff,
   validate({ params: misc.pfiSurplusParam, body: misc.voidPfiSurplus }),
   voidPfiSurplus
+);
+
+// Operational loss — product gone from the tank without being sold. The
+// mirror of the surplus. See migration 0073.
+router.get("/:id/losses", verifyStaff, validate({ params: misc.idParam }), getPfiLosses);
+router.post(
+  "/:id/losses",
+  verifyStaff,
+  validate({ params: misc.idParam, body: misc.recordPfiLoss }),
+  addPfiLoss
+);
+router.post(
+  "/:id/losses/:entryId/void",
+  verifyStaff,
+  validate({ params: misc.pfiLossParam, body: misc.voidPfiLoss }),
+  voidPfiLoss
 );
 
 // The PFI file: everything about one PFI, for its page and its report.

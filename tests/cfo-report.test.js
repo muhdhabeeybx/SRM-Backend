@@ -176,6 +176,16 @@ describe("CFO report — a row, computed and corrected", () => {
     assert.equal(r.stockBalance, r.initialQty - r.cumulativeVolume);
   });
 
+  test("an operational loss comes off the stock balance and what is available to sell", () => {
+    const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: null, surplus: 5000, loss: 2000 });
+    assert.equal(r.operationalLoss, 2000);
+    assert.equal(r.initialQty, 1000000, "the landed figure never moves");
+    assert.equal(r.stockBalance, 603000, "1,000,000 + 5,000 surplus − 2,000 lost − 400,000 sold");
+    assert.equal(r.availableToSell, 603000);
+    const t = addToTotals(emptyTotals(), r);
+    assert.equal(t.byUnit.Litres.operationalLoss, 2000);
+  });
+
   test("surplus/deficit is inflow minus sales value, and negative when owed", () => {
     const r = buildRow({ pfi, day: "2026-09-17", running, dayBucket, entry: null });
     assert.equal(r.surplusDeficit, -20000000, "20m still owed reads as a deficit");

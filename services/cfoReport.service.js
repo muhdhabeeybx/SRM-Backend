@@ -1,4 +1,4 @@
-const { cfoReportRepo, pfiSurplusRepo } = require("../repositories");
+const { cfoReportRepo, pfiSurplusRepo, pfiLossRepo } = require("../repositories");
 const { REPORT_TZ } = require("./dailyCombinedReport.service");
 const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
@@ -39,8 +39,12 @@ const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
  *                    from the day it was recorded, so the days before it keep
  *                    the balance they had. Initial qty stays the landed figure.
  *
- *   Stock balance    Initial qty + evacuation surplus − cumulative sales
- *                    volume. Derived, always.
+ *   Operational      Product that left the tank without being sold
+ *   loss             (migration 0073). Counted from the day it was recorded,
+ *                    the same as a surplus.
+ *
+ *   Stock balance    Initial qty + evacuation surplus − operational loss −
+ *                    cumulative sales volume. Derived, always.
  *
  *   Sales value      Invoiced value of the same orders the cumulative volume
  *   to date          counts. Same cohort, so litres and naira can never tell
@@ -176,11 +180,12 @@ const addToTotals = (totals, row) => {
 
   const unit = row.productUnit;
   const q = totals.byUnit[unit] || (totals.byUnit[unit] = {
-    unit, initialQty: 0, evacuationSurplus: 0, cumulativeVolume: 0, dayVolume: 0, stockBalance: 0,
+    unit, initialQty: 0, evacuationSurplus: 0, operationalLoss: 0, cumulativeVolume: 0, dayVolume: 0, stockBalance: 0,
     awaitingPayment: 0, availableToSell: 0,
   });
   q.initialQty = round2(q.initialQty + row.initialQty);
   q.evacuationSurplus = round2(q.evacuationSurplus + (row.evacuationSurplus || 0));
+  q.operationalLoss = round2((q.operationalLoss || 0) + (row.operationalLoss || 0));
   q.cumulativeVolume = round2(q.cumulativeVolume + row.cumulativeVolume);
   q.dayVolume = round2(q.dayVolume + row.dayVolume);
   q.stockBalance = round2(q.stockBalance + row.stockBalance);
@@ -206,10 +211,11 @@ const emptyTotals = () => ({
  * reportActuals.service shows its numbers beside what is typed rather than
  * over it.
  */
-const buildRow = ({ pfi, day, running, dayBucket, entry, editorName, surplus = 0 }) => {
+const buildRow = ({ pfi, day, running, dayBucket, entry, editorName, surplus = 0, loss = 0 }) => {
   const computed = {
     initialQty: round2(pfi.startingQty),
     evacuationSurplus: round2(surplus),
+    operationalLoss: round2(loss),
     cumulativeVolume: round2(running.qty),
     dayVolume: round2(dayBucket.qty),
     salesValue: round2(running.value),
@@ -232,7 +238,9 @@ const buildRow = ({ pfi, day, running, dayBucket, entry, editorName, surplus = 0
     /** Negative: overpayment refunded to the customer off this PFI's orders. */
     refunded: round2(running.refunded),
   };
-  computed.stockBalance = round2(computed.initialQty + computed.evacuationSurplus - computed.cumulativeVolume);
+  computed.stockBalance = round2(
+    computed.initialQty + computed.evacuationSurplus - computed.operationalLoss - computed.cumulativeVolume,
+  );
   computed.surplusDeficit = round2(computed.bankInflow - computed.salesValue);
   /**
    * The stock balance says what has not been SOLD. It is not the same as what
@@ -277,13 +285,16 @@ const buildRow = ({ pfi, day, running, dayBucket, entry, editorName, surplus = 0
     // Not overridable: it is a recorded entry with its own audit trail, and
     // a correction belongs there, not in a cell.
     evacuationSurplus: computed.evacuationSurplus,
-    stockBalance: round2(initialQty + computed.evacuationSurplus - cumulativeVolume),
+    operationalLoss: computed.operationalLoss,
+    stockBalance: round2(initialQty + computed.evacuationSurplus - computed.operationalLoss - cumulativeVolume),
     surplusDeficit: round2(bankInflow - salesValue),
     // Off the EFFECTIVE stock balance, so correcting a quantity by hand moves
     // what can be sold with it rather than leaving the two disagreeing.
     awaitingPayment: computed.awaitingPayment,
     awaitingPaymentOrders: computed.awaitingPaymentOrders,
-    availableToSell: round2(initialQty + computed.evacuationSurplus - cumulativeVolume - computed.awaitingPayment),
+    availableToSell: round2(
+      initialQty + computed.evacuationSurplus - computed.operationalLoss - cumulativeVolume - computed.awaitingPayment,
+    ),
 
     orders: running.orders,
     dayOrders: dayBucket.orders,
@@ -443,6 +454,16 @@ const build = async ({
   const surplusAsOf = (pfiId, day) =>
     (surplusesBy.get(pfiId) || []).reduce((sum, s) => (s.day <= day ? sum + s.qty : sum), 0);
 
+  // And its operational losses, the same way.
+  const lossesBy = new Map();
+  for (const l of await pfiLossRepo.liveEntriesFor(ids)) {
+    const list = lossesBy.get(Number(l.pfiId)) || [];
+    list.push({ day: dayKey(l.recordedOn), qty: num(l.qtyLitres) });
+    lossesBy.set(Number(l.pfiId), list);
+  }
+  const lossAsOf = (pfiId, day) =>
+    (lossesBy.get(pfiId) || []).reduce((sum, l) => (l.day <= day ? sum + l.qty : sum), 0);
+
   // ── walk the days forward, carrying the running totals ──
   const running = new Map(
     pfis.map((b) => [b.id, { ...emptyBucket(), ...(openingBy.get(b.id) || {}) }])
@@ -483,6 +504,7 @@ const build = async ({
       const row = buildRow({
         pfi, day, running: run, dayBucket: bucket, entry,
         surplus: surplusAsOf(pfi.id, day),
+        loss: lossAsOf(pfi.id, day),
         editorName: entry?.updatedBy ? editors.get(Number(entry.updatedBy)) : null,
       });
       rows.push(row);

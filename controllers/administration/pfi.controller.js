@@ -9,6 +9,7 @@ const {
   orderRepo,
   orderPfiAllocationRepo,
   pfiSurplusRepo,
+  pfiLossRepo,
   pfiNoteRepo,
   pfiFileRepo,
 } = require("../../repositories");
@@ -796,8 +797,9 @@ const getStockSummary = asyncHandler(async (req, res) => {
     locationName: p.locationName,
     productName: p.productName,
     tankQtyLitres: p.financials.tankQtyLitres,
-    // Beside the tank rather than inside it, so tank + surplus − sold = remaining.
+    // Beside the tank rather than inside it, so tank + surplus − loss − sold = remaining.
     evacuationSurplusLitres: p.financials.evacuationSurplusLitres,
+    operationalLossLitres: p.financials.operationalLossLitres,
     blQtyLitres: p.financials.blQtyLitres,
     surplusDeficitLitres: p.financials.surplusDeficitLitres,
     sold: p.financials.sold,
@@ -812,6 +814,7 @@ const getStockSummary = asyncHandler(async (req, res) => {
       totals: {
         tank: rows.reduce((s, r) => s + r.tankQtyLitres, 0),
         evacuationSurplus: rows.reduce((s, r) => s + r.evacuationSurplusLitres, 0),
+        operationalLoss: rows.reduce((s, r) => s + r.operationalLossLitres, 0),
         sold: rows.reduce((s, r) => s + r.sold, 0),
         remaining: rows.reduce((s, r) => s + r.remaining, 0),
       },
@@ -1112,6 +1115,58 @@ const voidPfiSurplus = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Surplus taken back", data: { entry, pfi: updated } });
 });
 
+const getPfiLosses = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: false });
+  const entries = await pfiLossRepo.listFor(pfi.id);
+  res.json({
+    success: true,
+    data: { entries, totalLitres: Number(pfi.operationalLossLitres) || 0 },
+  });
+});
+
+/**
+ * Record product that left the tank without being sold — the mirror of a
+ * surplus. It takes from what the PFI can sell, never more than is left
+ * unsold, and a PFI it empties is finished. See pfiLoss.repository.
+ */
+const addPfiLoss = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const { actorId, actorName } = await actorFor(req);
+  const { entry, pfi: updated, finished } = await pfiLossRepo.record({
+    pfiId: pfi.id,
+    qtyLitres: req.body.qtyLitres,
+    recordedOn: req.body.recordedOn,
+    note: req.body.note,
+    staffId: actorId,
+    staffName: actorName,
+  });
+  res.status(201).json({
+    success: true,
+    message: finished
+      ? `Loss of ${entry.qtyLitres.toLocaleString()} recorded — nothing is left to sell, so the PFI is finished`
+      : `Loss of ${entry.qtyLitres.toLocaleString()} recorded`,
+    data: { entry, pfi: updated, finished },
+  });
+});
+
+/** Take a loss back: the litres return to what can be sold. */
+const voidPfiLoss = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const { actorId, actorName } = await actorFor(req);
+  const { entry, pfi: updated, reopened } = await pfiLossRepo.voidEntry({
+    pfiId: pfi.id,
+    entryId: req.params.entryId,
+    reason: req.body.reason,
+    staffId: actorId,
+    staffName: actorName,
+  });
+  res.json({
+    success: true,
+    message: reopened ? "Loss taken back — the PFI is open for sale again" : "Loss taken back",
+    data: { entry, pfi: updated, reopened },
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The PFI file
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1139,7 +1194,7 @@ const getPfiFile = asyncHandler(async (req, res) => {
 
   const [
     pfi, expenses, people, banks, collections, activity,
-    notes, surpluses, audit, trucks, orderTickets, manifest, allowedLocations,
+    notes, surpluses, losses, audit, trucks, orderTickets, manifest, allowedLocations,
   ] = await Promise.all([
     withFinancials(found),
     pfiExpenseRepo.listExpensesForPfi(id),
@@ -1149,6 +1204,7 @@ const getPfiFile = asyncHandler(async (req, res) => {
     pfiFileRepo.activityFor([id]),
     pfiNoteRepo.listFor(id),
     pfiSurplusRepo.listFor(id),
+    pfiLossRepo.listFor(id),
     pfiFileRepo.auditFor(id),
     pfiFileRepo.trucksForPfi(id),
     pfiFileRepo.orderTicketsForPfi(id),
@@ -1168,6 +1224,7 @@ const getPfiFile = asyncHandler(async (req, res) => {
       activity: activity.get(id) || null,
       notes,
       surpluses,
+      losses,
       audit,
       trucks,
       orderTickets,
@@ -1277,6 +1334,9 @@ module.exports = {
   getPfiSurpluses,
   addPfiSurplus,
   voidPfiSurplus,
+  getPfiLosses,
+  addPfiLoss,
+  voidPfiLoss,
   getPfiLocations,
   setPfiLocations,
   getPfiTrucks,

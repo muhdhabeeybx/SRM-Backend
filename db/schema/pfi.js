@@ -86,6 +86,14 @@ const pfis = pgTable(
      * by repositories/pfiSurplus.repository.js. See migration 0053.
      */
     evacuationSurplusLitres: integer("evacuation_surplus_litres").default(0).notNull(),
+    /**
+     * Product that left the tank without being sold — the sum of the live
+     * pfi_operational_losses rows. The mirror of the surplus: it takes from
+     * what can be sold (starting + surplus - loss - sold), never from
+     * startingQtyLitres. Maintained by repositories/pfiLoss.repository.js.
+     * See migration 0073.
+     */
+    operationalLossLitres: integer("operational_loss_litres").default(0).notNull(),
     totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).default("0"),
     unitPrice: decimal("unit_price", { precision: 15, scale: 2 }).default("0"),
     // Rebate, discount or claim credited back against this cargo. Subtracted
@@ -158,6 +166,7 @@ const pfis = pgTable(
     check("pfis_qty_check", sql`${table.startingQtyLitres} >= 0`),
     check("pfis_sold_qty_check", sql`${table.soldQtyLitres} >= 0`),
     check("pfis_evacuation_surplus_check", sql`${table.evacuationSurplusLitres} >= 0`),
+    check("pfis_operational_loss_check", sql`${table.operationalLossLitres} >= 0`),
     check("pfis_pfi_type_check", sql`${table.pfiType} IN ('coastal', 'gantry')`),
     check("pfis_ticket_count_check", sql`${table.ticketCount} IS NULL OR ${table.ticketCount} >= 0`),
   ]
@@ -189,6 +198,31 @@ const pfiEvacuationSurpluses = pgTable(
 );
 
 /**
+ * One operational loss, as it was recorded. Voided rather than deleted, like a
+ * surplus. See migration 0073.
+ */
+const pfiOperationalLosses = pgTable(
+  "pfi_operational_losses",
+  {
+    id: serial("id").primaryKey(),
+    pfiId: integer("pfi_id").notNull().references(() => pfis.id, { onDelete: "cascade" }),
+    qtyLitres: integer("qty_litres").notNull(),
+    recordedOn: date("recorded_on").notNull(),
+    note: text("note").default("").notNull(),
+    recordedBy: integer("recorded_by").references(() => staff.id, { onDelete: "set null" }),
+    recordedByName: varchar("recorded_by_name", { length: 255 }).default("").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
+    voidedBy: integer("voided_by").references(() => staff.id, { onDelete: "set null" }),
+    voidedByName: varchar("voided_by_name", { length: 255 }).default("").notNull(),
+    voidReason: text("void_reason").default("").notNull(),
+  },
+  (table) => [
+    check("pfi_operational_losses_qty_litres_check", sql`${table.qtyLitres} > 0`),
+  ]
+);
+
+/**
  * The narrative of a PFI — what happened, what went wrong, what was decided —
  * printed in its report beside the figures it explains. `occurredOn` is when
  * the thing happened, not when it was written. Withdrawn by marking it
@@ -216,4 +250,4 @@ const pfiNotes = pgTable(
   ]
 );
 
-module.exports = { pfis, pfiEvacuationSurpluses, pfiNotes };
+module.exports = { pfis, pfiEvacuationSurpluses, pfiOperationalLosses, pfiNotes };

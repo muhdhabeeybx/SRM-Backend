@@ -943,6 +943,22 @@ const voidPfiSurplus = z.object({
 });
 
 /**
+ * An operational loss: how much, the day it was found, and why — required for
+ * the same reason as a surplus's. See migration 0073.
+ */
+const pfiLossParam = z.object({ id: id("PFI"), entryId: id("Loss entry") });
+const recordPfiLoss = z.object({
+  qtyLitres: numberLike("Loss quantity").pipe(
+    z.number().int("Loss quantity must be a whole number").positive("Loss quantity must be greater than zero"),
+  ),
+  recordedOn: optCalendarDay("Date found").refine((v) => v != null, "Give the date the loss was found"),
+  note: requiredString("Note", 1000),
+});
+const voidPfiLoss = z.object({
+  reason: requiredString("Reason", 1000),
+});
+
+/**
  * A note on a PFI's file. The words are required; the kind defaults to a plain
  * note and the day to today. See migration 0058.
  */
@@ -1013,6 +1029,9 @@ module.exports = {
   raisePfiAllocation,
   decidePfiAllocation,
   pfiSurplusParam,
+  pfiLossParam,
+  recordPfiLoss,
+  voidPfiLoss,
   recordPfiSurplus,
   voidPfiSurplus,
   pfiNoteParam,
