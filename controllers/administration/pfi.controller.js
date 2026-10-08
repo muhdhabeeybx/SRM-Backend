@@ -10,6 +10,7 @@ const {
   orderPfiAllocationRepo,
   pfiSurplusRepo,
   pfiLossRepo,
+  pfiPriceRepo,
   pfiNoteRepo,
   pfiFileRepo,
 } = require("../../repositories");
@@ -480,6 +481,23 @@ const updatePfi = asyncHandler(async (req, res) => {
       updateData[idKey] = numericVal;
       updateData[nameKey] = await resolveOfficerName(val);
     }
+  }
+
+  /**
+   * Once a PFI's price has been reviewed, the price moves only by another
+   * review. Typing over it here would leave the file listing a reviewed price
+   * the PFI no longer has, and the price it replaced nowhere. The form sends
+   * the price on every save, so only an actual change is refused.
+   */
+  if (
+    updateData.unitPrice !== undefined
+    && Math.round(Number(updateData.unitPrice) * 100) !== Math.round(Number(pfi.unitPrice || 0) * 100)
+    && (await pfiPriceRepo.summaryFor([pfi.id])).has(Number(pfi.id))
+  ) {
+    return res.status(409).json({
+      success: false,
+      message: "This PFI's price has been reviewed. Change it with Review price, so the earlier prices stay on its file.",
+    });
   }
 
   const updated = await pfiRepo.update(pfi.id, updateData);
@@ -1167,6 +1185,57 @@ const voidPfiLoss = asyncHandler(async (req, res) => {
   });
 });
 
+const perUnit = (unit) => String(unit || "Litres").replace(/s$/i, "").toLowerCase();
+const nairaText = (v) =>
+  `₦${Number(v).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const getPfiPrices = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: false });
+  const entries = await pfiPriceRepo.listFor(pfi.id);
+  res.json({ success: true, data: { entries, currentPrice: Number(pfi.unitPrice) || 0 } });
+});
+
+/**
+ * Review a PFI's price per unit. The new price becomes the PFI's price, so the
+ * cargo value, the landing cost and the profit move with it; the price it
+ * replaced is kept on the entry. See pfiPrice.repository.
+ */
+const addPfiPrice = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const { actorId, actorName } = await actorFor(req);
+  const { entry, pfi: updated } = await pfiPriceRepo.record({
+    pfiId: pfi.id,
+    price: req.body.price,
+    effectiveOn: req.body.effectiveOn,
+    note: req.body.note,
+    staffId: actorId,
+    staffName: actorName,
+  });
+  res.status(201).json({
+    success: true,
+    message: `Price per ${perUnit(pfi.productUnit)} reviewed from ${nairaText(entry.previousPrice)} to ${nairaText(entry.price)}`,
+    data: { entry, pfi: updated },
+  });
+});
+
+/** Take back the latest review: the price it replaced is the PFI's price again. */
+const voidPfiPrice = asyncHandler(async (req, res) => {
+  const pfi = await surplusPfiFor(req, { write: true });
+  const { actorId, actorName } = await actorFor(req);
+  const { entry, pfi: updated, restoredPrice } = await pfiPriceRepo.voidEntry({
+    pfiId: pfi.id,
+    entryId: req.params.entryId,
+    reason: req.body.reason,
+    staffId: actorId,
+    staffName: actorName,
+  });
+  res.json({
+    success: true,
+    message: `Price review taken back — the price is ${nairaText(restoredPrice)} again`,
+    data: { entry, pfi: updated },
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // The PFI file
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1194,7 +1263,7 @@ const getPfiFile = asyncHandler(async (req, res) => {
 
   const [
     pfi, expenses, people, banks, collections, activity,
-    notes, surpluses, losses, audit, trucks, orderTickets, manifest, allowedLocations,
+    notes, surpluses, losses, priceReviews, audit, trucks, orderTickets, manifest, allowedLocations,
   ] = await Promise.all([
     withFinancials(found),
     pfiExpenseRepo.listExpensesForPfi(id),
@@ -1205,6 +1274,7 @@ const getPfiFile = asyncHandler(async (req, res) => {
     pfiNoteRepo.listFor(id),
     pfiSurplusRepo.listFor(id),
     pfiLossRepo.listFor(id),
+    pfiPriceRepo.listFor(id),
     pfiFileRepo.auditFor(id),
     pfiFileRepo.trucksForPfi(id),
     pfiFileRepo.orderTicketsForPfi(id),
@@ -1216,7 +1286,7 @@ const getPfiFile = asyncHandler(async (req, res) => {
     success: true,
     data: {
       pfi,
-      explain: explainFinancials(pfi, pfi.financials),
+      explain: explainFinancials(pfi, pfi.financials, priceReviews),
       expenses,
       people: people.get(id) || null,
       banks: banks.get(id) || [],
@@ -1225,6 +1295,7 @@ const getPfiFile = asyncHandler(async (req, res) => {
       notes,
       surpluses,
       losses,
+      priceReviews,
       audit,
       trucks,
       orderTickets,
@@ -1247,12 +1318,13 @@ const getPfiRegister = asyncHandler(async (req, res) => {
   const { pfis: rows } = await pfiRepo.findAll({ scopeUser: req.user, limit: 1000 });
   const pfiIds = rows.map((p) => Number(p.id));
 
-  const [people, banks, collections, activity, notes] = await Promise.all([
+  const [people, banks, collections, activity, notes, prices] = await Promise.all([
     pfiFileRepo.peopleFor(pfiIds),
     pfiFileRepo.banksFor(pfiIds),
     pfiFileRepo.collectionsFor(pfiIds),
     pfiFileRepo.activityFor(pfiIds),
     pfiNoteRepo.summaryFor(pfiIds),
+    pfiPriceRepo.summaryFor(pfiIds),
   ]);
 
   const register = {};
@@ -1263,6 +1335,9 @@ const getPfiRegister = asyncHandler(async (req, res) => {
       collections: collections.get(id) || [],
       activity: activity.get(id) || null,
       notes: notes.get(id) || { count: 0, issues: 0, decisions: 0, latest: null },
+      // Null until the price is reviewed: the price it was raised at is then
+      // simply its price.
+      prices: prices.get(id) || null,
     };
   }
 
@@ -1337,6 +1412,9 @@ module.exports = {
   getPfiLosses,
   addPfiLoss,
   voidPfiLoss,
+  getPfiPrices,
+  addPfiPrice,
+  voidPfiPrice,
   getPfiLocations,
   setPfiLocations,
   getPfiTrucks,

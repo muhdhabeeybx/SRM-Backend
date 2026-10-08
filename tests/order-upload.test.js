@@ -168,6 +168,34 @@ describe("orders uploaded from a list", () => {
     assert.equal(placed.length, 3);
   });
 
+  test("a row can name the account instead of a phone, and a new customer keeps its own company", async () => {
+    const THIRD = `0805${tail}`;
+    const list = [
+      { date: "2026-10-05", name: "MANSUR", company: "FZE 727 DI", customerId: String(existing.id), product: "PMS", qty: "5000", rate: "1390" },
+      { date: "2026-10-05", name: "MUKTARI", company: "FZE 600 DB", phone: THIRD, customerCompany: "", product: "PMS", qty: "5000", rate: "1380" },
+      { date: "2026-10-05", name: "Nobody", company: "X", customerId: "99999999", product: "PMS", qty: "5000", rate: "1380" },
+    ];
+    const p = await upload.plan({ pfiId: pfi.id, rows: list });
+    assert.equal(p.rows[0].customer.id, existing.id);
+    assert.match(p.rows[2].problems.join(), /not found/);
+
+    const out = await upload.apply({ pfiId: pfi.id, rows: list, staffId: staff.id });
+    const [named, fresh] = out.results;
+    assert.equal(named.outcome, "placed");
+    assert.equal(fresh.outcome, "placed");
+    const [o1] = await db.select().from(orders).where(eq(orders.id, named.orderId));
+    assert.equal(o1.customerId, existing.id);
+    assert.equal(o1.companyName, "FZE 727 DI", "the row's company is the order's");
+    const [o2] = await db.select().from(orders).where(eq(orders.id, fresh.orderId));
+    const [muktari] = await db.select().from(customers).where(eq(customers.id, o2.customerId));
+    assert.equal(muktari.name, "MUKTARI");
+    assert.equal(muktari.companyName, "", "not opened with a truck plate for a company");
+    await db.delete(orderPfiAllocations).where(inArray(orderPfiAllocations.orderId, [o1.id, o2.id]));
+    await db.delete(orders).where(inArray(orders.id, [o1.id, o2.id]));
+    await db.delete(customers).where(eq(customers.id, muktari.id));
+    await db.update(pfis).set({ soldQtyLitres: 85000 }).where(eq(pfis.id, pfi.id));
+  });
+
   test("a PFI that is not trading is refused before anything is read", async () => {
     await db.update(pfis).set({ status: "finished" }).where(eq(pfis.id, pfi.id));
     try {

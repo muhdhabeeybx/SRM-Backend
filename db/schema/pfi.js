@@ -223,6 +223,33 @@ const pfiOperationalLosses = pgTable(
 );
 
 /**
+ * One review of a PFI's price per unit, with the price it replaced. The latest
+ * live entry's price is pfis.unitPrice; voided rather than deleted, like a
+ * surplus. See migration 0074.
+ */
+const pfiPriceReviews = pgTable(
+  "pfi_price_reviews",
+  {
+    id: serial("id").primaryKey(),
+    pfiId: integer("pfi_id").notNull().references(() => pfis.id, { onDelete: "cascade" }),
+    price: decimal("price", { precision: 15, scale: 2 }).notNull(),
+    previousPrice: decimal("previous_price", { precision: 15, scale: 2 }).default("0").notNull(),
+    effectiveOn: date("effective_on").notNull(),
+    note: text("note").default("").notNull(),
+    recordedBy: integer("recorded_by").references(() => staff.id, { onDelete: "set null" }),
+    recordedByName: varchar("recorded_by_name", { length: 255 }).default("").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
+    voidedBy: integer("voided_by").references(() => staff.id, { onDelete: "set null" }),
+    voidedByName: varchar("voided_by_name", { length: 255 }).default("").notNull(),
+    voidReason: text("void_reason").default("").notNull(),
+  },
+  (table) => [
+    check("pfi_price_reviews_price_check", sql`${table.price} > 0`),
+  ]
+);
+
+/**
  * The narrative of a PFI — what happened, what went wrong, what was decided —
  * printed in its report beside the figures it explains. `occurredOn` is when
  * the thing happened, not when it was written. Withdrawn by marking it
@@ -250,4 +277,4 @@ const pfiNotes = pgTable(
   ]
 );
 
-module.exports = { pfis, pfiEvacuationSurpluses, pfiOperationalLosses, pfiNotes };
+module.exports = { pfis, pfiEvacuationSurpluses, pfiOperationalLosses, pfiPriceReviews, pfiNotes };

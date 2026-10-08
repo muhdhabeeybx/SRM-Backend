@@ -29,6 +29,9 @@ const {
   getPfiLosses,
   addPfiLoss,
   voidPfiLoss,
+  getPfiPrices,
+  addPfiPrice,
+  voidPfiPrice,
   getPfiFile,
   getPfiRegister,
   listPfiNotes,
@@ -141,6 +144,23 @@ router.post(
   verifyStaff,
   validate({ params: misc.pfiLossParam, body: misc.voidPfiLoss }),
   voidPfiLoss
+);
+
+// Price reviews — the price per unit changed after the PFI was raised. The
+// new price drives every cost figure; the earlier ones stay on record. See
+// migration 0074.
+router.get("/:id/prices", verifyStaff, validate({ params: misc.idParam }), getPfiPrices);
+router.post(
+  "/:id/prices",
+  verifyStaff,
+  validate({ params: misc.idParam, body: misc.recordPfiPrice }),
+  addPfiPrice
+);
+router.post(
+  "/:id/prices/:entryId/void",
+  verifyStaff,
+  validate({ params: misc.pfiPriceParam, body: misc.voidPfiPrice }),
+  voidPfiPrice
 );
 
 // The PFI file: everything about one PFI, for its page and its report.

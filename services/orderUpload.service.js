@@ -3,7 +3,10 @@
  * entered after the fact to wait for their payment.
  *
  * One list, one PFI. Each row is a date, the customer's name, company and
- * phone, the product, the quantity and the rate. Every order is placed the
+ * phone, the product, the quantity and the rate. A row may name the customer
+ * account outright (`customerId`) instead of a phone — for a list that carries
+ * no phone numbers — and `customerCompany` is the company a NEW customer is
+ * opened with when the row's company is something else (a truck plate, say). Every order is placed the
  * only way an order is ever made — placeOrder — on that PFI at that rate, so
  * the stock comes off it and the order is in every report like any other. It
  * is then dated to the day the row gives.
@@ -102,8 +105,10 @@ async function plan({ pfiId, rows }) {
     const name = String(r.name ?? "").trim();
     if (!name) problems.push("no name");
     const company = String(r.company ?? "").trim();
-    const phone = toE164(String(r.phone ?? "").trim());
-    if (!phone) problems.push(`phone "${r.phone ?? ""}" is not a phone number`);
+    const customerCompany = r.customerCompany != null ? String(r.customerCompany).trim() : company;
+    const namedId = String(r.customerId ?? "").trim();
+    const phone = namedId ? null : toE164(String(r.phone ?? "").trim());
+    if (!namedId && !phone) problems.push(`phone "${r.phone ?? ""}" is not a phone number`);
 
     if (productKind(r.product) !== pfiKind) {
       problems.push(`product "${r.product ?? ""}" is not ${pfi.productName} — ${pfi.pfiNumber} sells only that`);
@@ -116,11 +121,16 @@ async function plan({ pfiId, rows }) {
     if (!["pickup", "delivery"].includes(deliveryType)) problems.push(`delivery type "${r.deliveryType}" must be pickup or delivery`);
 
     let customer = null;
-    if (phone) {
+    if (namedId) {
+      const named = /^\d+$/.test(namedId) ? await customerRepo.findById(Number(namedId)) : null;
+      if (!named) problems.push(`customer #${namedId} not found`);
+      else if (named.houseAccount) problems.push(`customer #${namedId} is the company's own account`);
+      else customer = { id: named.id, name: named.name, companyName: named.companyName || "", existing: true };
+    } else if (phone) {
       const found = await customerRepo.findByAnyPhone(phone);
       customer = found
         ? { id: found.customer.id, name: found.customer.name, companyName: found.customer.companyName || "", existing: true }
-        : { id: null, name, companyName: company, existing: false };
+        : { id: null, name, companyName: customerCompany, existing: false };
     }
 
     const key = orderKey(batch, i + 1);
@@ -155,7 +165,7 @@ async function plan({ pfiId, rows }) {
       toPlace: good.length,
       already: planned.filter((p) => p.already).length,
       refused: planned.filter((p) => p.problems.length).length,
-      newCustomers: new Set(good.filter((p) => !p.customer.existing).map((p) => p.phone)).size,
+      newCustomers: new Set(good.filter((p) => !p.customer?.existing).map((p) => p.phone)).size,
       quantity: good.reduce((s, p) => s + p.qty, 0),
       value: good.reduce((s, p) => s + p.value, 0),
     },
@@ -201,7 +211,7 @@ async function apply({ pfiId, rows, staffId }) {
             name: p.name,
             email: "",
             phone: p.phone,
-            companyName: p.company,
+            companyName: p.customer.companyName,
             address: "",
             status: "Active",
             balance: "0",

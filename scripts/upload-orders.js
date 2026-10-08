@@ -9,6 +9,8 @@
  *
  * Columns (a header row, any order, case ignored):
  *   date, name, company, phone, product, qty, rate   and optionally delivery (pickup|delivery, default pickup)
+ *   "customer id" may stand in for phone, to put a row on an existing account; "customer company" is
+ *   the company a NEW customer is opened with when the company column holds something else.
  *
  * The orders stay Pending and never lapse (lib/uploadedOrders.js), are dated
  * to each row's day, and no customer is sent anything — every message channel
@@ -67,6 +69,8 @@ const HEADERS = {
   qty: ["qty", "quantity", "litres", "liters", "volume"],
   rate: ["rate", "price", "unit price"],
   deliveryType: ["delivery", "delivery type", "type"],
+  customerId: ["customer id", "customerid", "account"],
+  customerCompany: ["customer company"],
 };
 
 function rowsFrom(file) {
@@ -77,7 +81,9 @@ function rowsFrom(file) {
     const key = Object.keys(HEADERS).find((k) => HEADERS[k].includes(h.trim().toLowerCase()));
     if (key) at[key] = i;
   });
-  const missing = ["date", "name", "company", "phone", "product", "qty", "rate"].filter((k) => at[k] == null);
+  // A phone column, or a customer id column: one of them names the customer.
+  const missing = ["date", "name", "company", "product", "qty", "rate"].filter((k) => at[k] == null);
+  if (at.phone == null && at.customerId == null) missing.push("phone (or customer id)");
   if (missing.length) throw new Error(`the header row has no column for: ${missing.join(", ")}`);
   return body.map((cells) => Object.fromEntries(Object.entries(at).map(([k, i]) => [k, (cells[i] ?? "").trim()])));
 }

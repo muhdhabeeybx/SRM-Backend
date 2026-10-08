@@ -959,6 +959,20 @@ const voidPfiLoss = z.object({
 });
 
 /**
+ * A price review: the new price, the day it applies from, and why — required,
+ * because the file keeps it beside the price it replaced. See migration 0074.
+ */
+const pfiPriceParam = z.object({ id: id("PFI"), entryId: id("Price review") });
+const recordPfiPrice = z.object({
+  price: money("Price", { min: 0.01 }),
+  effectiveOn: optCalendarDay("Effective date").refine((v) => v != null, "Give the date the new price applies from"),
+  note: requiredString("Reason", 1000),
+});
+const voidPfiPrice = z.object({
+  reason: requiredString("Reason", 1000),
+});
+
+/**
  * A note on a PFI's file. The words are required; the kind defaults to a plain
  * note and the day to today. See migration 0058.
  */
@@ -1032,6 +1046,9 @@ module.exports = {
   pfiLossParam,
   recordPfiLoss,
   voidPfiLoss,
+  pfiPriceParam,
+  recordPfiPrice,
+  voidPfiPrice,
   recordPfiSurplus,
   voidPfiSurplus,
   pfiNoteParam,
