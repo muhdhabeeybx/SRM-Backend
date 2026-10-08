@@ -119,6 +119,7 @@ describe("LPG plant deliveries", () => {
     assert.equal(hired.driver_name, "Sani Hired");
     assert.equal(hired.date_allocated, "2026-07-10", "no loading day: the delivery day");
     assert.equal(hired.quantity_loaded, null, "not recorded is not assumed equal");
+    assert.ok(!String(fleet.created_by).includes("@"), `recorded under a name, not an email: ${fleet.created_by}`);
   });
 
   test("the same file again records nothing, and says so", async (t) => {

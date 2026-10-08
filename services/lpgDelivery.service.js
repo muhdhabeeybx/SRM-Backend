@@ -152,6 +152,10 @@ const dupKey = (r) => `${plate(r.truckNumber)}|${r.dateDelivered}|${Number(r.kgR
  * Check, and unless it is a preview, record. Returns every row with what
  * became of it: "new" (recorded), "already recorded", or its problems.
  */
+/** The signed-in person's name as the ledger writes it ("First Surname"), else their email — verifyStaff carries it as `name`. */
+const actorName = (user) =>
+  user ? user.name || [user.firstName, user.surname].filter(Boolean).join(" ") || user.email || "" : "";
+
 async function record({ plantId, rows, dryRun = false, user }) {
   const plant = await loadPlant(plantId, user);
   if (!Array.isArray(rows) || rows.length === 0) throw httpError(400, "No deliveries to record");
@@ -193,7 +197,7 @@ async function record({ plantId, rows, dryRun = false, user }) {
     return { plant: { id: Number(plant.id), name: plant.name }, results, summary, recorded: 0, costsAllowed };
   }
 
-  const actor = user ? [user.firstName, user.surname].filter(Boolean).join(" ") || user.email || "" : "";
+  const actor = actorName(user);
   await client.begin(async (tx) => {
     for (const { row } of fresh) {
       await tx`
@@ -277,7 +281,7 @@ async function update({ id, patch, user }) {
     costsAllowed,
   });
   if (problems.length) throw httpError(400, problems.join(". "));
-  const actor = user ? [user.firstName, user.surname].filter(Boolean).join(" ") || user.email || "" : "";
+  const actor = actorName(user);
   const costChanged = costsAllowed && patch.costPerKg !== undefined;
   const [saved] = await client`
     UPDATE delivery_inventory SET
