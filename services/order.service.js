@@ -18,6 +18,15 @@ const {
 const { isWithinScope } = require("../lib/scopeFilter");
 const { sellableQty } = require("../lib/pfiStock");
 const { isAllocationOrder } = require("../lib/allocationOrders");
+const { isUploadedOrder } = require("../lib/uploadedOrders");
+
+/**
+ * Orders the end-of-day lapse never touches: a truck allocation's (its litres
+ * are the trucking PFI's whole stock) and one uploaded by staff (an order the
+ * business already took, often back-dated). See lib/allocationOrders.js and
+ * lib/uploadedOrders.js.
+ */
+const neverLapses = (order) => isAllocationOrder(order) || isUploadedOrder(order);
 const walletService = require("./wallet.service");
 // Order payments are the money path (see db/migrations/0021). walletService
 // survives above only for the legacy holds that historical orders still carry
@@ -205,10 +214,9 @@ function releasableQuantity(order) {
 function isOrderExpired(order, now = Date.now()) {
   return (
     !orderExpiryDisabled() &&
-    // A truck allocation's order waits for its payment however long it takes:
-    // lapsing it would hand its litres back to the cargo while the trucking
-    // PFI still holds them. See lib/allocationOrders.js.
-    !isAllocationOrder(order) &&
+    // A truck allocation's order, or one uploaded by staff, waits for its
+    // payment however long it takes. See neverLapses.
+    !neverLapses(order) &&
     order.status === "Pending" &&
     // Only a wholly unfunded order may lapse. Tested as "is Unpaid" rather
     // than "is not Paid" because a Part Paid order HAS been funded — money is
@@ -229,7 +237,7 @@ function isOrderExpired(order, now = Date.now()) {
  */
 function computeExpiresAt(order) {
   if (orderExpiryDisabled()) return null;
-  if (isAllocationOrder(order)) return null;
+  if (neverLapses(order)) return null;
   // Part Paid counts as funded here, same as Paid: money is held against the
   // order, so there is no countdown left to show.
   if (order.status !== "Pending" || order.paymentStatus !== "Unpaid") return null;
@@ -1531,6 +1539,9 @@ async function expireOrder(orderId, { tx } = {}) {
     const before = await orderRepo.lockById(orderId, tx);
     if (isAllocationOrder(before)) {
       throw httpError(409, `${before.orderNumber} is a truck allocation's order and does not lapse`);
+    }
+    if (isUploadedOrder(before)) {
+      throw httpError(409, `${before.orderNumber} was uploaded by staff and does not lapse`);
     }
 
     const order = await orderStatus.transition(orderId, "Expired", {
