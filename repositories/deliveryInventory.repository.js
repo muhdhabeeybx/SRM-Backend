@@ -103,13 +103,15 @@ const findAll = async ({
   };
 };
 
-const create = async (data) => {
-  const [row] = await db.insert(deliveryInventory).values(data).returning();
+// `tx` so a write can share a transaction with what it changes elsewhere —
+// an allocation's order, see services/allocationTrucks.service.js.
+const create = async (data, tx = db) => {
+  const [row] = await tx.insert(deliveryInventory).values(data).returning();
   return withCosts(row);
 };
 
-const update = async (id, data) => {
-  const [row] = await db
+const update = async (id, data, tx = db) => {
+  const [row] = await tx
     .update(deliveryInventory)
     .set({ ...data, updatedAt: new Date() })
     .where(eq(deliveryInventory.id, id))
@@ -117,8 +119,8 @@ const update = async (id, data) => {
   return withCosts(row) || null;
 };
 
-const deleteById = async (id) => {
-  const [row] = await db
+const deleteById = async (id, tx = db) => {
+  const [row] = await tx
     .delete(deliveryInventory)
     .where(eq(deliveryInventory.id, id))
     .returning();

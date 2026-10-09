@@ -24,6 +24,7 @@ const { scopedPfiIds } = require("../../lib/pfiBankScope");
 const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../lib/pfiAssignmentContext");
 const smsService = require("../../services/sms.service");
 const stepNotices = require("../../services/stepNotices.service");
+const { allocationPfis } = require("../../services/allocationTrucks.service");
 const { localDateStr } = require("../../lib/zonedDay");
 
 function httpErr(status, message) {
@@ -505,6 +506,26 @@ const updatePfi = asyncHandler(async (req, res) => {
       success: false,
       message: "This PFI's price has been reviewed. Change it with Review price, so the earlier prices stay on its file.",
     });
+  }
+
+  /**
+   * A trucking PFI an allocation made holds what its trucks hold. Its quantity
+   * and truck count follow the trucks, and so do its order on the parent cargo
+   * and that cargo's stock (services/allocationTrucks.service.js). A figure
+   * typed here would move none of those, so only an actual change is refused
+   * — the form sends both on every save.
+   */
+  if (pfi.parentPfiId != null) {
+    const typedQty = updateData.startingQtyLitres !== undefined
+      && Math.round(Number(updateData.startingQtyLitres)) !== Math.round(Number(pfi.startingQtyLitres));
+    const typedTrucks = updateData.ticketCount !== undefined
+      && Number(updateData.ticketCount ?? 0) !== Number(pfi.ticketCount ?? 0);
+    if ((typedQty || typedTrucks) && (await allocationPfis([pfi.id])).length) {
+      return res.status(409).json({
+        success: false,
+        message: `${pfi.pfiNumber}'s quantity and trucks come from its trucks. Add, change or remove trucks on the batch, and its order on the parent PFI follows.`,
+      });
+    }
   }
 
   const updated = await pfiRepo.update(pfi.id, updateData);

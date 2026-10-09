@@ -3,6 +3,9 @@ const stepNotices = require("../../services/stepNotices.service");
 const { deliveryInventoryRepo, pfiRepo, truckRepo } = require("../../repositories");
 const { lagosToday, localDateStr } = require("../../lib/zonedDay");
 const { pfiIdForCode, codeOf } = require("../../lib/batchPfi");
+const allocationTrucks = require("../../services/allocationTrucks.service");
+
+const staffActor = (req) => ({ type: "staff", staffId: req.user?.id ?? null });
 
 /**
  * Trip costs are stripped for anybody who cannot open Delivery Costing.
@@ -74,7 +77,8 @@ const createDeliveryInventory = asyncHandler(async (req, res) => {
   const allocation_code = req.body.allocation_code || req.body.allocationCode;
   // Allocate Trucks sends the batch code and no PFI. Without the PFI the truck
   // is hidden from everybody assigned to it — lib/batchPfi.
-  const pfi = req.body.pfi || req.body.pfiId || (await pfiIdForCode(allocation_code));
+  const codePfi = await pfiIdForCode(allocation_code);
+  const pfi = req.body.pfi || req.body.pfiId || codePfi;
   const truck = req.body.truck || req.body.truckId;
   const truck_number = req.body.truck_number || req.body.truckNumber;
   const depot = req.body.depot;
@@ -99,7 +103,7 @@ const createDeliveryInventory = asyncHandler(async (req, res) => {
     truckObj = await truckRepo.findById(truck);
   }
 
-  const inventoryRecord = await deliveryInventoryRepo.create({
+  const values = {
     pfiId: pfi ? (Number(pfi) || pfi) : null,
     pfiNumber: pfiObj ? pfiObj.pfiNumber : (req.body.pfi_number || req.body.pfiNumber || ""),
     pfiProduct: pfiObj ? (pfiObj.productName || pfiObj.productId) : (req.body.pfi_product || req.body.pfiProduct || ""),
@@ -116,8 +120,18 @@ const createDeliveryInventory = asyncHandler(async (req, res) => {
     loadingStatus: loading_status,
     location: location || "",
     notes: notes || "",
-    createdBy: req.user ? `${req.user.firstName} ${req.user.surname}` : "System",
-  });
+    // req.user carries `name`, not firstName/surname — reading those wrote
+    // "undefined undefined" on every truck added this way.
+    createdBy: req.user ? (req.user.name || req.user.email || "Staff") : "System",
+  };
+
+  // A truck added to a trucking PFI that an allocation made also goes onto
+  // that allocation's order, and off the cargo it came from — in the same
+  // transaction, so a cargo without the litres refuses the truck.
+  const inventoryRecord = await allocationTrucks.writeInStep(
+    { pfiIds: [pfi, codePfi], actor: staffActor(req), adding: true },
+    (tx) => deliveryInventoryRepo.create(values, tx),
+  );
 
   // The driver hears he is loaded, the truck sales desk that he is ready to
   // sell. Never throws.
@@ -195,7 +209,33 @@ const updateDeliveryInventory = asyncHandler(async (req, res) => {
     }
   }
 
-  const updated = await deliveryInventoryRepo.update(record.id, data);
+  /*
+   * A change to what the batch holds — a truck's litres, the truck itself, or
+   * which batch it is on — is kept in step with an allocation's order. Other
+   * edits (customer, rate, notes, release) never were part of the order and
+   * run as they always did.
+   */
+  const litres = (v) => Math.round(Number(v) || 0);
+  const qtyAfter = data.quantityAllocated !== undefined ? litres(data.quantityAllocated) : litres(record.quantityAllocated);
+  const qtyChanged = qtyAfter !== litres(record.quantityAllocated);
+  const moved =
+    (data.pfiId !== undefined && Number(data.pfiId) !== Number(record.pfiId)) ||
+    (data.allocationCode !== undefined && codeOf(data.allocationCode) !== codeOf(record.allocationCode));
+  const truckChanged =
+    (data.truckId !== undefined && Number(data.truckId) !== Number(record.truckId)) ||
+    (data.truckNumber !== undefined && codeOf(data.truckNumber) !== codeOf(record.truckNumber));
+
+  const write = (tx) => deliveryInventoryRepo.update(record.id, data, tx);
+  const updated = qtyChanged || moved || truckChanged
+    ? await allocationTrucks.writeInStep(
+      {
+        pfiIds: [record.pfiId, data.pfiId, await pfiIdForCode(record.allocationCode), await pfiIdForCode(nextCode)],
+        actor: staffActor(req),
+        adding: moved || qtyAfter > litres(record.quantityAllocated),
+      },
+      write,
+    )
+    : await write();
 
   res.json({
     success: true,
@@ -205,7 +245,16 @@ const updateDeliveryInventory = asyncHandler(async (req, res) => {
 });
 
 const deleteDeliveryInventory = asyncHandler(async (req, res) => {
-  const record = await deliveryInventoryRepo.deleteById(req.params.id);
+  const existing = await deliveryInventoryRepo.findById(req.params.id);
+  if (!existing) {
+    return res.status(404).json({ success: false, message: "Inventory record not found" });
+  }
+  // Taking a truck off an allocation's trucking PFI takes its pending load off
+  // the order and gives the litres back to the cargo — refused once ticketed.
+  const record = await allocationTrucks.writeInStep(
+    { pfiIds: [existing.pfiId, await pfiIdForCode(existing.allocationCode)], actor: staffActor(req) },
+    (tx) => deliveryInventoryRepo.deleteById(existing.id, tx),
+  );
   if (!record) {
     return res.status(404).json({ success: false, message: "Inventory record not found" });
   }
