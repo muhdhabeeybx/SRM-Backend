@@ -887,6 +887,11 @@ const bankStatementRepo = {
    * for as many as twenty-six PFIs and the account alone does not say which
    * cargo a credit answers to. Omitted, nothing is filtered — every other
    * caller of this search is unchanged.
+   *
+   * `limit: "all"` returns every unmatched credit on the account. It is what
+   * the payment pickers ask for: capped at the newest 50, a busy account such
+   * as the stations one showed under a week of credits, and a station's
+   * payment from before that could not be picked at all.
    */
   async searchUnmatched({ bankAccountId, q, limit = 50, notBefore = null }) {
     const term = String(q || "").trim();
@@ -894,6 +899,7 @@ const bankStatementRepo = {
     const numeric = term.replace(/,/g, "");
     const amount = numeric !== "" && !Number.isNaN(Number(numeric)) ? Number(numeric) : null;
     const like = term ? `%${term}%` : null;
+    const cap = limit === "all" ? null : Math.min(Number(limit) || 50, 200);
 
     return client`
       SELECT * FROM bank_statement_lines
@@ -907,8 +913,8 @@ const bankStatementRepo = {
           OR narration ILIKE ${like}::text
           OR (${amount}::numeric IS NOT NULL AND amount = ${amount}::numeric)
         )
-      ORDER BY txn_date DESC
-      LIMIT ${Math.min(Number(limit) || 50, 200)}
+      ORDER BY txn_date DESC, id DESC
+      ${cap == null ? client`` : client`LIMIT ${cap}`}
     `;
   },
 

@@ -370,7 +370,9 @@ async function deleteStatement(req, res) {
 /**
  * The credits an order's payment may be matched to.
  *
- * GET /api/bank-statements/lines?bankAccountId=&q=&orderId=&includeEarlier=
+ * GET /api/bank-statements/lines?bankAccountId=&q=&limit=&orderId=&includeEarlier=
+ *
+ * `limit=all` returns every unmatched credit; omitted, the newest 50.
  *
  * With an `orderId`, the search is narrowed to that order's PFI collections
  * window: credits dated before the day the cargo started taking money are
