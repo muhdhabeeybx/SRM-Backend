@@ -18,6 +18,13 @@ const staff = pgTable(
     otherNames: varchar("other_names", { length: 200 }).default(""),
     email: varchar("email", { length: 255 }).notNull(),
     phoneNumber: varchar("phone_number", { length: 30 }),
+    // A second number and address, and which of the two each kind of message
+    // goes to: 'main', 'alternate' or 'both' (migration 0076; see
+    // notifications/recipients.js staffContact).
+    altPhoneNumber: varchar("alt_phone_number", { length: 30 }),
+    altEmail: varchar("alt_email", { length: 255 }),
+    smsTo: varchar("sms_to", { length: 10 }).default("both").notNull(),
+    emailTo: varchar("email_to", { length: 10 }).default("both").notNull(),
     password: text("password"),
     isPasswordSet: boolean("is_password_set").default(false).notNull(),
     passwordResetToken: text("password_reset_token"),

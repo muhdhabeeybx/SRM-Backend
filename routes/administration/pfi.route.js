@@ -1,4 +1,5 @@
 const express = require("express");
+const gantryTicketController = require("../../controllers/administration/gantryTicket.controller");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
 const { enforceRole } = verifyStaff;
@@ -56,6 +57,9 @@ router.post("/assign-orders", verifyStaff, assignOrdersToPfi);
 // What the full PFI report needs beyond the list — banks, people, activity,
 // notes — for every PFI in the caller's scope. Also before "/:id".
 router.get("/register", verifyStaff, getPfiRegister);
+
+// The stock desk: orders on gantry PFIs sold ticket by ticket. Before "/:id".
+router.get("/gantry-ticket-desk", verifyStaff, gantryTicketController.getDesk);
 
 // Trucks allocated off a cargo (migration 0063). Before "/:id", which would
 // otherwise take "allocations" for an id.
@@ -171,6 +175,18 @@ router.post(
   validate({ params: misc.idParam, body: misc.raisePfiAllocation }),
   raiseAllocation,
 );
+// Gantry tickets — a gantry PFI's paper tickets by number, entered before it
+// trades. Writes are for the PFI's stock officer or an admin (checked in
+// services/gantryTickets.service.js). See migration 0075.
+router.get("/:id/gantry-tickets", verifyStaff, validate({ params: misc.idParam }), gantryTicketController.getPfiTickets);
+router.post("/:id/gantry-tickets", verifyStaff, validate({ params: misc.idParam }), gantryTicketController.addPfiTickets);
+router.post(
+  "/:id/gantry-tickets/:ticketId/void",
+  verifyStaff,
+  validate({ params: misc.gantryTicketParam }),
+  gantryTicketController.voidPfiTicket
+);
+
 router.get("/:id/file", verifyStaff, validate({ params: misc.idParam }), getPfiFile);
 
 // Notes on the file — what happened, what went wrong, what was decided. See

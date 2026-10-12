@@ -35,7 +35,10 @@
  *
  * Add to an order that is over — Completed, Cancelled, Expired. Its trucks
  * have all left the depot; more trucks off that cargo are a new allocation.
- * Other edits on such a batch are left alone, as they always were.
+ * A Completed order's batch can still be put back to what the order lifted —
+ * a truck removed by mistake goes back on (BWR835XB off PFI-47C, 12 Oct
+ * 2026) — but never past it. Other edits on such a batch are left alone, as
+ * they always were.
  *
  * Touch a station's allocation. It has no trucks and no desk, and its order
  * completed on the day it was approved.
@@ -161,9 +164,15 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
 
   if (!OPEN.has(order.status)) {
     if (!adding) return null;
+    // Putting back what the order lifted moves nothing on the order or the
+    // cargo: those litres left the depot under it already.
+    if (order.status === "Completed" && total <= Number(order.quantity)) return null;
     throw httpError(
       409,
-      `${sub.pfiNumber}'s order ${order.orderNumber} is ${order.status.toLowerCase()} — its trucks have all left. ` +
+      `${sub.pfiNumber}'s order ${order.orderNumber} is ${order.status.toLowerCase()} — its trucks have all left` +
+        (order.status === "Completed"
+          ? `, and these would take ${sub.pfiNumber} past the ${fmt(order.quantity)} it lifted. `
+          : ". ") +
         `Raise a new allocation for more trucks.`,
     );
   }

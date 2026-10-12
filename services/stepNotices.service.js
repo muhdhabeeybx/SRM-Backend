@@ -3,6 +3,7 @@ const { db } = require("../config/db");
 const { notify } = require("../notifications");
 const { officersFor, DESK_ROLES } = require("../notifications/deskOfficers");
 const { generateOrderReference } = require("../utils/helpers");
+const gantryRegister = require("../lib/gantryTicketRegister");
 
 /**
  * The texts that follow an order, and a truck sale, from move to move.
@@ -29,7 +30,9 @@ const { generateOrderReference } = require("../utils/helpers");
  *
  * Gantry and delivery PFIs have no ticketing or gate desks — their orders go
  * straight from payment to Completed (order.service completeDesklessOrder) —
- * so they are told nothing about tickets or gates.
+ * so they are told nothing about tickets or gates. The exception is a gantry
+ * PFI on a ticket register (from 12 Oct 2026): a released order there waits
+ * for the stock officer to pick its gantry tickets, and they are told.
  *
  * EVERY function is fire-and-forget and never throws. The move has already
  * happened; a failed text must not turn it into an error, and a caller must not
@@ -139,6 +142,9 @@ const orderArrived = (orderId, status, { reason } = {}) =>
 
     if (status === "Released" && hasDesks(ctx)) {
       await toDesk("desk.order_to_ticket", ctx, DESK_ROLES.tickets);
+    }
+    if (status === "Released" && ctx.pfiType === "gantry" && (await gantryRegister.isOn(ctx.pfiId))) {
+      await toDesk("desk.order_to_stock", ctx, DESK_ROLES.stock);
     }
     if (status === "Completed" && hasDesks(ctx)) {
       const [{ n = 0 } = {}] = rowsOf(

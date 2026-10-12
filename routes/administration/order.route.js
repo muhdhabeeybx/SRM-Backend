@@ -1,4 +1,5 @@
 const express = require("express");
+const gantryTicketController = require("../../controllers/administration/gantryTicket.controller");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
 const { authenticateStaff, requireRole, enforceRole } = verifyStaff;
@@ -255,6 +256,12 @@ router.post(
 );
 // Folding orders at the same unit price into one. The overview and preview
 // write nothing; the merge moves every payment row, so it is finance-gated.
+// Gantry tickets: the tickets a paid order on a gantry PFI is sold on. Issuing
+// them completes the order; changing them needs a reason. Writes are for the
+// PFI's stock officer or an admin (services/gantryTickets.service.js).
+router.get("/:id/gantry-tickets", verifyStaff, validate({ params: orderSchemas.idParam }), gantryTicketController.getOrderTickets);
+router.post("/:id/gantry-tickets", verifyStaff, validate({ params: orderSchemas.idParam }), gantryTicketController.issueOrderTickets);
+router.put("/:id/gantry-tickets", verifyStaff, validate({ params: orderSchemas.idParam }), gantryTicketController.changeOrderTickets);
 router.get("/:id/merges", verifyStaff, validate({ params: orderSchemas.idParam }), getOrderMerges);
 router.post(
   "/:id/merge/preview",

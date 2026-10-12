@@ -1,6 +1,6 @@
 const { client } = require("../db");
 const audit = require("./audit.service");
-const { sendSMSWithFallback } = require("./sms.service");
+const { textStaff } = require("./staffText.service");
 const { ROLE_ORDER, ROLE_LABELS } = require("../notifications/templates/roleFields");
 
 /**
@@ -81,7 +81,7 @@ const outstandingReports = async (dateStr) => {
        WHERE report_date = ${dateStr}
        ORDER BY created_at ASC`,
     client`
-      SELECT id, first_name, surname, phone_number, roles
+      SELECT id, first_name, surname, COALESCE(NULLIF(phone_number, ''), alt_phone_number) AS phone_number, roles
         FROM staff
        WHERE is_active = true AND suspended = false`,
     client`
@@ -283,11 +283,16 @@ const sendReminders = async ({ date, targets, note, dryRun = false }, { actor } 
       const m = queue.shift();
       let ok = false;
       let error = null;
-      if (!m.phone) {
+      // To every number they chose, alternate included — so a person with
+      // only an alternate number is still reached.
+      if (!m.phone && !m.staffId) {
         error = "No phone number on their staff record";
       } else {
         try {
-          const res = await sendSMSWithFallback(m.phone, m.text);
+          const res = await textStaff({
+            staffId: m.staffId, phone: m.phone, name: m.name, text: m.text,
+            type: "staff.report_reminder", title: "Please enter your report",
+          });
           ok = Boolean(res?.success);
           if (!ok) error = res?.message || "SMS not accepted";
         } catch (err) {

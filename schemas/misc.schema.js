@@ -195,12 +195,30 @@ const listInventory = pagination.extend({
  * `PATCH /api/admin/:id` carries no `requireRole("super_admin")`, letting any
  * `admin` promote themselves. That is authorization, and it stays open.
  */
+/**
+ * A second number and address, and where texts and emails go: the main one,
+ * the alternate, or both (migration 0076). Plain optionals — an absent field
+ * leaves the stored value alone, "" clears it.
+ */
+const contactChoice = (label) =>
+  z.enum(["main", "alternate", "both"], { error: `${label} must be main, alternate or both` }).optional();
+const altContactFields = {
+  alt_phone_number: z.string({ error: typeError("Alternate phone number", "text") }).trim()
+    .max(30, "Alternate phone number must be 30 characters or fewer").optional(),
+  alt_email: z.string({ error: typeError("Alternate email", "text") }).trim()
+    .max(255, "Alternate email must be 255 characters or fewer")
+    .email("Alternate email must be a valid email address").optional().or(z.literal("")),
+  sms_to: contactChoice("Texts go to"),
+  email_to: contactChoice("Emails go to"),
+};
+
 const staffBase = {
   first_name: optionalString("First name", 100),
   surname: optionalString("Surname", 100),
   other_names: optionalString("Other names", 200),
   email: optionalEmail(),
   phone_number: optionalString("Phone number", 30),
+  ...altContactFields,
   roles: z
     .array(
       numberLike("Role").pipe(
@@ -269,6 +287,7 @@ const updateMyProfile = z.object({
   surname: requiredString("Surname", 100).optional(),
   other_names: selfText("Other names", 200),
   phone_number: selfText("Phone number", 30),
+  ...altContactFields,
   profile_picture_url: selfText("Profile picture URL", 1000),
   profile_picture_public_id: selfText("Profile picture id", 255),
 });
@@ -963,6 +982,7 @@ const voidPfiLoss = z.object({
  * because the file keeps it beside the price it replaced. See migration 0074.
  */
 const pfiPriceParam = z.object({ id: id("PFI"), entryId: id("Price review") });
+const gantryTicketParam = z.object({ id: id("PFI"), ticketId: id("Ticket") });
 const recordPfiPrice = z.object({
   price: money("Price", { min: 0.01 }),
   effectiveOn: optCalendarDay("Effective date").refine((v) => v != null, "Give the date the new price applies from"),
@@ -1047,6 +1067,7 @@ module.exports = {
   recordPfiLoss,
   voidPfiLoss,
   pfiPriceParam,
+  gantryTicketParam,
   recordPfiPrice,
   voidPfiPrice,
   recordPfiSurplus,

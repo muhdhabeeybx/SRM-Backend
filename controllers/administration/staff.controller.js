@@ -11,6 +11,20 @@ const auditLogRepo = require("../../repositories/auditLog.repository");
 
 const REALM = "staff";
 
+/**
+ * The alternate number and address, and where texts and emails go, from a
+ * request body — only the fields it carries, so a save that leaves them out
+ * changes nothing. "" clears an alternate.
+ */
+const altContactUpdate = (body) => {
+  const out = {};
+  if (body.alt_phone_number !== undefined) out.altPhoneNumber = String(body.alt_phone_number || "").trim() || null;
+  if (body.alt_email !== undefined) out.altEmail = String(body.alt_email || "").trim().toLowerCase() || null;
+  if (body.sms_to !== undefined) out.smsTo = body.sms_to;
+  if (body.email_to !== undefined) out.emailTo = body.email_to;
+  return out;
+};
+
 const toIdList = (list) => (Array.isArray(list) ? list.map((v) => Number(v)).filter(Number.isFinite) : []);
 
 const generateResetToken = () => {
@@ -58,6 +72,7 @@ const createAdmin = asyncHandler(async (req, res) => {
     otherNames: (other_names || "").trim(),
     email: normalizedEmail,
     phoneNumber: phone_number || null,
+    ...altContactUpdate(req.body),
     roles: backendRoles,
     suspended: suspended || false,
     canViewAllLocations: can_view_all_locations ?? true,
@@ -281,6 +296,7 @@ const updateAdmin = asyncHandler(async (req, res) => {
     updateData.email = normalizedEmail;
   }
   if (phone_number !== undefined) updateData.phoneNumber = phone_number || null;
+  Object.assign(updateData, altContactUpdate(req.body));
   if (roles && roles.length > 0) updateData.roles = mapRolesToBackend(roles);
   if (suspended !== undefined) updateData.suspended = suspended;
   if (can_view_all_locations !== undefined) updateData.canViewAllLocations = can_view_all_locations;
@@ -323,7 +339,8 @@ const updateAdmin = asyncHandler(async (req, res) => {
 /**
  * PATCH /staff/me — a person editing their own profile.
  *
- * Name, other names, phone and profile picture only. Email is deliberately
+ * Name, other names, phone, alternate phone and email, and profile picture
+ * only. The login email is deliberately
  * not here: it is the login identity and the address a password reset is
  * sent to, so letting an account rewrite it is an account-takeover primitive.
  * Roles, suspension and scope are likewise absent — those belong to
@@ -347,6 +364,9 @@ const updateMyProfile = asyncHandler(async (req, res) => {
   }
   if (other_names !== undefined) updateData.otherNames = String(other_names || "").trim();
   if (phone_number !== undefined) updateData.phoneNumber = phone_number || null;
+  // Their own alternate number and address. Password mail never goes to the
+  // alternate (notifications/engine.js), so this cannot redirect a reset.
+  Object.assign(updateData, altContactUpdate(req.body));
   if (profile_picture_url !== undefined) updateData.profilePictureUrl = profile_picture_url || null;
   if (profile_picture_public_id !== undefined) updateData.profilePicturePublicId = profile_picture_public_id || null;
 
@@ -366,6 +386,10 @@ const updateMyProfile = asyncHandler(async (req, res) => {
       surname: updated.surname,
       otherNames: updated.otherNames,
       phoneNumber: updated.phoneNumber,
+      altPhoneNumber: updated.altPhoneNumber,
+      altEmail: updated.altEmail,
+      smsTo: updated.smsTo,
+      emailTo: updated.emailTo,
       roles: updated.roles,
       profilePicture: {
         url: updated.profilePictureUrl,

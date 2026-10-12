@@ -154,7 +154,7 @@ const CHOICES = [
     personal: true,
   },
   {
-    // Every two hours, one text listing everything waiting on the person —
+    // At 8:00 and 20:00, one text listing everything waiting on the person —
     // see services/workReminders.service.js for who owes what.
     key: "work_reminders",
     label: "Reminders of waiting work",
@@ -171,9 +171,17 @@ const CHOICES = [
     description:
       "A text when an order or truck on their PFI reaches their desk: an order to confirm, tickets to write, trucks at the gate, truck payments to confirm.",
     types: [
-      "desk.order_to_confirm", "desk.order_to_ticket", "desk.trucks_to_admit", "desk.trucks_on_yard",
+      "desk.order_to_confirm", "desk.order_to_ticket", "desk.order_to_stock", "desk.trucks_to_admit", "desk.trucks_on_yard",
       "desk.order_completed", "desk.order_cancelled", "desk.trucks_to_sell", "desk.truck_payment",
     ],
+    personal: true,
+  },
+  {
+    // A colleague wrote to them in Messages — services/staffMessages.service.js.
+    key: "direct_messages",
+    label: "New messages from colleagues",
+    description: "A text when someone sends them a message on the dashboard; one per conversation until they read it.",
+    types: ["staff.direct_message"],
     personal: true,
   },
   {

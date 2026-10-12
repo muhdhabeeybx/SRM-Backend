@@ -19,7 +19,8 @@ const { CATALOG } = require("../notifications/catalog");
  *   Finance         orders on their PFIs still waiting for payment confirmation
  *   Ticketing       orders on their PFIs paid for but not ticketed yet
  *   Exit gate       trucks on their PFIs ticketed but not gated out yet
- *     — every two hours in the working day (WORK_REMINDER_HOURS, 8–20),
+ *     — every twelve hours, at 8:00 and 20:00 (WORK_REMINDER_HOURS; every two
+ *       hours 8–20 until the owner asked for twelve on 12 Oct 2026),
  *       once the work has waited WORK_REMINDER_AFTER_HOURS (2)
  *
  *   Daily report    "please enter your report", at 20:00 and 22:00
@@ -77,7 +78,7 @@ const hoursFrom = (value, fallback) => {
 
 /** The settings, read at call time so a test or an env change takes effect. */
 const settings = () => {
-  const deskHours = hoursFrom(process.env.WORK_REMINDER_HOURS, "8,10,12,14,16,18,20");
+  const deskHours = hoursFrom(process.env.WORK_REMINDER_HOURS, "8,20");
   const reportHours = hoursFrom(process.env.WORK_REMINDER_REPORT_HOURS, "20,22");
   const noOrdersHour = num(process.env.WORK_REMINDER_NO_ORDERS_HOUR, 18);
   return {
@@ -151,7 +152,7 @@ const pfiKey = (v) => String(v || "").trim().toUpperCase().replace(/\s+/g, " ");
  */
 const loadDirectory = async () => {
   const people = await client`
-    SELECT id, first_name, surname, phone_number, roles
+    SELECT id, first_name, surname, COALESCE(NULLIF(phone_number, ''), alt_phone_number) AS phone_number, roles
       FROM staff
      WHERE is_active = true AND suspended = false
   `;

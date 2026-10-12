@@ -67,6 +67,10 @@ const ROLE_MAP = {
   // already referenced there and in expenseNotifications.service.js; this is
   // the id that makes it assignable.
   44: "expenditure_officer",
+
+  // Picks the gantry tickets a paid order is sold on, which completes it, and
+  // keeps the PFI's ticket list — services/gantryTickets.service.js.
+  45: "stock_officer",
 };
 
 const mapRolesToBackend = (numericRoles) => {

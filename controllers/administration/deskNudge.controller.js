@@ -9,7 +9,7 @@ const deskAssignments = require("../../services/deskAssignments.service");
  * POST /desk-nudges/notify     send the in-app nudge now
  * POST /desk-nudges/sms        text the desk — deliberate, admin-only
  *
- * The two-hourly work reminders (workReminders.service) chase each person on
+ * The twice-daily work reminders (workReminders.service) chase each person on
  * their own. These exist for an admin looking at one desk's queue who wants to
  * chase the whole desk now, without waiting for the next round.
  */

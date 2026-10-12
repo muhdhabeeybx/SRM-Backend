@@ -8,6 +8,7 @@ const smsChannel = require("./channels/sms");
 const notificationPreferenceRepo = require("../repositories/notificationPreference.repository");
 const notificationDeliveryRepo = require("../repositories/notificationDelivery.repository");
 const { principalKey } = require("../utils/principal");
+const { smsCopyEmail } = require("./templates/email");
 
 /**
  * The notification engine.
@@ -210,8 +211,27 @@ const staffEmailPaused = (entry, principal) =>
   !STAFF_EMAIL_ALWAYS.has(entry.category) &&
   !staffEmailEnabled();
 
+/**
+ * Every text to a member of staff, copied to their email.
+ *
+ * Off until STAFF_SMS_EMAIL_ENABLED=true, for the reason staff email as a
+ * whole is paused above: the email plan's daily allowance. Texts to staff run
+ * to hundreds a day, so switching this on before the plan is raised would
+ * spend the allowance by mid-morning and stop customers' emails with it.
+ *
+ * The copy goes wherever a text was asked for — even when the text itself is
+ * then held back (no number on file, quiet hours) — because the point is that
+ * the person hears. It is still subject to the person's own email settings.
+ */
+const staffSmsEmailEnabled = () => process.env.STAFF_SMS_EMAIL_ENABLED === "true";
+
+const copiesSmsToEmail = (requested, principal) =>
+  principal?.type === "staff" && staffSmsEmailEnabled() && requested.includes("sms");
+
 const gateChannels = ({ entry, rendered, principal, contact, prefs, settings, override, force }) => {
-  const requested = override?.length ? override : entry.channels || [];
+  const asked = override?.length ? override : entry.channels || [];
+  const smsCopy = copiesSmsToEmail(asked, principal);
+  const requested = smsCopy && !asked.includes("email") ? [...asked, "email"] : asked;
   const allowed = [];
   const suppressed = [];
 
@@ -232,7 +252,7 @@ const gateChannels = ({ entry, rendered, principal, contact, prefs, settings, ov
     }
     // Recorded, not silently dropped: "why did I stop getting these?" has to
     // be answerable from the delivery log.
-    if (channel === "email" && staffEmailPaused(entry, principal)) {
+    if (channel === "email" && !smsCopy && staffEmailPaused(entry, principal)) {
       suppressed.push({ channel, reason: "Staff email paused (STAFF_EMAIL_ENABLED)" });
       continue;
     }
@@ -282,7 +302,16 @@ const gateChannels = ({ entry, rendered, principal, contact, prefs, settings, ov
 // ─── Delivery to one recipient ──────────────────────────────────────────────
 
 const deliverToRecipient = async ({ type, entry, data, recipient, override, force, campaignId }) => {
-  const { principal, contact } = recipient;
+  const { principal } = recipient;
+  // Password setup and reset links go to the login address alone, never an
+  // alternate. An alternate can be set from a signed-in browser, and a reset
+  // link reaching an address added that way would turn a borrowed session into
+  // the account itself.
+  const contact =
+    entry.mandatory && recipient.contact?.mainEmail
+      ? { ...recipient.contact, email: recipient.contact.mainEmail, emails: [recipient.contact.mainEmail] }
+      : recipient.contact;
+  recipient = { ...recipient, contact };
   const rendered = render(type, entry, data, recipient);
 
   // Stamped onto every delivery row this recipient produces. `recipientName`
@@ -312,6 +341,12 @@ const deliverToRecipient = async ({ type, entry, data, recipient, override, forc
     override,
     force,
   });
+
+  // Most staff notices were written for the bell and the phone and have no
+  // email. When one is emailed (the SMS copy above), it goes as its text.
+  if (allowed.includes("email") && !rendered.email && principal?.type === "staff" && rendered.sms) {
+    rendered.email = smsCopyEmail({ title: rendered.title, text: rendered.sms, url: rendered.actionUrl });
+  }
 
   // The inbox row comes first: it is the anchor every delivery row points at,
   // and its dedupe key is what makes the whole fan-out idempotent.
@@ -518,6 +553,7 @@ module.exports = {
   render,
   gateChannels,
   staffEmailPaused,
+  copiesSmsToEmail,
   inQuietHours,
   minutesInZone,
   defaultSmsText,

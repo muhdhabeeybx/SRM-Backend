@@ -26,6 +26,7 @@ const smsService = require("../../services/sms.service");
 const stepNotices = require("../../services/stepNotices.service");
 const { allocationPfis } = require("../../services/allocationTrucks.service");
 const { localDateStr } = require("../../lib/zonedDay");
+const gantryRegister = require("../../lib/gantryTicketRegister");
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status });
@@ -323,6 +324,16 @@ const createPfi = asyncHandler(async (req, res) => {
   });
 
   /**
+   * A gantry PFI raised from 12 Oct 2026 is sold ticket by ticket: its tickets
+   * are entered before it trades, and each paid order is completed by a stock
+   * officer picking its tickets (services/gantryTickets.service.js). Before
+   * migration 0075 there is nowhere to record that, and it trades as before.
+   */
+  if (pfi.pfiType === "gantry") {
+    await gantryRegister.start(pfi.id, req.user?.id ?? null);
+  }
+
+  /**
    * Tell the review desk. Deliberately not awaited for its result.
    *
    * The PFI is already written. An SMS gateway being down, or
@@ -528,7 +539,29 @@ const updatePfi = asyncHandler(async (req, res) => {
     }
   }
 
+  /**
+   * The ticket register follows the type, but only before the PFI trades: a
+   * gantry PFI already selling keeps completing on payment, and one with
+   * tickets on it cannot stop being gantry while they are there.
+   */
+  const onRegister = await gantryRegister.isOn(pfi.id);
+  if (onRegister && pfiType !== "gantry") {
+    const { live } = await gantryRegister.ticketCount(pfi.id);
+    if (live > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `${pfi.pfiNumber} has ${live} gantry ticket${live === 1 ? "" : "s"} on it. Take them off before changing its type.`,
+      });
+    }
+  }
+
   const updated = await pfiRepo.update(pfi.id, updateData);
+
+  if (onRegister && pfiType !== "gantry") {
+    await gantryRegister.stop(pfi.id);
+  } else if (!onRegister && pfiType === "gantry" && pfi.pfiType !== "gantry" && pfi.status === "not_started") {
+    await gantryRegister.start(pfi.id, req.user?.id ?? null);
+  }
 
   // The category is named after the PFI, so a renumbered PFI renames it. It is
   // also created here if missing, which covers rows predating the table.
@@ -630,6 +663,15 @@ const activatePfi = asyncHandler(async (req, res) => {
   if (!auditOfficer) throw httpErr(400, "Assign an audit officer before activating this PFI");
   if (!financeOfficer) {
     throw httpErr(400, "Assign a finance officer before activating this PFI");
+  }
+
+  // A gantry PFI sold ticket by ticket sells only what its tickets hold, so
+  // it has nothing to sell until they are entered.
+  if (await gantryRegister.isOn(pfi.id)) {
+    const { left } = await gantryRegister.ticketCount(pfi.id);
+    if (left <= 0) {
+      throw httpErr(409, `Enter ${pfi.pfiNumber}'s ticket numbers on its file before activating it.`);
+    }
   }
 
   const updated = await pfiRepo.activate({

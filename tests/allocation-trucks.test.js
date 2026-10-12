@@ -271,10 +271,35 @@ describe("an allocation's trucking PFI — its trucks carry through to its order
       allocationCode: CODE, truckId: trucks[3].id, quantityAllocated: 20000,
     });
     assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.match(res.body.message, /past the 78,000 it lifted/);
     assert.match(res.body.message, /Raise a new allocation/);
 
     const [bRow] = (await inventory()).filter((r) => r.truckId === trucks[1].id);
     const ok = await as(admin).patch(`/api/delivery-inventory/${bRow.id}`, { customerName: "Walk-in" });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  });
+
+  test("a truck removed by mistake goes back on, up to what the order lifted", async () => {
+    // As BWR835XB off PFI-47C: the order is over, the truck is taken off...
+    const [bRow] = (await inventory()).filter((r) => r.truckId === trucks[1].id);
+    const removed = await as(admin).del(`/api/delivery-inventory/${bRow.id}`);
+    assert.equal(removed.status, 200, JSON.stringify(removed.body));
+
+    // ...and put back. The order lifted 78,000, and the batch is back to it.
+    const back = await as(admin).post("/api/delivery-inventory", {
+      allocationCode: CODE, truckId: trucks[1].id, quantityAllocated: 33000,
+    });
+    assert.equal(back.status, 201, JSON.stringify(back.body));
+    const { o, p, s } = await state();
+    assert.equal(o.quantity, 78000, "the order lifted these litres already");
+    assert.equal(p.soldQtyLitres, 78000, "nothing more leaves the cargo");
+    assert.equal(s.startingQtyLitres, 78000);
+    assert.equal((await inventory()).length, 2);
+
+    // One litre more is not putting back.
+    const over = await as(admin).post("/api/delivery-inventory", {
+      allocationCode: CODE, truckId: trucks[2].id, quantityAllocated: 1,
+    });
+    assert.equal(over.status, 409, JSON.stringify(over.body));
   });
 });

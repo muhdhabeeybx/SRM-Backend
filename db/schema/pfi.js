@@ -277,4 +277,49 @@ const pfiNotes = pgTable(
   ]
 );
 
-module.exports = { pfis, pfiEvacuationSurpluses, pfiOperationalLosses, pfiPriceReviews, pfiNotes };
+/**
+ * A gantry PFI sold ticket by ticket — tickets entered before it trades, each
+ * paid order completed by a stock officer picking its tickets. Written when a
+ * gantry PFI is raised (from 12 Oct 2026). See migration 0075 and
+ * services/gantryTickets.service.js.
+ */
+const gantryTicketRegisters = pgTable("gantry_ticket_registers", {
+  pfiId: integer("pfi_id").primaryKey().references(() => pfis.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  createdBy: integer("created_by").references(() => staff.id, { onDelete: "set null" }),
+});
+
+/**
+ * One paper ticket of a gantry PFI, with its litres. `orderId` is the order it
+ * was sold on (the column references orders; left plain here so this file need
+ * not load the order schema). Voided, never deleted. See migration 0075.
+ */
+const gantryTickets = pgTable(
+  "gantry_tickets",
+  {
+    id: serial("id").primaryKey(),
+    pfiId: integer("pfi_id").notNull().references(() => pfis.id, { onDelete: "cascade" }),
+    ticketNumber: varchar("ticket_number", { length: 100 }).notNull(),
+    qtyLitres: integer("qty_litres").notNull(),
+    orderId: integer("order_id"),
+    issuedAt: timestamp("issued_at", { withTimezone: true }),
+    issuedBy: integer("issued_by").references(() => staff.id, { onDelete: "set null" }),
+    issuedByName: varchar("issued_by_name", { length: 255 }).default("").notNull(),
+    enteredBy: integer("entered_by").references(() => staff.id, { onDelete: "set null" }),
+    enteredByName: varchar("entered_by_name", { length: 255 }).default("").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
+    voidedBy: integer("voided_by").references(() => staff.id, { onDelete: "set null" }),
+    voidedByName: varchar("voided_by_name", { length: 255 }).default("").notNull(),
+    voidReason: text("void_reason").default("").notNull(),
+  },
+  (table) => [
+    check("gantry_tickets_qty_litres_check", sql`${table.qtyLitres} > 0`),
+    check("gantry_tickets_sold_not_voided", sql`${table.orderId} IS NULL OR ${table.voidedAt} IS NULL`),
+  ]
+);
+
+module.exports = {
+  pfis, pfiEvacuationSurpluses, pfiOperationalLosses, pfiPriceReviews, pfiNotes,
+  gantryTicketRegisters, gantryTickets,
+};

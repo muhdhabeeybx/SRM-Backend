@@ -110,7 +110,7 @@ const start = async () => {
   // ── Reminders of waiting work ─────────────────────────────────────────────
   //
   // The owner's rules of 6 Oct 2026 (services/workReminders.service.js): work
-  // reminders every two hours 8–20, daily reports at 20 and 22, no orders at
+  // reminders at 8 and 20, daily reports at 20 and 22, no orders at
   // 18 — to the people assigned, and nobody else. ON unless
   // WORK_REMINDERS_ENABLED=false; while switched off nothing is scheduled.
   //

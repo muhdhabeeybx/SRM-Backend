@@ -744,6 +744,14 @@ function deskSteps() {
         "Please write its truck tickets.",
     }),
 
+    "desk.order_to_stock": staffStep({
+      title: (d) => `${ref(d)} paid — pick its gantry tickets`,
+      body: (d) => `${who(d)}: ${load(d)}${at(d)}. Paid, waiting for its gantry tickets.`,
+      sms: (d) =>
+        `${P()}${ref(d)} for ${who(d)} is paid: ${load(d)}${at(d)}${pfi(d)}. ` +
+        "Please pick its gantry tickets.",
+    }),
+
     "desk.trucks_to_admit": staffStep({
       title: (d) => `${trucks(d.truckCount)} ticketed on ${ref(d)}`,
       body: (d) => `${plateList(d.plates)} for ${who(d)}${at(d)}. Expect them at the gate.`,
@@ -1748,7 +1756,7 @@ const CATALOG = {
   },
 
   /**
-   * The work waiting on one person, every two hours until it is done — the
+   * The work waiting on one person, at 8:00 and 20:00 until it is done — the
    * owner's rules of 6 Oct 2026 (services/workReminders.service.js decides
    * who; reminderSentences above says it). One per person per round: the
    * round ("2026-10-06 10:00") is the dedupe key, so a retried job or "Send
@@ -1769,6 +1777,30 @@ const CATALOG = {
     data: () => ({ screen: "Home" }),
     actionUrl: (d) => adminLink(d.path || "/"),
     dedupe: (d) => (d.round ? `staff.work_reminder:${d.round}` : null),
+  },
+
+  /**
+   * Somebody wrote to them in Messages (services/staffMessages.service.js).
+   *
+   * Says who, never what: this text, its email copy and the bell row are all
+   * readable on the Messaging page's ledger, and a message is only ever for
+   * the two people in it. One goes per conversation until they read it.
+   *
+   * data: messageId, senderId, senderName, firstName (the recipient's)
+   */
+  "staff.direct_message": {
+    audience: "staff",
+    category: "operations",
+    priority: "normal",
+    channels: APP_AND_SMS,
+    title: (d) => `New message from ${d.senderName || "a colleague"}`,
+    body: (d) => `${d.senderName || "A colleague"} sent you a message. Open Messages to read it.`,
+    sms: (d) =>
+      hello(d, `${d.senderName || "a colleague"} sent you a message on the Soroman dashboard. Open Messages to read it.`),
+    entity: (d) => ({ type: "staff_message", id: String(d.messageId || "") }),
+    data: (d) => ({ screen: "Messages", senderId: d.senderId }),
+    actionUrl: (d) => adminLink(`/messages?with=${d.senderId}`),
+    dedupe: (d) => (d.messageId ? `staff.direct_message:${d.messageId}` : null),
   },
 
   /**

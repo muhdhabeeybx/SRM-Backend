@@ -26,6 +26,7 @@ const READ_ONLY_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const API_PERMISSIONS = {
   "/api/dashboard": { read: null },
   "/api/notifications": { read: null },
+  "/api/staff-messages": { read: null },
   "/api/uploads": { read: null },
   "/api/orders": { read: null },
   "/api/order-refunds": { read: null },

@@ -2,6 +2,7 @@ const { eq, and, inArray, arrayOverlaps } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { staff, customers } = require("../db/schema");
 const { toPrincipal } = require("../utils/principal");
+const { normalizedKey } = require("../utils/phone");
 
 /**
  * Turning a caller's idea of "who should hear this" into concrete recipients.
@@ -34,14 +35,55 @@ const customerContact = (row) => ({
   status: row.status,
 });
 
-/** Staff have no single `name` column — the display name is built here. */
-const staffContact = (row) => ({
-  name: [clean(row.firstName), clean(row.surname)].filter(Boolean).join(" ") || clean(row.email),
-  email: clean(row.email),
-  phone: clean(row.phoneNumber),
-  roles: row.roles || [],
-  isActive: row.isActive,
-});
+/**
+ * Which of a person's two numbers (or two addresses) a message goes to, by
+ * their choice on Manage Users: 'main', 'alternate' or 'both'.
+ *
+ * A choice that names a contact they do not have falls back to the other one,
+ * so somebody set to "alternate" with no alternate on file still hears, and
+ * somebody whose only number is the alternate is not cut off. The same contact
+ * entered twice is sent to once.
+ */
+const pickContacts = (choice, main, alt, sameKey = (v) => v.toLowerCase()) => {
+  const m = clean(main);
+  const a = clean(alt);
+  let list;
+  if (choice === "main") list = [m || a];
+  else if (choice === "alternate") list = [a || m];
+  else list = [m, a];
+  const seen = new Set();
+  return list.filter((v) => {
+    if (!v) return false;
+    const key = sameKey(v);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+/**
+ * Staff have no single `name` column — the display name is built here.
+ *
+ * `phones` and `emails` are every destination the person chose; `phone` and
+ * `email` stay as the first of each, for the gates and logs that only need to
+ * know whether there is one.
+ */
+const staffContact = (row) => {
+  const phones = pickContacts(row.smsTo, row.phoneNumber, row.altPhoneNumber, (v) => normalizedKey(v) || v);
+  const emails = pickContacts(row.emailTo, row.email, row.altEmail);
+  return {
+    name: [clean(row.firstName), clean(row.surname)].filter(Boolean).join(" ") || clean(row.email),
+    email: emails[0] || "",
+    phone: phones[0] || "",
+    emails,
+    phones,
+    // The login address. Password setup and reset mail goes here only — see
+    // engine.deliverToRecipient.
+    mainEmail: clean(row.email),
+    roles: row.roles || [],
+    isActive: row.isActive,
+  };
+};
 
 // ─── Lookups ────────────────────────────────────────────────────────────────
 
@@ -187,4 +229,4 @@ const resolve = async (specs) => {
   return unique;
 };
 
-module.exports = { resolve, customerContact, staffContact, loadStaffByRoles, loadAllActiveStaff };
+module.exports = { resolve, customerContact, staffContact, pickContacts, loadStaffByRoles, loadAllActiveStaff };

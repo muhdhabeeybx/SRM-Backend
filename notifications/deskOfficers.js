@@ -73,6 +73,8 @@ const DESK_ROLES = Object.freeze({
   gateIn: ["security_entry"],
   gateOut: ["security_exit"],
   truckSales: ["truck_sales"],
+  // Picks the gantry tickets a paid order is sold on (gantry PFIs on a ticket register).
+  stock: ["stock_officer"],
 });
 
 module.exports = { officersFor, DESK_ROLES };

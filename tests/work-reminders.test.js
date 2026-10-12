@@ -186,7 +186,7 @@ describe("Work reminders", () => {
   });
 
   test("finance is told of late payments on its own PFI, named, and nothing else", async () => {
-    const messages = await round(todayAt(10));
+    const messages = await round(todayAt(8));
     const [m] = of(messages, financeOnA, "desk");
     assert.ok(m, "finance on A is reminded");
     // The one-hour-old order is not late yet.
@@ -194,23 +194,23 @@ describe("Work reminders", () => {
   });
 
   test("nobody assigned, nobody told: not another PFI's finance, not unassigned finance, not the admins", async () => {
-    const messages = await round(todayAt(10));
+    const messages = await round(todayAt(8));
     assert.equal(of(messages, financeOnB, "desk").length, 0, "finance on B has nothing on B");
     assert.equal(of(messages, financeNowhere).length, 0, "finance on no PFI gets nothing");
     // C's late payment has no finance officer, so it reaches no one at all.
-    const everyone = await workReminders.buildRound(todayAt(10), { trigger: "schedule" });
+    const everyone = await workReminders.buildRound(todayAt(8), { trigger: "schedule" });
     assert.equal(everyone.messages.filter((m) => m.text.includes(LABEL.C)).length, 0);
   });
 
   test("admins hear only of expenses waiting for their final approval", async () => {
-    const messages = await round(todayAt(10));
+    const messages = await round(todayAt(8));
     const [m] = of(messages, admin, "desk");
     assert.ok(m, "the admin is reminded");
     assert.match(m.text, /^Hello \S+, \d+ expense requests? (is|are) waiting for your final approval\.$/);
   });
 
   test("each expense stage reaches whoever's turn it is, and only them", async () => {
-    const messages = await round(todayAt(10));
+    const messages = await round(todayAt(8));
     const text = (id) => of(messages, id, "desk")[0]?.text || "";
     assert.match(text(officer), /^Hello \S+, \d+ expense requests? (is|are) waiting for you to verify\. \d+ approved expense requests? (is|are) waiting for you to pay\.$/);
     assert.match(text(cfo), /^Hello \S+, \d+ expense requests? (is|are) waiting for your CFO approval\.$/);
@@ -224,13 +224,13 @@ describe("Work reminders", () => {
   });
 
   test("ticketing hears of paid orders not ticketed on its PFI", async () => {
-    const messages = await round(todayAt(10));
+    const messages = await round(todayAt(8));
     const [m] = of(messages, ticketingOnA, "desk");
     assert.equal(m.text, `Hello ${m.person.firstName}, 1 paid order on ${LABEL.A} is not ticketed yet. Please write its ticket.`);
   });
 
   test("the exit gate hears of ticketed trucks not gated out; the entrance gate has no work reminders", async () => {
-    const messages = await round(todayAt(10));
+    const messages = await round(todayAt(8));
     const [m] = of(messages, exitOnA, "desk");
     assert.equal(m.text, `Hello ${m.person.firstName}, 1 ticketed truck on ${LABEL.A} has not been gated out yet. Please record its exit.`);
     assert.equal(of(messages, entryOnA, "desk").length, 0);
@@ -327,12 +327,13 @@ describe("Work reminder wording and settings", () => {
       return ["desk", "report", "noOrders"].filter((k) => d[k]).join("+");
     };
     assert.equal(due(8), "desk");
-    assert.equal(due(18), "desk+noOrders");
+    assert.equal(due(18), "noOrders");
     assert.equal(due(20), "desk+report");
     assert.equal(due(22), "report");
+    assert.equal(due(10), "");
     assert.equal(due(10, "manual"), "desk");
     assert.equal(due(21, "manual"), "desk+report+noOrders");
-    assert.equal(workReminders.cronExpression(), "0 8,10,12,14,16,18,20,22 * * *");
+    assert.equal(workReminders.cronExpression(), "0 8,18,20,22 * * *");
   });
 
   test("a person on several desks gets one text, each desk named by PFI", () => {

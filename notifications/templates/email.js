@@ -493,6 +493,24 @@ function documentEmail({ subject, subtitle = "", preheader = "", hero: heroSpec,
   return { subject, html, text };
 }
 
+/**
+ * A text message, as an email: for the staff notices that have no email of
+ * their own and are copied to the mailbox when they are texted (see
+ * STAFF_SMS_EMAIL_ENABLED in notifications/engine.js). The words are the
+ * SMS's, so the two never say different things.
+ */
+function smsCopyEmail({ title, text, url }) {
+  return documentEmail({
+    subject: title || "Soroman notice",
+    preheader: text,
+    heading: title || "",
+    blocks: [
+      { type: "text", text, last: !url },
+      url && { type: "button", url, label: "Open the dashboard" },
+    ],
+  });
+}
+
 module.exports = {
   BRAND,
   escapeHtml,
@@ -503,4 +521,5 @@ module.exports = {
   lagosDate,
   layout,
   documentEmail,
+  smsCopyEmail,
 };

@@ -140,11 +140,26 @@ const sendOnce = async ({ contact, rendered }) => {
 };
 
 /**
- * The send, and its line in the message ledger (services/messageLog.service).
- * Skipped sends went nowhere, so only sent and failed ones are written.
+ * Every address the recipient chose (a member of staff may take email at a
+ * main and an alternate address — see recipients.staffContact), else the one
+ * a contact carries.
+ */
+const emailsOf = (contact) => {
+  const list = Array.isArray(contact?.emails) && contact.emails.length ? contact.emails : [contact?.email];
+  const out = list.map((e) => String(e || "").trim()).filter(Boolean);
+  return out.length ? out : [""];
+};
+
+/**
+ * The send, one per address, and its line in the message ledger
+ * (services/messageLog.service). Skipped sends went nowhere, so only sent and
+ * failed ones are written.
  */
 const send = async (args) => {
-  const results = await sendOnce(args);
+  const results = [];
+  for (const email of emailsOf(args.contact)) {
+    results.push(...(await sendOnce({ ...args, contact: { ...args.contact, email } })));
+  }
   const { contact, rendered, principal, type } = args;
   for (const r of results) {
     if (r.status !== "sent" && r.status !== "failed") continue;
@@ -169,4 +184,4 @@ const send = async (args) => {
   return results;
 };
 
-module.exports = { send, isEnabled, looksLikeEmail };
+module.exports = { send, emailsOf, isEnabled, looksLikeEmail };

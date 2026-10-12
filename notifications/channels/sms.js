@@ -53,47 +53,60 @@ const truncate = (text) => {
 };
 
 /**
+ * Every number the recipient chose (a member of staff may take texts on a
+ * main and an alternate number — see recipients.staffContact), else the one
+ * phone a contact carries.
+ */
+const phonesOf = (contact) => {
+  const list = Array.isArray(contact?.phones) && contact.phones.length ? contact.phones : [contact?.phone];
+  return list.map((p) => String(p || "").trim()).filter(Boolean);
+};
+
+/**
+ * One result per number, so a failure on the alternate number is recorded
+ * apart from the main one going through.
+ *
  * @returns {Promise<Array<{destination, status, providerMessageId, error}>>}
  */
 const send = async ({ contact, rendered, entry, principal, type }) => {
-  const phone = String(contact?.phone || "").trim();
+  const phones = phonesOf(contact);
 
-  if (!phone) {
+  if (!phones.length) {
     return [{ destination: "", status: "skipped", error: "No phone number on file" }];
   }
 
   const text = truncate(rendered.sms);
   if (!text) {
-    return [{ destination: phone, status: "skipped", error: "No SMS template for this type" }];
+    return [{ destination: phones[0], status: "skipped", error: "No SMS template for this type" }];
   }
 
-  const result = await route(phone, text, {
-    messageClass: messageClassFor(entry),
-    // For the message ledger: what this was and who it was for. The campaign,
-    // when there is one, is joined in later from this send's delivery row.
-    tag: {
-      type,
-      audience: principal?.type === "staff" ? "staff" : principal?.type === "customer" ? "customer" : undefined,
-      staffId: principal?.type === "staff" ? principal.id : null,
-      customerId: principal?.type === "customer" ? principal.id : null,
-      recipientName: contact?.name || "",
-    },
-  });
+  const results = [];
+  for (const phone of phones) {
+    const result = await route(phone, text, {
+      messageClass: messageClassFor(entry),
+      // For the message ledger: what this was and who it was for. The campaign,
+      // when there is one, is joined in later from this send's delivery row.
+      tag: {
+        type,
+        audience: principal?.type === "staff" ? "staff" : principal?.type === "customer" ? "customer" : undefined,
+        staffId: principal?.type === "staff" ? principal.id : null,
+        customerId: principal?.type === "customer" ? principal.id : null,
+        recipientName: contact?.name || "",
+      },
+    });
 
-  if (result.success) {
-    return [
-      { destination: phone, status: "sent", providerMessageId: result.messageId || "", error: null },
-    ];
+    results.push(
+      result.success
+        ? { destination: phone, status: "sent", providerMessageId: result.messageId || "", error: null }
+        : {
+            destination: phone,
+            status: "failed",
+            providerMessageId: "",
+            error: result.message || "All Termii channels failed",
+          }
+    );
   }
-
-  return [
-    {
-      destination: phone,
-      status: "failed",
-      providerMessageId: "",
-      error: result.message || "All Termii channels failed",
-    },
-  ];
+  return results;
 };
 
-module.exports = { send, messageClassFor, MAX_LENGTH };
+module.exports = { send, phonesOf, messageClassFor, MAX_LENGTH };

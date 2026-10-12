@@ -3,7 +3,7 @@ const workReminders = require("../../services/workReminders.service");
 const { staffActor } = require("../../utils/actor");
 
 /**
- * The two-hourly reminders of waiting work.
+ * The twice-daily reminders of waiting work.
  *
  * GET  /dashboard/work-reminders        who would be reminded of what, the
  *                                       exact text, and past rounds

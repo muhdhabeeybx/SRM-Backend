@@ -40,6 +40,7 @@ const { sendOrderInvoiceEmail } = require("./email.service");
 const { sendOrderSummarySMS, sendOrderExpiredSMS } = require("./sms.service");
 const { notify } = require("../notifications");
 const { findPfiForOrder } = require("./pfi.service");
+const gantryRegister = require("../lib/gantryTicketRegister");
 const { generateTicketForOrder } = require("./ticket.service");
 const orderStatus = require("./orderStatus.service");
 const stepNotices = require("./stepNotices.service");
@@ -722,6 +723,26 @@ async function placeOrder({
       }
       await pfiRepo.markFinishedIfComplete(updatedPfi.id, tx);
       reservedPfis.push({ pfiId: updatedPfi.id, quantity: alloc.quantity });
+
+      /**
+       * A gantry PFI sold ticket by ticket sells only what its tickets hold.
+       * Checked after the reservation, whose row lock on the PFI makes two
+       * orders at once take their turn, so both cannot count the same litres.
+       */
+      if (await gantryRegister.isOn(updatedPfi.id, tx)) {
+        const { onTickets, open } = await gantryRegister.openLitres(updatedPfi.id, tx);
+        const name = alloc.pfi.pfiNumber || `PFI ${alloc.pfi.id}`;
+        if (onTickets <= 0 && open <= 0) {
+          throw httpError(409, `${name} has no tickets left to sell. Enter its ticket numbers on the PFI file before selling.`);
+        }
+        if (open < Number(alloc.quantity)) {
+          throw httpError(
+            409,
+            `${name} has ${Math.max(open, 0).toLocaleString()} L left on tickets not yet sold or spoken for, ` +
+              `not ${Number(alloc.quantity).toLocaleString()} L. Enter more tickets on the PFI file first.`,
+          );
+        }
+      }
     }
 
     const created = await orderRepo.create(
@@ -1917,6 +1938,28 @@ const DESKLESS_PFI_TYPES = ["gantry", "delivery"];
 async function completeDesklessOrder(order, { tx, actor, pfiType }) {
   if (!DESKLESS_PFI_TYPES.includes(pfiType)) return false;
 
+  /**
+   * A gantry PFI on a ticket register (from 12 Oct 2026) does have a desk:
+   * the order waits at Released until a stock officer picks the tickets it is
+   * sold on, and that completes it — services/gantryTickets.service.js.
+   */
+  if (await gantryRegister.isOn(order.pfiId, tx)) return false;
+
+  await stepToCompleted(order, {
+    tx,
+    actor,
+    note: `${pfiType} order — no loading desk, released on payment`,
+    metadata: { trigger: "payment", pfiType, deskless: true },
+  });
+  return true;
+}
+
+/**
+ * Write the order's stock movement and step it Released → Loading → Completed.
+ * Shared by the deskless shortcut above and by the stock officer issuing a
+ * gantry order's tickets.
+ */
+async function stepToCompleted(order, { tx, actor, note, metadata }) {
   const qty = Number(order.quantity) || 0;
   if (order.pfiId && qty > 0) {
     await tx
@@ -1926,7 +1969,7 @@ async function completeDesklessOrder(order, { tx, actor, pfiType }) {
         orderId: order.id,
         action: "RELEASE",
         qtyLitres: qty,
-        notes: `${pfiType} order — no loading desk, released on payment`,
+        notes: note,
         recordedBy: actor?.staffId ?? null,
       })
       // The same one-row-per-(order, RELEASE) guarantee ticket generation
@@ -1937,7 +1980,7 @@ async function completeDesklessOrder(order, { tx, actor, pfiType }) {
       });
   }
 
-  const shared = { tx, actor, metadata: { trigger: "payment", pfiType, deskless: true } };
+  const shared = { tx, actor, metadata };
   await orderStatus.transition(order.id, "Loading", {
     ...shared,
     set: { loadingStartedAt: new Date() },
@@ -1946,7 +1989,6 @@ async function completeDesklessOrder(order, { tx, actor, pfiType }) {
     ...shared,
     set: { completedAt: new Date() },
   });
-  return true;
 }
 
 async function confirmOrderPayment({
@@ -2152,6 +2194,7 @@ module.exports = {
   updatePickupTrucks,
   confirmOrderPayment,
   completeDesklessOrder,
+  stepToCompleted,
   DESKLESS_PFI_TYPES,
   releasableQuantity,
   canReleaseForLoading,

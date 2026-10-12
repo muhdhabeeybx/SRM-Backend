@@ -3,7 +3,7 @@ const { db } = require("../config/db");
 const { staff } = require("../db/schema");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
 const { notify } = require("../notifications");
-const { sendSMSWithFallback } = require("./sms.service");
+const { textStaff } = require("./staffText.service");
 
 /**
  * Tell the desks what is still sitting on them.
@@ -231,6 +231,7 @@ const deskContacts = async (deskKey) => {
       firstName: staff.firstName,
       surname: staff.surname,
       phoneNumber: staff.phoneNumber,
+      altPhoneNumber: staff.altPhoneNumber,
       email: staff.email,
       roles: staff.roles,
     })
@@ -246,10 +247,10 @@ const deskContacts = async (deskKey) => {
   return rows.map((r) => ({
     id: r.id,
     name: [r.firstName, r.surname].filter(Boolean).join(" ").trim(),
-    phone: r.phoneNumber || null,
+    phone: r.phoneNumber || r.altPhoneNumber || null,
     email: r.email || null,
     roles: r.roles || [],
-    reachable: Boolean(r.phoneNumber),
+    reachable: Boolean(r.phoneNumber || r.altPhoneNumber),
   }));
 };
 
@@ -273,7 +274,7 @@ const nudgeSms = (deskKey, payload) => {
 /**
  * Text a whole desk about its backlog, by hand.
  *
- * The automatic chasing is the two-hourly work reminders
+ * The automatic chasing is the twice-daily work reminders
  * (workReminders.service), which text each person their own share. This is
  * the admin's button for texting everyone on one desk at once, while looking
  * at its queue.
@@ -301,11 +302,13 @@ const smsDesk = async (deskKey, { dryRun = false } = {}) => {
   const failed = [];
   for (const c of reachable) {
     try {
-      const res = await sendSMSWithFallback(c.phone, text, {
-        type: `desk.nudge.${deskKey}`,
-        audience: "staff",
+      const res = await textStaff({
         staffId: c.staffId ?? c.id ?? null,
-        recipientName: c.name || "",
+        phone: c.phone,
+        name: c.name || "",
+        text,
+        type: `desk.nudge.${deskKey}`,
+        title: "Work waiting at your desk",
       });
       (res?.success ? sent : failed).push({ ...c, error: res?.success ? undefined : res?.message });
     } catch (err) {
