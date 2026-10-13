@@ -1010,7 +1010,99 @@ const findOrdersWithSurplus = async ({ limit = 100, customerId = null } = {}) =>
   return rows.rows ?? rows;
 };
 
+/**
+ * A customer's money, as their orders hold it — the customer page.
+ *
+ * That page read the wallet: customers.balance / deposit / previous_deposit
+ * and the deposits ledger. Order-first payments stopped writing to any of it
+ * on 1 Sep 2026, so the figures froze there while the bank kept paying. The
+ * live record is order_payments — every bank line matched to one of the
+ * customer's orders, every transfer and refund — so this reads that, on
+ * demand, and nothing is stored to fall behind again.
+ *
+ *   ordered    the value of their orders still standing (not cancelled or lapsed)
+ *   received   everything on their orders: bank lines, transfers, refunds and the
+ *              wallet era carried over (`legacy`)
+ *   fromBank   the part that is a matched bank statement line
+ *   toPay      what their standing orders are still short of
+ *   surplus    money beyond an order's value, and all of it on a cancelled or
+ *              lapsed order — money that is theirs to move or refund
+ *
+ * `pfiIds` confines it to those PFIs' orders, for staff confined to a PFI.
+ */
+const forCustomer = async (customerId, { pfiIds = null } = {}) => {
+  const id = Number(customerId);
+  const scope = pfiIds?.length
+    ? sql`AND o.pfi_id IN (${sql.join(pfiIds.map((n) => sql`${Number(n)}`), sql`, `)})`
+    : sql``;
+
+  const summaryRows = await db.execute(sql`
+    WITH mine AS (
+      SELECT o.id, o.status IN ('Cancelled', 'Expired') AS gone, o.total_amount::numeric AS total,
+             COALESCE(SUM(p.amount), 0) AS received,
+             COALESCE(SUM(p.amount) FILTER (WHERE p.source = 'statement'), 0) AS from_bank,
+             MAX(p.txn_date) FILTER (WHERE p.source = 'statement') AS last_bank
+        FROM orders o
+        LEFT JOIN order_payments p ON p.order_id = o.id
+       WHERE o.customer_id = ${id} ${scope}
+       GROUP BY o.id
+    )
+    SELECT
+      COUNT(*) FILTER (WHERE NOT gone)::int AS "orders",
+      COALESCE(SUM(total) FILTER (WHERE NOT gone), 0) AS "ordered",
+      COALESCE(SUM(received), 0) AS "received",
+      COALESCE(SUM(from_bank), 0) AS "fromBank",
+      COALESCE(SUM(GREATEST(total - received, 0)) FILTER (WHERE NOT gone), 0) AS "toPay",
+      COALESCE(SUM(CASE WHEN gone THEN GREATEST(received, 0) ELSE GREATEST(received - total, 0) END), 0) AS "surplus",
+      MAX(last_bank) AS "lastBankPayment"
+    FROM mine
+  `);
+  const s = (summaryRows.rows ?? summaryRows)[0] || {};
+
+  const paymentRows = await db.execute(sql`
+    SELECT
+      p.id, p.order_id AS "orderId", ${orderReferenceSql("o", "c")} AS "orderNumber", o.status AS "orderStatus",
+      p.amount, p.source, p.txn_date AS "txnDate", p.created_at AS "createdAt",
+      -- The day the money moved: the bank's day; a transfer's or refund's own;
+      -- for the wallet era carried over on 1 Sep, its deposit's day, not the
+      -- day it was carried over.
+      CASE WHEN p.source = 'legacy' THEN COALESCE(d.created_at, o.created_at)
+           ELSE COALESCE(p.txn_date, p.created_at) END AS "date",
+      p.depositor, p.narration, p.bank_ref AS "bankRef", p.bank_name AS "bankName",
+      p.account_name AS "accountName", p.account_number AS "accountNumber",
+      p.statement_line_id AS "statementLineId", p.confirmation_basis AS "confirmationBasis", p.note,
+      st.first_name AS "recorderFirstName", st.surname AS "recorderSurname",
+      CASE WHEN p.source = 'transfer_out' THEN ${orderReferenceSql("o_to", null)}
+           WHEN p.source = 'transfer_in'  THEN ${orderReferenceSql("o_from", null)} END AS "counterpartOrderNumber",
+      t.reason AS "transferReason"
+    FROM order_payments p
+    JOIN orders o ON o.id = p.order_id
+    LEFT JOIN customers c ON c.id = o.customer_id
+    LEFT JOIN staff st ON st.id = p.recorded_by
+    LEFT JOIN order_payment_transfers t ON t.id = p.transfer_id
+    LEFT JOIN orders o_to ON o_to.id = t.to_order_id
+    LEFT JOIN orders o_from ON o_from.id = t.from_order_id
+    LEFT JOIN deposits d ON d.id = p.deposit_id
+    WHERE o.customer_id = ${id} ${scope}
+    ORDER BY "date" DESC, p.id DESC
+  `);
+
+  return {
+    summary: {
+      orders: Number(s.orders || 0),
+      ordered: round2(money(s.ordered)),
+      received: round2(money(s.received)),
+      fromBank: round2(money(s.fromBank)),
+      toPay: round2(money(s.toPay)),
+      surplus: round2(money(s.surplus)),
+      lastBankPayment: s.lastBankPayment || null,
+    },
+    payments: paymentRows.rows ?? paymentRows,
+  };
+};
+
 module.exports = {
+  forCustomer,
   releasesOnPayment,
   PAYMENT_SOURCE,
   recordFromStatementLines,

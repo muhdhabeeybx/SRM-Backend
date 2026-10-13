@@ -24,6 +24,7 @@ const asyncHandler = require("express-async-handler");
 const { customerRepo, customerPhoneRepo, orderRepo, depositRepo } = require("../../repositories");
 const { toE164 } = require("../../utils/phone");
 const auditLogRepo = require("../../repositories/auditLog.repository");
+const orderPaymentService = require("../../services/orderPayment.service");
 
 const rolesOf = (req) => (Array.isArray(req.user?.roles) ? req.user.roles : []);
 const isSuper = (req) => rolesOf(req).includes("super_admin");
@@ -99,6 +100,17 @@ const getCustomerById = asyncHandler(async (req, res) => {
   }
 
   res.json({ success: true, data: { customer } });
+});
+
+/**
+ * The customer's money, live from their orders' payments — what the bank
+ * paid and which order each line went to. See orderPayment.service forCustomer.
+ * Staff confined to a PFI see that PFI's orders only.
+ */
+const getCustomerPayments = asyncHandler(async (req, res) => {
+  await assertCustomerVisible(req.user, req.params.id);
+  const data = await orderPaymentService.forCustomer(req.params.id, { pfiIds: scopedPfiIds(req.user) });
+  res.json({ success: true, data });
 });
 
 const createCustomer = asyncHandler(async (req, res) => {
@@ -351,4 +363,4 @@ const deleteCustomer = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Customer deleted successfully" });
 });
 
-module.exports = { getCustomers, getCustomerById, createCustomer, updateCustomer, deleteCustomer, getCustomerSegment };
+module.exports = { getCustomers, getCustomerById, getCustomerPayments, createCustomer, updateCustomer, deleteCustomer, getCustomerSegment };

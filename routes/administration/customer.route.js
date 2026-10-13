@@ -7,6 +7,7 @@ const customerSchemas = require("../../schemas/customer.schema");
 const {
   getCustomers,
   getCustomerById,
+  getCustomerPayments,
   createCustomer,
   updateCustomer,
   deleteCustomer,
@@ -19,6 +20,7 @@ router.get("/", verifyStaff, validate({ query: customerSchemas.listCustomers }),
 // otherwise be swallowed as an :id value.
 router.get("/segments", verifyStaff, validate({ query: customerSchemas.segmentCustomers }), getCustomerSegment);
 router.get("/:id", verifyStaff, validate({ params: customerSchemas.idParam }), getCustomerById);
+router.get("/:id/payments", verifyStaff, validate({ params: customerSchemas.idParam }), getCustomerPayments);
 router.post("/", verifyStaff, validate({ body: customerSchemas.createCustomer }), createCustomer);
 router.patch("/:id", verifyStaff, validate({ params: customerSchemas.idParam, body: customerSchemas.updateCustomer }), updateCustomer);
 // Reading, creating and editing a customer stay open to every desk — the app
