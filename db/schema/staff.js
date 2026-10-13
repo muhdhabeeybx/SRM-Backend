@@ -27,6 +27,9 @@ const staff = pgTable(
     emailTo: varchar("email_to", { length: 10 }).default("both").notNull(),
     password: text("password"),
     isPasswordSet: boolean("is_password_set").default(false).notNull(),
+    // A super admin set this password; they must choose their own at their
+    // next sign-in, and until then the API answers nothing else (0079).
+    mustChangePassword: boolean("must_change_password").default(false).notNull(),
     passwordResetToken: text("password_reset_token"),
     passwordResetExpires: timestamp("password_reset_expires", { withTimezone: true }),
     roles: text("roles").array().default(sql`ARRAY['admin']::text[]`).notNull(),

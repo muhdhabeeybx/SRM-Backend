@@ -21,6 +21,9 @@ const getAdminPayload = async (user) => {
     surname: user.surname,
     roles: user.roles,
     canViewAllLocations: user.canViewAllLocations,
+    // A password a super admin set: the dashboard shows nothing but "choose
+    // your password" until they do (and the API refuses everything else).
+    mustChangePassword: Boolean(user.mustChangePassword),
     // Whether this session is confined to its PFIs, decided here by the rule
     // the server actually enforces (lib/pfiScope.js) rather than re-derived on
     // the client. The sidebar hides what a confined person would be refused;
@@ -217,6 +220,7 @@ const handleSetPassword = asyncHandler(async (req, res) => {
   await staffRepo.update(admin.id, {
     password,
     isPasswordSet: true,
+    mustChangePassword: false,
     passwordResetToken: null,
     passwordResetExpires: null,
   });

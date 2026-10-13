@@ -12,6 +12,7 @@ const {
   resendInvite,
   getNotificationChoices,
   getPfiAssignments,
+  setStaffPassword,
 } = require("../../controllers/administration/staff.controller");
 const { requireRole, enforceRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
@@ -40,6 +41,13 @@ router.get("/:id/pfi-assignments", validate({ params: misc.idParam }), getPfiAss
 // staff.controller.js#updateAdmin.
 router.patch("/:id", validate({ params: misc.idParam, body: misc.updateStaff }), updateAdmin);
 router.delete("/:id", enforceRole({ message: "Only a super admin can delete a staff account" }), validate({ params: misc.idParam }), deleteAdmin);
+// Setting someone else's password is a super admin's act — enforced.
+router.post(
+  "/:id/password",
+  enforceRole({ message: "Only a super admin can set someone's password" }),
+  validate({ params: misc.idParam, body: misc.setStaffPassword }),
+  setStaffPassword
+);
 router.post("/:id/resend-invite", validate({ params: misc.idParam }), resendInvite);
 
 module.exports = router;

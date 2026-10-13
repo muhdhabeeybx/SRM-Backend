@@ -262,13 +262,31 @@ const staffBase = {
     .max(50, "Too many notification choices")
     .optional(),
 };
+/**
+ * A password a super admin types for somebody — on a new account, or over an
+ * existing one. Same floor as everywhere else (8), and a ceiling so bcrypt's
+ * 72-byte cut-off can never silently ignore the end of it.
+ */
+const adminSetPassword = z
+  .string({ error: typeError("Password", "text") })
+  .min(8, "A password must be at least 8 characters")
+  .max(72, "A password must be 72 characters or fewer");
+const mustChangePassword = z.boolean({ error: "must_change_password must be true or false" }).optional();
+
 const createStaff = z.object({
   ...staffBase,
+  // Optional: with one, no invitation goes out and they sign in with it.
+  password: adminSetPassword.optional(),
+  must_change_password: mustChangePassword,
   first_name: requiredString("First name", 100),
   surname: requiredString("Surname", 100),
   email: z.string().trim().min(1).max(255).email(),
 });
 const updateStaff = z.object(staffBase).partial();
+const setStaffPassword = z.object({
+  password: adminSetPassword,
+  must_change_password: mustChangePassword,
+});
 const listStaff = pagination.extend({ search: searchTerm });
 
 /**
@@ -1086,7 +1104,7 @@ module.exports = {
   listTickets, ticketIdOrCode,
   createStation, updateStation, listStations,
   createInventory, updateInventory, listInventory, bulkCostInventory,
-  createStaff, updateStaff, listStaff, updateMyProfile, changeMyPassword,
+  createStaff, updateStaff, setStaffPassword, listStaff, updateMyProfile, changeMyPassword,
   createBankAccount, updateBankAccount,
   createBankStatement, bankStatementMapping, matchBankLines,
   createVendor, updateVendor,

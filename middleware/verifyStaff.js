@@ -15,6 +15,11 @@ const { checkApiAccess } = require("../config/apiPermissions");
  * alone would leave a revoked session working until its 15-minute access token
  * expired, which defeats logout-all, suspension and reuse detection alike.
  */
+const mayUseBeforePasswordChange = (req) => {
+  const path = String(req.originalUrl || "").split("?")[0];
+  return path === "/api/admin/me/password" || path.startsWith("/api/auth/");
+};
+
 const authenticateStaff = async (req, res, next) => {
   const authHeader = req.headers.authorization || req.headers.Authorization;
 
@@ -39,6 +44,18 @@ const authenticateStaff = async (req, res, next) => {
   const active = await sessionService.loadActive("staff", claims.sid, claims.id);
   if (!active.ok) {
     return res.status(401).json({ success: false, message: "Session is no longer valid" });
+  }
+
+  // A password a super admin set is a key to choose their own with, nothing
+  // more: until they do, the only thing this session may do is that (and the
+  // auth routes — sign out, who am I). 403, not 401, so the dashboard keeps
+  // the session and shows its "choose your password" screen.
+  if (active.principal.mustChangePassword && !mayUseBeforePasswordChange(req)) {
+    return res.status(403).json({
+      success: false,
+      code: "PASSWORD_CHANGE_REQUIRED",
+      message: "Choose your own password before you continue.",
+    });
   }
 
   // Shape preserved from the previous `decoded.UserInfo` payload so the 16

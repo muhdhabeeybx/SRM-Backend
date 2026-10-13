@@ -2,7 +2,7 @@ const crypto = require("crypto");
 const asyncHandler = require("express-async-handler");
 const { staffRepo, staffScopeRepo, sessionRepo } = require("../../repositories");
 const { mapRolesToBackend } = require("../../config/roleMapping");
-const { notifyAndWait } = require("../../notifications");
+const { notify, notifyAndWait } = require("../../notifications");
 const staffChoices = require("../../notifications/staffChoices");
 const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../lib/pfiAssignmentContext");
 const pfiAssignments = require("../../services/pfiAssignments.service");
@@ -40,7 +40,7 @@ const createAdmin = asyncHandler(async (req, res) => {
   const {
     first_name, surname, other_names, email, phone_number, roles, suspended,
     can_view_all_locations, depot_ids, lpg_station_ids, pfi_ids, filling_station_ids, page_overrides,
-    notification_overrides,
+    notification_overrides, password, must_change_password,
   } = req.body;
 
   if (!first_name || !surname || !email) {
@@ -60,6 +60,10 @@ const createAdmin = asyncHandler(async (req, res) => {
     });
   }
 
+  // A password typed by the super admin, or else an emailed invitation to set
+  // one. With a password there is nothing to invite them to: they sign in with
+  // it, and by default are made to choose their own straight away.
+  const withPassword = Boolean(password);
   const { rawToken, hashedToken } = generateResetToken();
 
   const backendRoles = roles && roles.length > 0
@@ -76,9 +80,17 @@ const createAdmin = asyncHandler(async (req, res) => {
     roles: backendRoles,
     suspended: suspended || false,
     canViewAllLocations: can_view_all_locations ?? true,
-    isPasswordSet: false,
-    passwordResetToken: hashedToken,
-    passwordResetExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    ...(withPassword
+      ? {
+          password,
+          isPasswordSet: true,
+          mustChangePassword: must_change_password ?? true,
+        }
+      : {
+          isPasswordSet: false,
+          passwordResetToken: hashedToken,
+          passwordResetExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        }),
   });
 
   if (depot_ids || lpg_station_ids || pfi_ids || filling_station_ids) {
@@ -100,32 +112,107 @@ const createAdmin = asyncHandler(async (req, res) => {
   // notification_deliveries — "did the invite email actually go out?" is the
   // single most common support question about a new account, and it used to
   // be answerable only from a console line nobody kept.
-  await notifyAndWait("account.password_setup", {
-    to: { staffId: admin.id },
-    data: {
-      firstName: admin.firstName,
-      setPasswordUrl: `${process.env.CLIENT_URL}/set-password?token=${rawToken}`,
-    },
-  });
+  if (!withPassword) {
+    await notifyAndWait("account.password_setup", {
+      to: { staffId: admin.id },
+      data: {
+        firstName: admin.firstName,
+        setPasswordUrl: `${process.env.CLIENT_URL}/set-password?token=${rawToken}`,
+      },
+    });
+  }
 
   // Who opened this account, with which roles — nothing recorded it before.
   await auditLogRepo.record({
     entityType: "staff", entityId: admin.id, action: "staff.created",
     actor: { type: "staff", staffId: req.user?.id ?? null },
-    metadata: { email: admin.email, name: [admin.firstName, admin.surname].filter(Boolean).join(" "), roles: admin.roles || [] },
+    metadata: {
+      email: admin.email, name: [admin.firstName, admin.surname].filter(Boolean).join(" "), roles: admin.roles || [],
+      // How they got in — never the password itself.
+      password: withPassword ? (admin.mustChangePassword ? "temporary, set by super admin" : "set by super admin") : "invitation emailed",
+    },
     ipAddress: req.ip, userAgent: req.headers["user-agent"],
   }).catch((err) => console.error("[staff] audit of account creation failed:", err.message));
 
   res.status(201).json({
     success: true,
-    message: "User created successfully. A password setup email has been sent.",
+    message: withPassword
+      ? "User created. They can sign in with the password you set."
+      : "User created successfully. A password setup email has been sent.",
     data: {
       id: admin.id,
       email: admin.email,
       firstName: admin.firstName,
       surname: admin.surname,
       roles: admin.roles,
+      passwordSet: withPassword,
+      mustChangePassword: Boolean(admin.mustChangePassword),
     },
+  });
+});
+
+/**
+ * POST /admin/:id/password — a super admin sets somebody's password.
+ *
+ * For the person locked out, or who never took up their invitation: the super
+ * admin types a password and tells them it. By default it is temporary — they
+ * must choose their own at their next sign-in, and until then the API answers
+ * nothing else (middleware/verifyStaff.js).
+ *
+ * Every session they have is ended, as with any password change, and they get
+ * the usual "your password was changed" notice. The audit row says who did it;
+ * the password itself is never recorded.
+ *
+ * Not for your own account: that goes through My Profile, which asks for the
+ * current password.
+ */
+const setStaffPassword = asyncHandler(async (req, res) => {
+  const { password, must_change_password } = req.body;
+  const target = await staffRepo.findById(req.params.id);
+  if (!target) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+  if (Number(target.id) === Number(req.user.id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Change your own password from My Profile",
+    });
+  }
+
+  const mustChange = must_change_password ?? true;
+  await staffRepo.update(target.id, {
+    password,
+    isPasswordSet: true,
+    mustChangePassword: mustChange,
+    // An outstanding invitation or reset link would otherwise still work.
+    passwordResetToken: null,
+    passwordResetExpires: null,
+  });
+
+  await sessionService.revokeAll(REALM, target.id, "password_change");
+
+  await auditLogRepo.record({
+    entityType: "staff", entityId: target.id, action: "staff.password_set",
+    actor: { type: "staff", staffId: req.user?.id ?? null },
+    metadata: {
+      name: [target.firstName, target.surname].filter(Boolean).join(" "),
+      email: target.email,
+      temporary: mustChange,
+    },
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+  }).catch((err) => console.error("[staff] audit of password set failed:", err.message));
+
+  notify("security.credential_changed", {
+    to: { staffId: target.id },
+    data: { credential: "password", at: new Date() },
+  });
+
+  res.json({
+    success: true,
+    message: mustChange
+      ? "Password set. They will be asked to choose their own when they sign in."
+      : "Password set. They can sign in with it.",
+    data: { id: target.id, mustChangePassword: mustChange },
   });
 });
 
@@ -446,6 +533,8 @@ const changeMyPassword = asyncHandler(async (req, res) => {
   await staffRepo.update(me.id, {
     password: new_password,
     isPasswordSet: true,
+    // Their own now, so a password a super admin set stops holding them up.
+    mustChangePassword: false,
     passwordResetToken: null,
     passwordResetExpires: null,
   });
@@ -560,6 +649,7 @@ const getNotificationChoices = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  setStaffPassword,
   getPfiAssignments,
   getNotificationChoices,
   createAdmin,
