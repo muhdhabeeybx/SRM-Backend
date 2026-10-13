@@ -107,11 +107,12 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     SELECT o.pfi_id,
            COUNT(*)                                            AS orders_all,
            COALESCE(SUM(o.quantity), 0)                        AS litres_all,
-           COALESCE(SUM(o.total_amount::numeric), 0)           AS value_all,
+           -- Sales values are the product alone; delivery (0078) is not sales.
+           COALESCE(SUM(o.total_amount::numeric - o.delivery_fee::numeric), 0) AS value_all,
            COALESCE(SUM(o.amount_paid::numeric), 0)            AS paid_all,
            COUNT(*)                    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}) AS orders_today,
            COALESCE(SUM(o.quantity)    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS litres_today,
-           COALESCE(SUM(o.total_amount::numeric) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS value_today,
+           COALESCE(SUM(o.total_amount::numeric - o.delivery_fee::numeric) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS value_today,
            -- Out before payment (the manual ticket). Unpriced by quantity only:
            -- their naira figures are placeholders.
            COUNT(*)                    FILTER (WHERE o.pricing_status = 'pending') AS unpriced_orders,

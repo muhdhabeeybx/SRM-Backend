@@ -50,6 +50,7 @@ const { orderRepo, pfiRepo, orderTruckRepo, orderPfiAllocationRepo, auditLogRepo
 const allocationRepo = require("../repositories/pfiAllocation.repository");
 const orderPaymentService = require("./orderPayment.service");
 const { codeOf } = require("../lib/batchPfi");
+const { deliveryFeeFor } = require("../lib/orderDelivery");
 
 const httpError = (status, message) => Object.assign(new Error(message), { status, statusCode: status });
 
@@ -287,8 +288,11 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
   };
   change("quantity", order.quantity, total);
   change("expectedTrucks", order.expectedTrucks, rows.length);
+  // The delivery charge, if any, follows the litres at its rate (migration 0078).
+  const fee = deliveryFeeFor(order.deliveryRate, total);
+  change("deliveryFee", Number(order.deliveryFee ?? 0).toFixed(2), fee.toFixed(2));
   if (order.pricingStatus !== "pending") {
-    change("totalAmount", order.totalAmount, (Number(order.price) * total).toFixed(2));
+    change("totalAmount", order.totalAmount, (Number(order.price) * total + fee).toFixed(2));
   }
   // Wholly on credit stays wholly on credit. An allocation that was paid for
   // keeps its allowance, and its new litres wait for payment like any order's.

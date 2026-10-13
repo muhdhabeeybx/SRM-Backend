@@ -94,7 +94,7 @@ const addSheet = (wb, name, columns, rows, emptyMessage) => {
 const ordersFor = async ({ start, end }) => client`
   SELECT ${orderReferenceClient(client, 'o', 'c')} AS order_number, o.status, o.payment_status,
          c.name AS customer, c.company_name,
-         p.name AS product, o.quantity, o.total_amount,
+         p.name AS product, o.quantity, o.total_amount, o.delivery_fee,
          d.name AS depot, o.created_at
   FROM orders o
   LEFT JOIN customers c ON c.id = o.customer_id
@@ -148,6 +148,8 @@ async function buildDailyReport(date = new Date()) {
       { header: "Product", key: "product", width: 14 },
       { header: "Quantity", key: "quantity", width: 12 },
       { header: "Total Amount", key: "total_amount", width: 16 },
+      // Inside the total — the delivery charge on a delivery order (0078).
+      { header: "Delivery", key: "delivery_fee", width: 14 },
       { header: "Depot", key: "depot", width: 26 },
       { header: "Status", key: "status", width: 14 },
       { header: "Payment", key: "payment_status", width: 12 },

@@ -206,6 +206,9 @@ const FULL_ORDER_COLUMNS = {
   )`,
   price: orders.price,
   totalAmount: orders.totalAmount,
+  // The delivery charge inside totalAmount, and its rate per litre (0078).
+  deliveryRate: orders.deliveryRate,
+  deliveryFee: orders.deliveryFee,
   // What has actually been received against the order, across however many
   // instalments. Equal to totalAmount on a fully-paid order; the difference is
   // the balance still expected on a part-paid one.
@@ -451,6 +454,8 @@ const findAll = async ({
         trucksOut: sql`(SELECT COUNT(*)::int FROM order_trucks t WHERE t.order_id = ${orders.id} AND t.status = 'gated_out')`,
         price: orders.price,
         totalAmount: orders.totalAmount,
+        deliveryRate: orders.deliveryRate,
+        deliveryFee: orders.deliveryFee,
         // Without it a list reading `totalAmount - amountPaid` subtracts
         // nothing, and every paid order shows its whole value as outstanding.
         amountPaid: orders.amountPaid,
@@ -938,6 +943,12 @@ const findFinanceReport = async ({
       .select({
         total: count(),
         totalAmount: sql`COALESCE(SUM(${orders.totalAmount}), 0)`,
+        /**
+         * Delivery charged, inside totalAmount (migration 0078). A new figure
+         * beside the audited ones, not a change to them: every order before
+         * 0078 carries 0, so no existing total moves.
+         */
+        totalDelivery: sql`COALESCE(SUM(${orders.deliveryFee}), 0)`,
         totalQuantity: sql`COALESCE(SUM(${orders.quantity}), 0)`,
         // Money PAID IN at the bank's own figure — transfer legs excluded, so
         // this totals the same column the rows below it show and a
@@ -1472,6 +1483,7 @@ const findFinanceReport = async ({
     totals: {
       count: total,
       totalAmount: Number(totalsRow.totalAmount),
+      totalDelivery: Number(totalsRow.totalDelivery ?? 0),
       totalQuantity: Number(totalsRow.totalQuantity),
       /**
        * The bank statement total — what "Amount Paid" sums to, and what a
@@ -1564,6 +1576,7 @@ const findOpenByCustomer = async (customerId, limit = 9) => {
       status: orders.status,
       quantity: orders.quantity,
       totalAmount: orders.totalAmount,
+      deliveryFee: orders.deliveryFee,
       deliveryType: orders.deliveryType,
       virtualAccountBank: orders.virtualAccountBank,
       virtualAccountNumber: orders.virtualAccountNumber,
@@ -1637,6 +1650,7 @@ const findPayableOrders = async (scopeUser) => {
       paymentStatus: orders.paymentStatus,
       quantity: orders.quantity,
       totalAmount: orders.totalAmount,
+      deliveryFee: orders.deliveryFee,
       deliveryType: orders.deliveryType,
       deliveryAddress: orders.deliveryAddress,
       state: orders.state,
@@ -1771,6 +1785,7 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
            o.payment_status                          AS "paymentStatus",
            o.quantity,
            o.total_amount                            AS "totalAmount",
+           o.delivery_fee                            AS "deliveryFee",
            o.amount_paid                             AS "amountPaid",
            (o.total_amount - o.amount_paid)          AS outstanding,
            o.pricing_status                          AS "pricingStatus",

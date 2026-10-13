@@ -120,6 +120,8 @@ const sendOrderInvoiceEmail = async (email, orderData) => {
     unit,
     price,
     totalAmount,
+    deliveryFee = 0,
+    deliveryRate = 0,
     deliveryType,
     depotName,
     depotCode,
@@ -157,6 +159,10 @@ const sendOrderInvoiceEmail = async (email, orderData) => {
           { label: "Product", value: [product, sku && sku !== product ? `(${sku})` : ""].filter(Boolean).join(" ") },
           { label: "Quantity", value: quantityWithUnit(quantity, unit) },
           { label: "Unit price", value: formatMoney(price) },
+          // On a delivery order, the delivery charge inside the amount due (0078).
+          ...(Number(deliveryFee) > 0
+            ? [{ label: "Delivery", value: `${formatMoney(deliveryFee)} at ${formatMoney(deliveryRate)} per ${String(unit || "litre").replace(/s$/i, "").toLowerCase()}` }]
+            : []),
           { label: "Collection", value: collection({ deliveryType, depotName, depotCode, state }) },
         ],
         total: { label: "Amount due", value: due },

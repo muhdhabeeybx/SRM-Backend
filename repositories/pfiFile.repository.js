@@ -180,7 +180,9 @@ const activityFor = async (pfiIds) => {
              COUNT(*) FILTER (WHERE o.payment_status = 'Paid')::int AS "paidOrders",
              COUNT(*) FILTER (WHERE o.payment_status = 'Part Paid')::int AS "partPaidOrders",
              COUNT(DISTINCT o.customer_id) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid'))::int AS customers,
-             COALESCE(SUM(o.total_amount) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS "salesValue",
+             -- The product alone: delivery (migration 0078) is not the PFI's sales.
+             COALESCE(SUM(o.total_amount - o.delivery_fee) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS "salesValue",
+             COALESCE(SUM(o.delivery_fee) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS "deliveryValue",
              COALESCE(SUM(o.amount_paid) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS received,
              COALESCE(SUM(GREATEST(o.total_amount - o.amount_paid, 0))
                         FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS outstanding,

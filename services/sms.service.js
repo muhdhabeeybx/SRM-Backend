@@ -318,12 +318,15 @@ const sendPfiReviewSMS = async (phone, { pfiNumber, pfiType, locationName, produ
 };
 
 const sendOrderSummarySMS = async (phone, orderData) => {
-  const { customerName, product, quantity, unit, price, totalAmount, accountNumber, bankName, accountName } = orderData;
+  const { customerName, product, quantity, unit, price, totalAmount, deliveryFee, accountNumber, bankName, accountName } = orderData;
+  // A delivery order's charge is inside the total (migration 0078); the text
+  // says so, or the total would not be quantity times the rate it quotes.
+  const delivery = Number(deliveryFee) > 0 ? `, including ${money(deliveryFee)} for delivery,` : "";
 
   const sms =
     `${greet(customerName)}we have received your order of ${qty(quantity, unit)} of ${product}` +
     `${rateClause(price, unit)}. ` +
-    `Please pay ${money(totalAmount)} to ${payTo({
+    `Please pay ${money(totalAmount)}${delivery} to ${payTo({
       accountName: accountName || virtualAccountName(customerName),
       accountNumber,
       bankName,

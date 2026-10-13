@@ -97,7 +97,8 @@ async function getDailyRevenueTrend(dateFrom, dateTo) {
     db
       .select({
         date: sql`DATE(${orders.createdAt})`.mapWith(String),
-        total: sql`COALESCE(SUM(${orders.totalAmount}), 0)`.mapWith(Number),
+        // Sales: the product alone — a delivery charge (0078) is not.
+        total: sql`COALESCE(SUM(${orders.totalAmount} - ${orders.deliveryFee}), 0)`.mapWith(Number),
       })
       .from(orders)
       .where(
@@ -386,7 +387,7 @@ const getOverview = asyncHandler(async (req, res) => {
           id: depots.id,
           name: depots.name,
           orderCount: sql`COUNT(${orders.id})::int`.mapWith(Number),
-          revenue: sql`COALESCE(SUM(${orders.totalAmount}), 0)`.mapWith(Number),
+          revenue: sql`COALESCE(SUM(${orders.totalAmount} - ${orders.deliveryFee}), 0)`.mapWith(Number),
           volume: sql`COALESCE(SUM(${orders.quantity}), 0)::bigint`.mapWith(Number),
         })
         .from(depots)
@@ -400,7 +401,7 @@ const getOverview = asyncHandler(async (req, res) => {
           )
         )
         .groupBy(depots.id, depots.name)
-        .orderBy(desc(sql`COALESCE(SUM(${orders.totalAmount}), 0)`));
+        .orderBy(desc(sql`COALESCE(SUM(${orders.totalAmount} - ${orders.deliveryFee}), 0)`));
       return rows;
     })(),
 

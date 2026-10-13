@@ -41,7 +41,8 @@ const salesSummary = async ({ dateFrom, dateTo } = {}) => {
       paymentStatus: orders.paymentStatus,
       orderCount: sql`count(*)::int`,
       totalLitres: sql`COALESCE(SUM(${orders.quantity}), 0)::bigint`,
-      totalValue: sql`COALESCE(SUM(${orders.totalAmount}), 0)`,
+      // Sales: the product alone — a delivery charge (0078) is not.
+      totalValue: sql`COALESCE(SUM(${orders.totalAmount} - ${orders.deliveryFee}), 0)`,
     })
     .from(orders)
     .where(whereClause)
@@ -312,7 +313,7 @@ const dailyReportSummary = async ({ dateFrom, dateTo, location } = {}) => {
 const revenueSummary = async ({ dateFrom, dateTo } = {}) => {
   const orderConditions = [eq(orders.paymentStatus, "Paid"), ...dateConditions(orders.createdAt, dateFrom, dateTo)];
   const [orderRevenue] = await db
-    .select({ total: sql`COALESCE(SUM(${orders.totalAmount}), 0)`, orderCount: sql`count(*)::int` })
+    .select({ total: sql`COALESCE(SUM(${orders.totalAmount} - ${orders.deliveryFee}), 0)`, orderCount: sql`count(*)::int` })
     .from(orders)
     .where(and(...orderConditions));
 

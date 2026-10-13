@@ -41,6 +41,7 @@ const { sendOrderSummarySMS, sendOrderExpiredSMS } = require("./sms.service");
 const { notify } = require("../notifications");
 const { findPfiForOrder } = require("./pfi.service");
 const gantryRegister = require("../lib/gantryTicketRegister");
+const { deliveryFeeFor, parseRate } = require("../lib/orderDelivery");
 const { generateTicketForOrder } = require("./ticket.service");
 const orderStatus = require("./orderStatus.service");
 const stepNotices = require("./stepNotices.service");
@@ -425,7 +426,23 @@ async function placeOrder({
    * birth, with the same named person, reason and audit row.
    */
   onCredit = null,
+  /**
+   * Delivery charge per litre on a delivery order — the owner's rule of
+   * 13 Oct 2026 (migration 0078). Staff only. The charge (rate x litres) is
+   * added to the order's total; the price per unit is untouched.
+   */
+  deliveryRate = 0,
 }) {
+  const rate = parseRate(deliveryRate);
+  if (rate === null) throw httpError(400, "The delivery rate must be a number of naira per litre, 0 or more");
+  if (rate > 0 && deliveryType !== "delivery") {
+    throw httpError(400, "A delivery rate goes only on a delivery order");
+  }
+  if (rate > 0 && (actor?.type !== "staff" || !actor.staffId)) {
+    throw httpError(403, "Only a member of staff can put a delivery charge on an order");
+  }
+  const deliveryFee = deliveryFeeFor(rate, quantity);
+
   if (pinned && (actor?.type !== "staff" || !actor.staffId)) {
     throw httpError(403, "Only a member of staff can place an order on a named PFI at an agreed price");
   }
@@ -587,14 +604,16 @@ async function placeOrder({
   if (pinned) {
     serverPrice = Number(pinned.price);
     if (!(serverPrice > 0)) throw httpError(400, "An agreed price is required");
-    totalAmount = serverPrice * Number(quantity);
+    totalAmount = serverPrice * Number(quantity) + deliveryFee;
   } else if (!unpriced) {
     const priceEntry = await depotRepo.getProductPrice(depotId, productId);
     if (!priceEntry || Number(priceEntry.currentPrice) <= 0) {
       throw httpError(400, "No price configured for this product at this depot");
     }
     serverPrice = Number(priceEntry.currentPrice);
-    totalAmount = serverPrice * Number(quantity);
+    // The product, plus its delivery (0 on pickup). An unpriced order's total
+    // stays the 0 placeholder; pricing it adds the delivery then.
+    totalAmount = serverPrice * Number(quantity) + deliveryFee;
   } else {
     if (actor?.type !== "staff" || !actor.staffId) {
       throw httpError(403, "Only a member of staff can raise an order with no price");
@@ -759,6 +778,8 @@ async function placeOrder({
         quantity: Number(quantity),
         price: String(serverPrice),
         totalAmount: String(totalAmount),
+        deliveryRate: String(rate),
+        deliveryFee: String(deliveryFee),
         /**
          * Both halves of "loading before payment, amount unknown", written in
          * the same insert as the order they describe — so there is no window in
@@ -834,6 +855,7 @@ async function placeOrder({
           deliveryType,
           quantity: Number(quantity),
           totalAmount: String(totalAmount),
+          ...(deliveryFee > 0 ? { deliveryRate: rate, deliveryFee } : {}),
           ...(unpriced ? { awaitingPrice: true } : {}),
         },
       },
@@ -1020,6 +1042,8 @@ async function placeOrder({
         unit: fullOrder.productUnit || "Liters",
         price: order.price,
         totalAmount: order.totalAmount,
+        deliveryFee: order.deliveryFee,
+        deliveryRate: order.deliveryRate,
         deliveryType: order.deliveryType,
         depotName: depot.name,
         depotCode: depot.code,
@@ -1046,6 +1070,7 @@ async function placeOrder({
       // first thing he checks, so it is now in the sentence.
       price: order.price,
       totalAmount: order.totalAmount,
+      deliveryFee: order.deliveryFee,
       accountNumber: virtualAccountNumber,
       bankName: virtualAccountBank,
       accountName: virtualAccountName,
@@ -1208,6 +1233,9 @@ const CHANGES_BEYOND_PFI = (patch, order) => {
     companyName: same(patch.companyName, order.companyName),
     expectedTrucks: same(patch.expectedTrucks, order.expectedTrucks),
     deliveryAddress: same(patch.deliveryAddress, order.deliveryAddress),
+    deliveryRate:
+      patch.deliveryRate === undefined ||
+      Math.round(Number(patch.deliveryRate) * 100) === Math.round(Number(order.deliveryRate || 0) * 100),
     createdAt:
       patch.createdAt === undefined ||
       new Date(patch.createdAt).getTime() === new Date(order.createdAt).getTime(),
@@ -1228,7 +1256,7 @@ const CHANGES_BEYOND_PFI = (patch, order) => {
  * through orderStatus.transition (AUDIT H1). This function is for everything
  * else a mistake can leave wrong on an order.
  */
-async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent = null, scopeUser = null } = {}) {
+async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent = null, scopeUser = null, canChangeDelivery = false } = {}) {
   return db.transaction(async (tx) => {
     const order = await orderRepo.lockById(orderId, tx);
     if (!order) throw httpError(404, "Order not found");
@@ -1434,12 +1462,50 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
      * explicit total is a deliberate override (a negotiated figure that is not
      * quantity x rate) and must win.
      */
+    /**
+     * The delivery rate (migration 0078) — finance or an admin, and only
+     * while no payment has been recorded: once money is on the order, what it
+     * was charged is settled. The route checks the role; this checks the
+     * money, inside the lock.
+     */
+    if (patch.deliveryRate !== undefined) {
+      const nextRate = parseRate(patch.deliveryRate);
+      if (nextRate === null) throw httpError(400, "The delivery rate must be a number of naira per litre, 0 or more");
+      if (Math.round(nextRate * 100) !== Math.round(Number(order.deliveryRate || 0) * 100)) {
+        if (order.deliveryType !== "delivery" && nextRate > 0) {
+          throw httpError(400, "A delivery rate goes only on a delivery order");
+        }
+        if (!canChangeDelivery) {
+          throw httpError(403, "Only finance or an admin can change an order's delivery charge.");
+        }
+        if (order.paymentStatus !== "Unpaid" || Number(order.amountPaid || 0) > 0) {
+          throw httpError(409, "A payment is already recorded on this order, so its delivery charge can no longer change.");
+        }
+        changes.deliveryRate = [order.deliveryRate, nextRate.toFixed(2)];
+        set.deliveryRate = nextRate.toFixed(2);
+      }
+    }
+
     const priceChanged = set.price !== undefined;
     const qtyChanged = set.quantity !== undefined;
-    if ((priceChanged || qtyChanged) && patch.totalAmount === undefined) {
+    const rateChanged = set.deliveryRate !== undefined;
+
+    // The delivery charge follows its rate and the litres.
+    if (rateChanged || qtyChanged) {
+      const fee = deliveryFeeFor(set.deliveryRate ?? order.deliveryRate, set.quantity ?? order.quantity).toFixed(2);
+      if (String(Number(order.deliveryFee || 0).toFixed(2)) !== fee) {
+        changes.deliveryFee = [order.deliveryFee, fee];
+        set.deliveryFee = fee;
+      }
+    }
+
+    // An unpriced order's total is a placeholder until it is priced, and
+    // pricing adds the delivery then.
+    if ((priceChanged || qtyChanged || rateChanged) && patch.totalAmount === undefined && order.pricingStatus !== "pending") {
       const nextPrice = Number(set.price ?? order.price);
       const nextQty = Number(set.quantity ?? order.quantity);
-      const derived = (nextPrice * nextQty).toFixed(2);
+      const fee = Number(set.deliveryFee ?? order.deliveryFee ?? 0);
+      const derived = (nextPrice * nextQty + fee).toFixed(2);
       if (String(order.totalAmount) !== derived) {
         changes.totalAmount = [order.totalAmount, derived];
         set.totalAmount = derived;

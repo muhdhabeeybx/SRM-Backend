@@ -97,7 +97,9 @@ const aggregatesFor = async (ids) => {
     // no existing revenue, profit or margin figure moves; it is the rule
     // being made to match the one beside it.
     client`
-      SELECT pfi_id, COALESCE(SUM(total_amount), 0)::text AS total, COUNT(*)::int AS orders
+      -- The product alone: a delivery charge (migration 0078) is collected
+      -- with the order but is not the cargo's sales.
+      SELECT pfi_id, COALESCE(SUM(total_amount - delivery_fee), 0)::text AS total, COUNT(*)::int AS orders
       FROM orders
       WHERE pfi_id = ANY(${list}) AND payment_status = 'Paid'
       GROUP BY pfi_id
@@ -961,6 +963,7 @@ const listOrdersForPfi = async (pfiId) => {
            o.status::text AS order_status,
            o.quantity,
            o.total_amount,
+           o.delivery_fee,
            o.created_at,
            COALESCE(NULLIF(TRIM(c.company_name), ''), c.name) AS customer_name,
            -- What of this order has actually been ticketed out. 0 means paid

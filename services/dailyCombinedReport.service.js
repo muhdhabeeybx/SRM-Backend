@@ -175,7 +175,8 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
       `,
       client`
         SELECT o.id, ${orderReferenceClient(client, 'o', 'c')} AS order_number, o.company_name, o.pfi_id, o.depot_id,
-               o.quantity, o.price, o.total_amount, o.status, o.payment_status,
+               -- The product alone, so quantity x rate = amount: delivery (0078) is not sales.
+               o.quantity, o.price, (o.total_amount - o.delivery_fee) AS total_amount, o.status, o.payment_status,
                c.name AS customer_name, pr.name AS product_name
         FROM orders o
         LEFT JOIN customers c ON c.id = o.customer_id
@@ -192,7 +193,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         SELECT (o.created_at AT TIME ZONE ${REPORT_TZ})::date AS day,
                COUNT(*)::int                       AS order_count,
                COALESCE(SUM(o.quantity), 0)::bigint AS qty,
-               COALESCE(SUM(o.total_amount), 0)::text AS value
+               COALESCE(SUM(o.total_amount - o.delivery_fee), 0)::text AS value
         FROM orders o
         WHERE o.created_at >= ${new Date(start.getTime() - 7 * 86400000).toISOString()}
           AND o.created_at <  ${start.toISOString()}
@@ -200,7 +201,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         ORDER BY 1 DESC
       `,
       client`
-        SELECT pfi_id, COALESCE(SUM(total_amount), 0)::text AS total
+        SELECT pfi_id, COALESCE(SUM(total_amount - delivery_fee), 0)::text AS total
         FROM orders WHERE payment_status = 'Paid' AND pfi_id IS NOT NULL
         GROUP BY pfi_id
       `,
@@ -229,7 +230,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         WITH attributed AS (
           SELECT COALESCE(a.pfi_id, o.pfi_id)      AS pfi_id,
                  COALESCE(a.quantity, o.quantity)::numeric AS qty,
-                 o.total_amount::numeric           AS value,
+                 (o.total_amount - o.delivery_fee)::numeric AS value,
                  o.payment_status,
                  o.created_at
           FROM orders o

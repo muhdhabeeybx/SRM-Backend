@@ -45,6 +45,12 @@ const limitOverride = z
   })
   .optional();
 
+/** Naira per litre, 0 or more. */
+const deliveryRate = z.coerce
+  .number({ error: typeError("Delivery rate", "a number") })
+  .min(0, "The delivery rate cannot be below 0")
+  .max(1000000, "The delivery rate is too large");
+
 const createOrder = z.object({
   customer: id("Customer"),
   depot: id("Depot"),
@@ -58,6 +64,9 @@ const createOrder = z.object({
   // before the haulage is settled, and a guessed total is worse than none.
   expectedTrucks: z.coerce.number().int().positive().max(200).optional(),
   trucks: z.array(pickupTruck).max(20, "Too many trucks on one order").optional(),
+  // Delivery charge per litre on a delivery order (migration 0078). Staff only
+  // — this body is the staff route's; the portal bodies below have no such field.
+  deliveryRate: deliveryRate.optional(),
   /**
    * Raise this order with no agreed price — the manually written ticket.
    *
@@ -123,6 +132,8 @@ const updateOrder = z
       .max(2000, "Delivery address must be 2000 characters or fewer")
       .optional(),
     createdAt: z.coerce.date({ invalid_type_error: "Order date is invalid" }).optional(),
+    // Finance or an admin, before any payment (orderService.updateOrder).
+    deliveryRate: deliveryRate.optional(),
   })
   .refine((b) => Object.values(b).some((v) => v !== undefined), {
     message: "Nothing to update",

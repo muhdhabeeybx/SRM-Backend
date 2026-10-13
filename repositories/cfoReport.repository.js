@@ -160,7 +160,7 @@ const salesByDay = async ({ tz, from, to, pfiIds }) => {
     SELECT o.pfi_id                       AS pfi_id,
            ${from ? day : client`NULL::date`} AS day,
            SUM(o.quantity)::numeric       AS qty,
-           SUM(o.total_amount)::numeric   AS value,
+           SUM(o.total_amount - o.delivery_fee)::numeric AS value, -- product only (0078)
            COUNT(*)::int                  AS orders
       FROM orders o
      WHERE o.pfi_id IS NOT NULL

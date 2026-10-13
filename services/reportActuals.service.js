@@ -28,7 +28,9 @@ const { db } = require("../config/db");
 
 /** Orders raised on the day, scoped to a PFI when one is named. */
 const ordersOn = (date, pfiId) => sql`
-  SELECT o.id, o.quantity, o.price, o.total_amount, o.status, o.payment_status,
+  SELECT o.id, o.quantity, o.price,
+         -- The product alone: a sheet reports sales, and delivery (0078) is not.
+         (o.total_amount - o.delivery_fee) AS total_amount, o.status, o.payment_status,
          o.customer_id, o.pfi_id
     FROM orders o
    WHERE o.created_at >= ${date}::date

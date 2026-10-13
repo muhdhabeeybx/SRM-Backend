@@ -116,6 +116,15 @@ const orders = pgTable(
      * price IS the board price) and where the board read zero. Migration 0069.
      */
     boardPrice: decimal("board_price", { precision: 15, scale: 2 }),
+    /**
+     * A delivery order's delivery charge: a rate per litre, and that rate
+     * times the quantity. The fee is inside totalAmount — the customer pays
+     * product plus delivery — but it is not product sales, so every revenue
+     * and sales-value figure reads totalAmount - deliveryFee. Both 0 on a
+     * pickup order and on every order before migration 0078.
+     */
+    deliveryRate: decimal("delivery_rate", { precision: 15, scale: 2 }).default("0").notNull(),
+    deliveryFee: decimal("delivery_fee", { precision: 15, scale: 2 }).default("0").notNull(),
     status: orderStatusEnum("status").default("Pending").notNull(),
 
     // Accountability per stage. These columns — not audit_logs — are the source

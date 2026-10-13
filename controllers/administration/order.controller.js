@@ -179,6 +179,7 @@ const createOrder = asyncHandler(async (req, res) => {
     customerId, state, depotId, productId, quantity, deliveryType, deliveryAddress, companyName, trucks,
     expectedTrucks,
     unpriced: unpriced || null,
+    deliveryRate: req.body.deliveryRate ?? 0,
     actor: { type: "staff", staffId: req.user.id },
   });
   if (limit.overridden) await recordLimitOverride(order.id, limit, req);
@@ -1523,8 +1524,11 @@ const reconcileOrderEffects = asyncHandler(async (req, res) => {
 const updateOrder = asyncHandler(async (req, res) => {
   const orderId = Number(req.params.id);
 
+  const roles = Array.isArray(req.user?.roles) ? req.user.roles : [];
   const updated = await orderService.updateOrder(orderId, req.body, {
     actor: { type: "staff", staffId: req.user.id },
+    // The delivery rate is finance's or an admin's to change (13 Oct 2026).
+    canChangeDelivery: roles.some((r) => ["finance", "admin", "super_admin"].includes(r)),
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
     scopeUser: req.user,
@@ -1642,7 +1646,9 @@ const setOrderPrice = asyncHandler(async (req, res) => {
     }
 
     const quantity = Number(order.quantity);
-    const totalAmount = price * quantity;
+    // The product at the agreed price, plus the delivery charge it was raised
+    // with (migration 0078) — 0 on pickup.
+    const totalAmount = Math.round((price * quantity + Number(order.deliveryFee || 0)) * 100) / 100;
 
     /*
      * Under the board it left at: allowed — the owner's decision — but never
@@ -1735,6 +1741,8 @@ const setOrderPrice = asyncHandler(async (req, res) => {
     unit: order.productUnit || "Liters",
     price: order.price,
     totalAmount: order.totalAmount,
+    deliveryFee: order.deliveryFee,
+    deliveryRate: order.deliveryRate,
     deliveryType: order.deliveryType,
     depotName: order.depotName,
     depotCode: order.depotCode,
