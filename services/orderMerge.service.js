@@ -117,6 +117,7 @@ const ORDER_COLUMNS = sql`
   pr.name AS "productName", pr.unit AS "productUnit", d.name AS "depotName",
   o.quantity, o.price::text AS price, o.total_amount::text AS "totalAmount",
   o.delivery_fee::text AS "deliveryFee", o.delivery_rate::text AS "deliveryRate",
+  o.delivery_from_surplus::text AS "deliveryFromSurplus",
   o.amount_paid::text AS "amountPaid", o.payment_status::text AS "paymentStatus",
   o.status::text AS status, o.pricing_status::text AS "pricingStatus",
   o.credit_qty::text AS "creditQty", o.credit_reason AS "creditReason",
@@ -325,6 +326,9 @@ const combine = (target, sources) => {
     // The delivery charges add up like the totals they are inside
     // (migration 0078); the rate is what that comes to per litre.
     deliveryFee: round2(all.reduce((sum, o) => sum + money(o.deliveryFee), 0)),
+    // Delivery recorded out of surplus (0080) is no rate's doing: it is
+    // carried as itself, and the rate describes the rest.
+    deliveryFromSurplus: round2(all.reduce((sum, o) => sum + money(o.deliveryFromSurplus), 0)),
     received: round2(all.reduce((sum, o) => sum + money(o.amountPaid), 0)),
     creditQty,
     creditReason: creditQty > 0 ? reasons.join(" · ") : target.creditReason || "",
@@ -716,7 +720,8 @@ const mergeOrders = async ({ targetOrderId, sourceOrderIds, reason = "", staffId
         quantity = ${result.quantity},
         total_amount = ${result.totalAmount.toFixed(2)}::numeric,
         delivery_fee = ${result.deliveryFee.toFixed(2)}::numeric,
-        delivery_rate = ${(result.quantity > 0 ? Math.round((result.deliveryFee / result.quantity) * 100) / 100 : 0).toFixed(2)}::numeric,
+        delivery_from_surplus = ${result.deliveryFromSurplus.toFixed(2)}::numeric,
+        delivery_rate = ${(result.quantity > 0 ? Math.round(((result.deliveryFee - result.deliveryFromSurplus) / result.quantity) * 100) / 100 : 0).toFixed(2)}::numeric,
         status = ${result.status}::order_status,
         credit_qty = ${result.creditQty.toFixed(2)}::numeric,
         credit_reason = ${result.creditReason},

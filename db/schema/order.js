@@ -125,6 +125,10 @@ const orders = pgTable(
      */
     deliveryRate: decimal("delivery_rate", { precision: 15, scale: 2 }).default("0").notNull(),
     deliveryFee: decimal("delivery_fee", { precision: 15, scale: 2 }).default("0").notNull(),
+    // The part of deliveryFee recorded after payment, out of the order's
+    // surplus (0080; services/orderSurplusDelivery.service.js). Not tied to the
+    // rate, so anything recomputing the fee from the rate adds it back.
+    deliveryFromSurplus: decimal("delivery_from_surplus", { precision: 15, scale: 2 }).default("0").notNull(),
     status: orderStatusEnum("status").default("Pending").notNull(),
 
     // Accountability per stage. These columns — not audit_logs — are the source

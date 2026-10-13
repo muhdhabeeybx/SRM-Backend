@@ -209,6 +209,8 @@ const FULL_ORDER_COLUMNS = {
   // The delivery charge inside totalAmount, and its rate per litre (0078).
   deliveryRate: orders.deliveryRate,
   deliveryFee: orders.deliveryFee,
+  // The part of the fee recorded later out of the order's surplus (0080).
+  deliveryFromSurplus: orders.deliveryFromSurplus,
   // What has actually been received against the order, across however many
   // instalments. Equal to totalAmount on a fully-paid order; the difference is
   // the balance still expected on a part-paid one.
@@ -597,6 +599,10 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
       -- be reconciled to it line by line instead of merely disagreeing.
       COALESCE(SUM(fix.adj), 0)            AS "duplicatesExcluded",
       COUNT(*) FILTER (WHERE fix.adj > 0)::int AS "duplicateOrderCount",
+      -- Surplus recorded as delivery after payment (0080): inside the order
+      -- values here, taken back off the report's rows. Printed so the two
+      -- reconcile.
+      COALESCE(SUM(${orders.deliveryFromSurplus}), 0) AS "deliveryFromSurplus",
       MAX(${orders.createdAt})             AS "lastOrderAt"
     FROM ${orders}
     LEFT JOIN ${customers} ON ${customers.id} = ${orders.customerId}
@@ -721,6 +727,11 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
          */
         duplicatesExcluded: Number(r.duplicatesExcluded) || 0,
         duplicateOrderCount: Number(r.duplicateOrderCount) || 0,
+        /**
+         * Surplus recorded as delivery (0080). The report's rows still show it
+         * as surplus; this block does not count it as held.
+         */
+        deliveryFromSurplus: Number(r.deliveryFromSurplus) || 0,
         /** Positive is owed to Soroman, negative is held for the customer. */
         net: underpaid - overpaid,
         lastOrderAt: r.lastOrderAt,
@@ -942,13 +953,15 @@ const findFinanceReport = async ({
     db
       .select({
         total: count(),
-        totalAmount: sql`COALESCE(SUM(${orders.totalAmount}), 0)`,
+        // Less delivery recorded later out of surplus (0080): the report's
+        // figures stay as printed, and those entries are listed on their own.
+        totalAmount: sql`COALESCE(SUM(${orders.totalAmount} - ${orders.deliveryFromSurplus}), 0)`,
         /**
          * Delivery charged, inside totalAmount (migration 0078). A new figure
          * beside the audited ones, not a change to them: every order before
          * 0078 carries 0, so no existing total moves.
          */
-        totalDelivery: sql`COALESCE(SUM(${orders.deliveryFee}), 0)`,
+        totalDelivery: sql`COALESCE(SUM(${orders.deliveryFee} - ${orders.deliveryFromSurplus}), 0)`,
         totalQuantity: sql`COALESCE(SUM(${orders.quantity}), 0)`,
         // Money PAID IN at the bank's own figure — transfer legs excluded, so
         // this totals the same column the rows below it show and a
@@ -987,13 +1000,13 @@ const findFinanceReport = async ({
         // not zero problems, and netting them was hiding both.
         totalSurplus: sql`COALESCE(SUM(GREATEST(0, (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
-        ) - ${orders.totalAmount}::numeric)), 0)`,
+        ) - (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric)), 0)`,
         // Owed by customers — an order on credit by design is not, and is
         // totalled on its own below.
-        totalShortfall: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN 0 ELSE GREATEST(0, ${orders.totalAmount}::numeric - (
+        totalShortfall: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN 0 ELSE GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         )) END), 0)`,
-        totalOnCredit: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN GREATEST(0, ${orders.totalAmount}::numeric - (
+        totalOnCredit: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         )) ELSE 0 END), 0)`,
         onCreditCount: sql`COUNT(*) FILTER (WHERE ${onCreditHouse})::int`,
@@ -1256,7 +1269,22 @@ const findFinanceReport = async ({
     paymentsByOrder.get(p.orderId).push(p);
   }
 
-  const decorated = rows.map((row) => {
+  const decorated = rows.map((rawRow) => {
+    /**
+     * Delivery recorded out of a paid order's surplus (migration 0080) joins
+     * the order's total, but this report keeps the figures it already printed
+     * (the owner's choice, 13 Oct 2026): the row is read as it stood before,
+     * with that money still in its surplus, and the entry is listed in the
+     * report's own block below. Nothing else changes for any other order.
+     */
+    const fromSurplus = Number(rawRow.deliveryFromSurplus || 0);
+    const row = fromSurplus
+      ? {
+          ...rawRow,
+          totalAmount: (Number(rawRow.totalAmount || 0) - fromSurplus).toFixed(2),
+          deliveryFee: (Number(rawRow.deliveryFee || 0) - fromSurplus).toFixed(2),
+        }
+      : rawRow;
     /**
      * The outgoing leg the wallet era never wrote, reconstructed.
      *
@@ -1477,9 +1505,18 @@ const findFinanceReport = async ({
   const total = Number(totalsRow.total) || 0;
   const reconciledCount = Number(totalsRow.reconciledCount) || 0;
 
+  /**
+   * Surplus recorded as delivery on the listed orders (0080) — the report's
+   * own block for them, since its rows keep showing that money as surplus.
+   */
+  const surplusDeliveries = await require("../services/orderSurplusDelivery.service").listForOrders(
+    rows.map((r) => r.id),
+  );
+
   return {
     orders: decorated.map(formatOrderRow),
     customerDifferentials,
+    surplusDeliveries,
     totals: {
       count: total,
       totalAmount: Number(totalsRow.totalAmount),

@@ -141,6 +141,18 @@ router.post(
   setOrderPrice
 );
 
+/**
+ * Delivery money found in a paid order's surplus (migration 0080). Finance or
+ * an admin, enforced: it moves money out of a customer's held balance.
+ */
+const surplusDelivery = require("../../controllers/administration/orderSurplusDelivery.controller");
+const surplusDeliveryGate = enforceRole("finance", "admin", {
+  message: "Only finance or an admin can record surplus as delivery",
+});
+router.get("/:id/delivery-from-surplus", authenticateStaff, validate({ params: orderSchemas.idParam }), surplusDelivery.list);
+router.post("/:id/delivery-from-surplus", authenticateStaff, surplusDeliveryGate, validate({ params: orderSchemas.idParam }), surplusDelivery.record);
+router.post("/:id/delivery-from-surplus/:entryId/void", authenticateStaff, surplusDeliveryGate, surplusDelivery.voidEntry);
+
 // Orders holding money beyond their own value — where the desk finds surplus
 // that needs moving. Before /:id so the literal segment wins the match.
 router.get(

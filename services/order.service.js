@@ -41,7 +41,7 @@ const { sendOrderSummarySMS, sendOrderExpiredSMS } = require("./sms.service");
 const { notify } = require("../notifications");
 const { findPfiForOrder } = require("./pfi.service");
 const gantryRegister = require("../lib/gantryTicketRegister");
-const { deliveryFeeFor, parseRate } = require("../lib/orderDelivery");
+const { deliveryFeeFor, chargedFee, parseRate } = require("../lib/orderDelivery");
 const { generateTicketForOrder } = require("./ticket.service");
 const orderStatus = require("./orderStatus.service");
 const stepNotices = require("./stepNotices.service");
@@ -1492,7 +1492,7 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
 
     // The delivery charge follows its rate and the litres.
     if (rateChanged || qtyChanged) {
-      const fee = deliveryFeeFor(set.deliveryRate ?? order.deliveryRate, set.quantity ?? order.quantity).toFixed(2);
+      const fee = chargedFee(order, set.deliveryRate ?? order.deliveryRate, set.quantity ?? order.quantity).toFixed(2);
       if (String(Number(order.deliveryFee || 0).toFixed(2)) !== fee) {
         changes.deliveryFee = [order.deliveryFee, fee];
         set.deliveryFee = fee;
