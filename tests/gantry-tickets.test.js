@@ -295,6 +295,23 @@ describe("Gantry tickets", () => {
     assert.equal(list.summary.voided, 1);
   });
 
+  test("the desk opens to admins and stock officers, and to anyone else only by a page grant", async () => {
+    const DESK = `${API}/gantry-ticket-desk`;
+    assert.equal((await as(admin).get(DESK)).status, 200);
+    assert.equal((await as(stockOff.token).get(DESK)).status, 200, "a stock officer on no PFI still opens the page");
+    const refused = await as(finance.token).get(DESK);
+    assert.equal(refused.status, 403);
+    assert.match(refused.body.message, /admins and stock officers/);
+
+    // Granted by name, the way Manage Users (and migration 0077) does it.
+    await client`INSERT INTO staff_page_overrides (staff_id, route_path, allowed) VALUES (${finance.id}, '/gantry-tickets', true)`;
+    assert.equal((await as(finance.token).get(DESK)).status, 200);
+    // A "no" shuts it even to a role that would open it.
+    await client`INSERT INTO staff_page_overrides (staff_id, route_path, allowed) VALUES (${stockOff.id}, '/gantry-tickets', false)`;
+    assert.equal((await as(stockOff.token).get(DESK)).status, 403);
+    await client`DELETE FROM staff_page_overrides WHERE route_path = '/gantry-tickets' AND staff_id IN (${finance.id}, ${stockOff.id})`;
+  });
+
   test("a gantry PFI from before the rule still completes on payment", async () => {
     const done = await db.transaction((tx) =>
       orderService.completeDesklessOrder({ id: -1, pfiId: oldGantry.id, quantity: 0 }, { tx, actor: null, pfiType: "gantry" })

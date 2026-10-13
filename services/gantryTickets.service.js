@@ -38,6 +38,28 @@ const MAX_TICKETS_PER_ENTRY = 2000;
 const MANAGER_ROLES = ["admin", "super_admin"];
 const STOCK_ROLE = "stock_officer";
 
+/**
+ * Who may open the Gantry Tickets desk — the owner's instruction of 13 Oct
+ * 2026: admins, Muideen Salami, and the stock officers.
+ *
+ * Admins, super admins and stock officers by role; anybody else only by the
+ * per-person page grant Manage Users writes (staff_page_overrides — Muideen's
+ * is migration 0077). A grant set to "no" shuts the page even to a role that
+ * would open it. The dashboard's menu reads the same rule (soromanfe
+ * lib/rbac.ts ROLE_OPENED), and the route string must match it exactly.
+ *
+ * The desk is the only thing closed. A PFI's ticket list and an order's
+ * tickets stay on the PFI and order pages, which everyone opens.
+ */
+const DESK_ROUTE = "/gantry-tickets";
+const DESK_ROLES = ["admin", "super_admin", STOCK_ROLE];
+const maySeeDesk = (user) => {
+  if (!user) return false;
+  const override = (user.pageOverrides || []).find((o) => o.routePath === DESK_ROUTE);
+  if (override) return Boolean(override.allowed);
+  return (Array.isArray(user.roles) ? user.roles : []).some((r) => DESK_ROLES.includes(r));
+};
+
 const unavailable = () =>
   httpError(503, "Gantry tickets are not available yet — the database has not been updated for them (migration 0075).");
 
@@ -567,5 +589,6 @@ module.exports = {
   forOrder,
   deskOrders,
   stageOf,
+  maySeeDesk,
   STOCK_ROLE,
 };

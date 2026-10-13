@@ -29,6 +29,12 @@ const pfiInScope = async (req) => {
 };
 
 const getDesk = asyncHandler(async (req, res) => {
+  if (!gantryTickets.maySeeDesk(req.user)) {
+    return res.status(403).json({
+      success: false,
+      message: "The Gantry Tickets page is for admins and stock officers. Ask an admin for access.",
+    });
+  }
   const data = await gantryTickets.deskOrders(req.user);
   res.json({ success: true, data });
 });
