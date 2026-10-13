@@ -294,3 +294,102 @@ describe("a batch with no shipping papers is billed on what it holds", () => {
     assert.equal(f.landingCostPerLitre, null);
   });
 });
+
+describe("stock trucked out to a trucking PFI", () => {
+  // PFI/47's shape: customers' sales, one allocation paid before the on-credit
+  // rule (a sale), and one on credit (a transfer — trucked out).
+  const pfi = coastal({ startingQtyLitres: 1_000_000, blQtyLitres: 1_000_000, unitPrice: "1000" });
+  const f = computeFinancials(pfi, {
+    expenses: 0,
+    soldQty: 500_000,
+    revenue: 600_000_000,
+    unpaidQty: 100_000,
+    unpaidOrderCount: 1,
+    truckedQty: 300_000,
+    truckedValue: 330_000_000,
+    truckedOrderCount: 1,
+  });
+
+  test("is gone from the balance, and neither sold nor awaiting payment", () => {
+    assert.equal(f.sold, 500_000);
+    assert.equal(f.truckedOut, 300_000);
+    assert.equal(f.awaitingPayment, 100_000, "customers' unpaid orders only");
+    assert.equal(f.remaining, 200_000, "initial − sold − trucked out");
+    assert.equal(f.trulyUnsold, 100_000);
+    assert.equal(f.sold + f.truckedOut + f.awaitingPayment + f.trulyUnsold, f.tankQtyLitres);
+  });
+
+  test("keeps sales value to customers, and counts its agreed value in the profit", () => {
+    assert.equal(f.revenue, 600_000_000, "sales value is customers' alone");
+    assert.equal(f.truckedOutValue, 330_000_000);
+    assert.equal(f.earned, 930_000_000);
+    assert.equal(f.profitLoss, 930_000_000 - 1_000_000_000);
+    assert.equal(f.sellThrough, 0.8, "sold and trucked out are both gone");
+  });
+
+  test("a cargo fully sold or trucked out closes at zero", () => {
+    const done = computeFinancials(pfi, { expenses: 0, soldQty: 700_000, truckedQty: 300_000 });
+    assert.equal(done.remaining, 0);
+    assert.equal(done.awaitingPayment, 0);
+    assert.equal(done.profitIsMeaningful, true);
+  });
+
+  test("the workings name it", () => {
+    const lines = explainFinancials(pfi, f);
+    const trucked = lines.find((e) => e.key === "truckedOut");
+    assert.match(trucked.workings, /300,000 Litres worth ₦330,000,000\.00/);
+    assert.match(lines.find((e) => e.key === "remaining").formula, /− Total Sold − Trucked Out$/);
+    assert.match(lines.find((e) => e.key === "profitLoss").formula, /Revenue \+ Trucked Out Value − Total Cost/);
+  });
+
+  test("a cargo that trucked nothing out reads exactly as before", () => {
+    const plain = computeFinancials(pfi, { expenses: 0, soldQty: 500_000, revenue: 600_000_000 });
+    assert.equal(plain.truckedOut, 0);
+    assert.equal(plain.remaining, 500_000);
+    assert.equal(plain.earned, plain.revenue);
+    assert.ok(!explainFinancials(pfi, plain).some((e) => e.key === "truckedOut"));
+    assert.equal(explainFinancials(pfi, plain).find((e) => e.key === "remaining").formula, "Initial Quantity − Total Sold");
+  });
+});
+
+describe("an order money has started landing on", () => {
+  // PFI/47's shape on 13 Oct 2026: three part-paid orders, 1,842,000 L, that
+  // read as "awaiting payment" though their customers had started paying.
+  // Since then a sale is any order money has landed on (lib/orderSale), so
+  // the aggregates put them in sold and revenue, and name them as part paid.
+  const pfi = coastal({ startingQtyLitres: 1_000_000, blQtyLitres: 1_000_000, unitPrice: "1000" });
+  const f = computeFinancials(pfi, {
+    expenses: 0,
+    soldQty: 700_000,
+    revenue: 840_000_000,
+    partPaidQty: 200_000,
+    partPaidValue: 240_000_000,
+    partPaidReceived: 100_000_000,
+    partPaidOrderCount: 2,
+    unpaidQty: 100_000,
+    unpaidOrderCount: 1,
+  });
+
+  test("is sold — out of the stock, and not awaiting payment", () => {
+    assert.equal(f.sold, 700_000);
+    assert.equal(f.partPaid, 200_000, "named, inside sold");
+    assert.equal(f.awaitingPayment, 100_000, "only the order with nothing paid");
+    assert.equal(f.remaining, 300_000, "initial − sold");
+    assert.equal(f.trulyUnsold, 200_000);
+    assert.equal(f.sold + f.awaitingPayment + f.trulyUnsold, f.tankQtyLitres);
+    assert.equal(f.sellThrough, 0.7);
+  });
+
+  test("counts at its full value in sales value", () => {
+    assert.equal(f.revenue, 840_000_000);
+    assert.equal(f.salesValue, f.revenue);
+    assert.equal(f.profitLoss, 840_000_000 - 1_000_000_000);
+  });
+
+  test("the workings name it", () => {
+    const lines = explainFinancials(pfi, f);
+    assert.match(lines.find((e) => e.key === "partPaid").workings, /2 order\(s\) = 200,000 Litres, ₦100,000,000\.00 received of ₦240,000,000\.00/);
+    assert.equal(lines.find((e) => e.key === "remaining").formula, "Initial Quantity − Total Sold");
+    assert.match(lines.find((e) => e.key === "revenue").workings, /₦600,000,000\.00 paid in full \+ ₦240,000,000\.00 part paid = ₦840,000,000\.00/);
+  });
+});

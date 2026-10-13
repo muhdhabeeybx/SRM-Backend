@@ -246,22 +246,30 @@ const stockCell = (html) => cell(html, { ...KEY, r: true });
 const depotRow = (p) => {
   const sold = q0(p.stock.soldToday, p.unit);
   const value = m(p.orders.today.value);
-  const revenue = m(p.orders.toDate.paid);
+  // The PFI's sales value, as PFI tracking prints it — not the money received.
+  const revenue = m(p.orders.toDate.salesValue ?? p.orders.toDate.paid);
+  // Stock moved to a trucking PFI today leaves between opening and closing
+  // without being a sale, so it is named under the day's sales — the row still
+  // reads straight across.
+  const truckedToday = p.stock.truckedToday > 0
+    ? `<br><span style="font-size:11px">+ ${qty(p.stock.truckedToday, p.unit)} trucked out</span>`
+    : "";
   return (
     `<tr>` +
     idCell(p.pfiNumber) +
     cell(escapeHtml(up(p.location)) || "—") +
-    // An evacuation surplus and an operational loss are named under the
-    // initial figure rather than folded into it: initial is the batch as
-    // landed and never changes, and these are why closing differs from
-    // initial − sold.
+    // An evacuation surplus, an operational loss and stock trucked out are
+    // named under the initial figure rather than folded into it: initial is
+    // the batch as landed and never changes, and these are why closing differs
+    // from initial − sold.
     stockCell(
       qty(p.stock.starting, p.unit) +
         (p.stock.surplus > 0 ? `<br><span style="font-size:11px">+ ${qty(p.stock.surplus, p.unit)} surplus</span>` : "") +
-        (p.stock.loss > 0 ? `<br><span style="font-size:11px">− ${qty(p.stock.loss, p.unit)} operational loss</span>` : "")
+        (p.stock.loss > 0 ? `<br><span style="font-size:11px">− ${qty(p.stock.loss, p.unit)} operational loss</span>` : "") +
+        (p.stock.truckedOut > 0 ? `<br><span style="font-size:11px">− ${qty(p.stock.truckedOut, p.unit)} trucked out</span>` : "")
     ) +
     stockCell(qty(p.stock.openingToday, p.unit)) +
-    cell(sold, credit(sold)) +
+    cell(sold + truckedToday, credit(sold)) +
     cell(qty(p.stock.remaining, p.unit), { r: true, s: KEY_S + BALANCE_S, bg: TINT }) +
     cell(value, credit(value)) +
     cell(revenue, credit(revenue)) +

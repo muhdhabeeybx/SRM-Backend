@@ -262,6 +262,30 @@ describe("CFO report — a row, computed and corrected", () => {
     assert.equal(r.awaitingPayment + r.availableToSell, r.stockBalance);
   });
 
+  test("stock trucked out to a trucking PFI comes off the balance, apart from sales", () => {
+    const r = buildRow({
+      pfi, day: "2026-09-17", running: { ...running, truckedQty: 250000 }, dayBucket, entry: null,
+    });
+    assert.equal(r.truckedOut, 250000);
+    assert.equal(r.cumulativeVolume, 400000, "not a sale");
+    assert.equal(r.stockBalance, 350000, "1,000,000 − 400,000 sold − 250,000 trucked out");
+    assert.equal(r.availableToSell, 350000);
+    const t = [r].reduce(addToTotals, { rows: 0, salesValue: 0, bankInflow: 0, surplusDeficit: 0, orders: 0, dayOrders: 0, byUnit: {} });
+    assert.equal(t.byUnit.Litres.truckedOut, 250000);
+  });
+
+  test("part paid is named inside the sales volume, not taken off twice", () => {
+    const r = buildRow({
+      pfi, day: "2026-09-17", running: { ...running, partPaidQty: 120000, partPaidOrders: 2, unpaidQty: 30000 },
+      dayBucket, entry: null,
+    });
+    assert.equal(r.partPaid, 120000);
+    assert.equal(r.partPaidOrders, 2);
+    assert.equal(r.stockBalance, 600000, "1,000,000 − 400,000 sold, part paid already inside it");
+    assert.equal(r.awaitingPayment, 30000);
+    assert.equal(r.availableToSell, 570000);
+  });
+
   test("the unit totals carry the split, and it still reconciles", () => {
     const a = buildRow({ pfi, day: "2026-09-17", running: { ...running, unpaidQty: 100000 }, dayBucket, entry: null });
     const b = buildRow({ pfi: { ...pfi, id: 8 }, day: "2026-09-17", running, dayBucket, entry: null });

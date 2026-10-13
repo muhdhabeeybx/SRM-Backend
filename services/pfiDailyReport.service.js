@@ -26,6 +26,11 @@
  */
 const { client } = require("../db");
 const { stockQty } = require("../lib/pfiStock");
+const { transferSql } = require("../lib/allocationOrders");
+const { saleSql } = require("../lib/orderSale");
+
+/** Stock moved to a trucking PFI: not an order sold, not owed (lib/allocationOrders). */
+const TRANSFER = client.unsafe(transferSql("o"));
 const { dayBounds, REPORT_TZ } = require("./dailyCombinedReport.service");
 // The desks, in reading order, and the columns each one's form collects. Shared
 // with the combined report so the two cannot describe the same sheet
@@ -110,6 +115,9 @@ const buildPfiDailyReportData = async (date = new Date()) => {
            -- Sales values are the product alone; delivery (0078) is not sales.
            COALESCE(SUM(o.total_amount::numeric - o.delivery_fee::numeric), 0) AS value_all,
            COALESCE(SUM(o.amount_paid::numeric), 0)            AS paid_all,
+           -- The PFI's sales value: every order money has landed on, at full
+           -- value (lib/orderSale) — PFI tracking's Revenue, to the naira.
+           COALESCE(SUM(o.total_amount::numeric - o.delivery_fee::numeric) FILTER (WHERE ${client.unsafe(saleSql("o"))}), 0) AS sales_all,
            COUNT(*)                    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}) AS orders_today,
            COALESCE(SUM(o.quantity)    FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS litres_today,
            COALESCE(SUM(o.total_amount::numeric - o.delivery_fee::numeric) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS value_today,
@@ -124,6 +132,20 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       FROM orders o
      WHERE o.pfi_id IS NOT NULL
        AND o.status NOT IN ('Cancelled', 'Expired')
+       AND NOT ${TRANSFER}
+     GROUP BY o.pfi_id`;
+
+  /**
+   * Stock moved off each batch to its trucking PFIs. Gone from the batch like
+   * a sale, so it is inside `sold_qty_litres` — but it is not one, so the
+   * order figures above leave it out and the stock columns name it apart.
+   */
+  const truckedRows = await client`
+    SELECT o.pfi_id,
+           COALESCE(SUM(o.quantity), 0) AS litres_all,
+           COALESCE(SUM(o.quantity) FILTER (WHERE o.created_at >= ${startIso} AND o.created_at < ${endIso}), 0) AS litres_today
+      FROM orders o
+     WHERE o.pfi_id IS NOT NULL AND ${TRANSFER}
      GROUP BY o.pfi_id`;
 
   /**
@@ -317,6 +339,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
 
   const byPfi = (rows) => new Map(rows.map((r) => [Number(r.pfi_id), r]));
   const orders = byPfi(orderRows);
+  const trucked = byPfi(truckedRows);
   const collections = byPfi(collectionRows);
   const trucks = byPfi(truckRows);
   const expenses = byPfi(expenseRows);
@@ -324,6 +347,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
 
   const activePfis = pfiRows.map((p) => {
     const o = orders.get(Number(p.id)) || {};
+    const tr = trucked.get(Number(p.id)) || {};
     const collected = num((collections.get(Number(p.id)) || {}).paid_today);
     const t = trucks.get(Number(p.id)) || {};
     const e = expenses.get(Number(p.id)) || {};
@@ -336,7 +360,12 @@ const buildPfiDailyReportData = async (date = new Date()) => {
     const surplus = num(p.evacuation_surplus_litres);
     const loss = num(p.operational_loss_litres);
     const stock = stockQty(p);
-    const sold = num(p.sold_qty_litres);
+    // The counter holds everything gone from the batch; what went to a
+    // trucking PFI is named apart from what was sold.
+    const truckedOut = num(tr.litres_all);
+    const truckedToday = num(tr.litres_today);
+    const gone = num(p.sold_qty_litres);
+    const sold = Math.max(0, gone - truckedOut);
     const valueAll = num(o.value_all);
     const paidAll = num(o.paid_all);
 
@@ -350,7 +379,7 @@ const buildPfiDailyReportData = async (date = new Date()) => {
      * means the row reads straight across — opening − sold today = closing —
      * however the two halves were recorded.
      */
-    const closing = Math.max(0, stock - sold);
+    const closing = Math.max(0, stock - gone);
     const soldToday = num(o.litres_today);
 
     return {
@@ -368,15 +397,18 @@ const buildPfiDailyReportData = async (date = new Date()) => {
         surplus,
         loss,
         sold,
-        openingToday: closing + soldToday,
+        /** To this batch's trucking PFIs, to date — and today. Not sales. */
+        truckedOut,
+        truckedToday,
+        openingToday: closing + soldToday + truckedToday,
         soldToday,
         remaining: closing,
-        percentSold: stock > 0 ? (sold / stock) * 100 : 0,
+        percentSold: stock > 0 ? (gone / stock) * 100 : 0,
       },
 
       orders: {
         today: { count: Number(o.orders_today || 0), litres: num(o.litres_today), value: num(o.value_today), paid: collected },
-        toDate: { count: Number(o.orders_all || 0), litres: num(o.litres_all), value: valueAll, paid: paidAll },
+        toDate: { count: Number(o.orders_all || 0), litres: num(o.litres_all), value: valueAll, paid: paidAll, salesValue: num(o.sales_all) },
         outstanding: Math.max(0, valueAll - paidAll),
       },
 

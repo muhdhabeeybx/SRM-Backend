@@ -1,6 +1,7 @@
 const { client } = require("../config/db");
 const { pfiRepo, pfiExpenseRepo, pfiFileRepo } = require("../repositories");
 const { computeFinancials } = require("../lib/pfiFinance");
+const { saleSql } = require("../lib/orderSale");
 const { DESKLESS_PFI_TYPES } = require("./order.service");
 
 /**
@@ -49,7 +50,7 @@ const kindOf = (pfiType) => {
   return "depot";
 };
 
-/** Paid orders still open, and how much of each its tickets have not covered. */
+/** Paid and part-paid orders still open, and how much of each its tickets have not covered. */
 const unloadedFor = async (ids) => {
   const rows = await client`
     SELECT o.pfi_id AS "pfiId",
@@ -61,7 +62,8 @@ const unloadedFor = async (ids) => {
          WHERE order_id = o.id AND pfi_id = o.pfi_id
       ) m ON true
      WHERE o.pfi_id = ANY(${ids})
-       AND o.payment_status = 'Paid'
+       -- Part paid too: its litres are committed, so they are owed a loading.
+       AND o.payment_status IN ('Paid', 'Part Paid')
        AND o.status IN ('Paid', 'Released', 'Loading')
      GROUP BY o.pfi_id`;
   return new Map(rows.map((r) => [Number(r.pfiId), { orders: r.orders, litres: num(r.litres) }]));
@@ -88,7 +90,7 @@ const customersFor = async (ids) => {
   const rows = await client`
     SELECT pfi_id AS "pfiId", COUNT(DISTINCT customer_id)::int AS customers
       FROM orders
-     WHERE pfi_id = ANY(${ids}) AND payment_status = 'Paid'
+     WHERE pfi_id = ANY(${ids}) AND ${client.unsafe(saleSql("orders"))}
      GROUP BY pfi_id`;
   return new Map(rows.map((r) => [Number(r.pfiId), r.customers]));
 };
@@ -122,13 +124,17 @@ const getMyPfis = async (user) => {
     // What the stock is spoken for by, and what is genuinely free. Available
     // is floored at zero; a PFI that has taken more orders than it holds says
     // by how much instead of printing a negative stock.
-    const committed = f.sold + f.awaitingPayment;
+    // Sold includes part paid; trucked out is gone to a trucking PFI.
+    const committed = f.sold + f.awaitingPayment + f.truckedOut;
     const sales = kind === "trucks" ? null : {
       sold: f.sold,
       soldOrders: agg.orderCount || 0,
       customers: customers.get(id) || 0,
       awaitingPayment: f.awaitingPayment,
       awaitingOrders: f.awaitingPaymentOrders,
+      partPaid: f.partPaid,
+      partPaidOrders: f.partPaidCount,
+      truckedOut: f.truckedOut,
       available: Math.max(0, f.stockQtyLitres - committed),
       oversold: Math.max(0, committed - f.stockQtyLitres),
     };

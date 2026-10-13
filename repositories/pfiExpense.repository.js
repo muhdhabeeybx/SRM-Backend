@@ -1,6 +1,14 @@
 const { client } = require("../db");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { OPEN_STATES } = require("../lib/expenseChain");
+const { transferSql } = require("../lib/allocationOrders");
+const { saleSql } = require("../lib/orderSale");
+
+/** An unpaid allocation order: stock moved to a trucking PFI, not sold. */
+const TRANSFER = client.unsafe(transferSql("o"));
+
+/** Paid in full or part paid (lib/orderSale). */
+const SALE = client.unsafe(saleSql("o"));
 
 /**
  * The figure a total should use.
@@ -62,12 +70,19 @@ const aggregatesFor = async (ids) => {
     soldQty: 0,
     unpaidQty: 0,
     unpaidOrderCount: 0,
+    truckedQty: 0,
+    truckedValue: 0,
+    truckedOrderCount: 0,
+    partPaidQty: 0,
+    partPaidValue: 0,
+    partPaidReceived: 0,
+    partPaidOrderCount: 0,
     orderCount: 0,
     expenseCount: 0,
   });
   for (const id of list) out.set(id, blank());
 
-  const [expenses, revenue, movements, allocations, sold, unpaid] = await Promise.all([
+  const [expenses, revenue, movements, allocations, sold, unpaid, trucked, partPaid] = await Promise.all([
     // Soft-deleted lines are excluded from every total.
     //
     // `total` is PAID ONLY — that is the entire point of the approval chain.
@@ -87,29 +102,27 @@ const aggregatesFor = async (ids) => {
         AND NOT EXISTS (SELECT 1 FROM expense_categories rc WHERE rc.id = e.category_id AND rc.is_refund)
       GROUP BY e.pfi_id
     `,
-    // Invoiced value on every order whose payment is confirmed — the same
-    // rule and the same column as `sold` below, so litres sold and money
-    // earned can never tell different stories, and both agree with the
-    // finance report for the batch.
-    //
-    // This was `status = ANY(REVENUE_STATUSES)`. The two are co-extensive in
-    // the current data (no order is paid and also cancelled or expired), so
-    // no existing revenue, profit or margin figure moves; it is the rule
-    // being made to match the one beside it.
+    // Sales value: every sale (SALE, above) at its full value — the same rule
+    // as `sold` below, so litres sold and money earned can never tell
+    // different stories, and both agree with the finance report.
     client`
       -- The product alone: a delivery charge (migration 0078) is collected
       -- with the order but is not the cargo's sales.
-      SELECT pfi_id, COALESCE(SUM(total_amount - delivery_fee), 0)::text AS total, COUNT(*)::int AS orders
-      FROM orders
-      WHERE pfi_id = ANY(${list}) AND payment_status = 'Paid'
-      GROUP BY pfi_id
+      SELECT o.pfi_id, COALESCE(SUM(o.total_amount - o.delivery_fee), 0)::text AS total, COUNT(*)::int AS orders
+      FROM orders o
+      WHERE o.pfi_id = ANY(${list}) AND ${SALE}
+      GROUP BY o.pfi_id
     `,
-    // The append-only ledger is the source of truth for released stock.
+    // The append-only ledger is the source of truth for released stock. Not
+    // what a transfer's trucks loaded: "loaded out" is read against `sold`,
+    // and a transfer is no sale (lib/allocationOrders).
     client`
-      SELECT pfi_id, COALESCE(SUM(qty_litres), 0)::bigint AS qty
-      FROM pfi_movements
-      WHERE pfi_id = ANY(${list})
-      GROUP BY pfi_id
+      SELECT m.pfi_id, COALESCE(SUM(m.qty_litres), 0)::bigint AS qty
+      FROM pfi_movements m
+      LEFT JOIN orders o ON o.id = m.order_id
+      WHERE m.pfi_id = ANY(${list})
+        AND (o.id IS NULL OR NOT ${TRANSFER})
+      GROUP BY m.pfi_id
     `,
     // Delivery allocations are a second way stock leaves a batch, and count
     // toward sold alongside releases — but only until a release happens.
@@ -131,13 +144,14 @@ const aggregatesFor = async (ids) => {
     `,
     /**
      * What has been sold off each batch: the ordered quantity on every order
-     * whose PAYMENT is confirmed. Nothing else.
+     * money has landed on — paid in full or part paid (SALE). Nothing else.
      *
      * This is deliberately the same rule, on the same column, that the
-     * finance report uses (orders.payment_status = 'Paid', summing
+     * finance report's default view uses (Paid and Part Paid, summing
      * orders.quantity), so a batch's Total Sold and the finance report's
      * Total Quantity for that PFI are the same number by construction rather
-     * than by coincidence.
+     * than by coincidence. Until 13 Oct 2026 it was paid in full only, which
+     * left part-paid litres reading as stock awaiting payment.
      *
      * ── Why it no longer reads the stock ledgers ──────────────────────────
      *
@@ -153,25 +167,26 @@ const aggregatesFor = async (ids) => {
      * — 1.7 million litres of sold product missing from the stock report
      * because the trucks had not finished loading.
      *
-     * Sold means paid for. Loading progress is a separate fact, and
+     * Sold means paid for, in full or in part. Loading progress is a separate fact, and
      * movementQty / allocationQty are still returned below for anyone who
      * wants it.
      *
      * ── On the status column ──────────────────────────────────────────────
      *
-     * payment_status, not status. An order paid but not yet Released counts
-     * from the moment its payment is confirmed. The two are co-extensive in
-     * the current data — there is no paid-and-cancelled order anywhere — so
-     * this changes no existing figure; it is the rule that matters.
+     * payment_status, not status. An order counts from the moment money lands
+     * on it, whether or not it has been Released.
      */
     client`
       SELECT o.pfi_id, COALESCE(SUM(o.quantity), 0)::bigint AS qty
       FROM orders o
-      WHERE o.pfi_id = ANY(${list}) AND o.payment_status = 'Paid'
+      WHERE o.pfi_id = ANY(${list}) AND ${SALE}
       GROUP BY o.pfi_id
     `,
     /**
-     * Orders sitting on this batch whose payment is NOT confirmed.
+     * Orders sitting on this batch with NO money on them yet.
+     *
+     * Not a part-paid order: once money has started landing it is a sale.
+     * Awaiting payment is the order nobody has paid anything on.
      *
      * The counterpart to `sold`, and the answer to the question a stock figure
      * always raises: "the batch says 700,000 litres are left — where are
@@ -194,7 +209,43 @@ const aggregatesFor = async (ids) => {
              COUNT(*)::int AS orders
       FROM orders o
       WHERE o.pfi_id = ANY(${list})
-        AND o.payment_status <> 'Paid'
+        AND o.payment_status NOT IN ('Paid', 'Part Paid')
+        AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
+        -- A transfer is not waiting on any money: it is trucked out, below.
+        AND NOT ${TRANSFER}
+      GROUP BY o.pfi_id
+    `,
+    /**
+     * Stock moved off this cargo to its trucking PFIs (lib/allocationOrders).
+     *
+     * Neither sold nor awaiting payment: the litres are the trucking PFI's to
+     * sell now, so the parent counts them gone and never waits on them. The
+     * value is the agreed allocation price, which is the trucking PFI's cost
+     * and the parent's return on those litres — see computeFinancials.
+     */
+    client`
+      SELECT o.pfi_id,
+             COALESCE(SUM(o.quantity), 0)::bigint AS qty,
+             COALESCE(SUM(o.total_amount - o.delivery_fee), 0)::text AS value,
+             COUNT(*)::int AS orders
+      FROM orders o
+      WHERE o.pfi_id = ANY(${list}) AND ${TRANSFER}
+      GROUP BY o.pfi_id
+    `,
+    /**
+     * Of the sales, the ones money has started landing on but not finished —
+     * inside `sold` and `revenue`, named so a reader can see how much of what
+     * is sold is still being paid for. `received` is what has landed so far.
+     */
+    client`
+      SELECT o.pfi_id,
+             COALESCE(SUM(o.quantity), 0)::bigint AS qty,
+             COALESCE(SUM(o.total_amount - o.delivery_fee), 0)::text AS value,
+             COALESCE(SUM(o.amount_paid), 0)::text AS received,
+             COUNT(*)::int AS orders
+      FROM orders o
+      WHERE o.pfi_id = ANY(${list})
+        AND o.payment_status = 'Part Paid'
         AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
       GROUP BY o.pfi_id
     `,
@@ -233,6 +284,23 @@ const aggregatesFor = async (ids) => {
     if (row) {
       row.unpaidQty = Number(r.qty);
       row.unpaidOrderCount = r.orders;
+    }
+  }
+  for (const r of partPaid) {
+    const row = out.get(Number(r.pfi_id));
+    if (row) {
+      row.partPaidQty = Number(r.qty);
+      row.partPaidValue = Number(r.value);
+      row.partPaidReceived = Number(r.received);
+      row.partPaidOrderCount = r.orders;
+    }
+  }
+  for (const r of trucked) {
+    const row = out.get(Number(r.pfi_id));
+    if (row) {
+      row.truckedQty = Number(r.qty);
+      row.truckedValue = Number(r.value);
+      row.truckedOrderCount = r.orders;
     }
   }
 
@@ -952,7 +1020,8 @@ const listMovements = async (pfiId) => {
  * single movement row, because nothing has been ticketed out yet — so a panel
  * headed "Orders" read as empty while the batch had made half a billion naira.
  *
- * Same rule as `sold` and as the finance report: payment_status = 'Paid'.
+ * Same rule as `sold` and as the finance report: every order money has landed
+ * on (SALE — paid in full or part paid).
  * Loading progress rides along per order rather than deciding what is listed,
  * so "paid but not yet loaded" is visible instead of invisible.
  */
@@ -972,7 +1041,7 @@ const listOrdersForPfi = async (pfiId) => {
                      WHERE m.order_id = o.id AND m.pfi_id = o.pfi_id), 0)::bigint AS loaded_qty
     FROM orders o
     LEFT JOIN customers c ON c.id = o.customer_id
-    WHERE o.pfi_id = ${Number(pfiId)} AND o.payment_status = 'Paid'
+    WHERE o.pfi_id = ${Number(pfiId)} AND ${SALE}
     ORDER BY o.created_at DESC
   `;
 };

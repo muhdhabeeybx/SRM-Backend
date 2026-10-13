@@ -1,6 +1,7 @@
 const ExcelJS = require("exceljs");
 const { client } = require("../db");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
+const { transferSql } = require("../lib/allocationOrders");
 const { dayBounds: zonedDayBounds } = require("../lib/zonedDay");
 
 /**
@@ -101,6 +102,8 @@ const ordersFor = async ({ start, end }) => client`
   LEFT JOIN products  p ON p.id = o.product_id
   LEFT JOIN depots    d ON d.id = o.depot_id
   WHERE o.created_at >= ${start} AND o.created_at < ${end}
+    -- Stock moved to a trucking PFI is no order anybody placed.
+    AND NOT ${client.unsafe(transferSql("o"))}
   ORDER BY o.created_at
 `;
 

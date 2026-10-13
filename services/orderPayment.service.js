@@ -2,6 +2,7 @@ const pfiBankScope = require("../lib/pfiBankScope");
 const { eq, and, sql, inArray, asc } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
+const { isTransferOrder } = require("../lib/allocationOrders");
 const {
   orders,
   orderPayments,
@@ -160,6 +161,21 @@ function assertPriced(order) {
   }
 }
 
+/**
+ * Nor on a transfer to a trucking PFI (lib/allocationOrders). It is the
+ * company moving stock to itself: nothing is owed on it, and a bank line
+ * matched to it would turn a transfer back into a sale and count the same
+ * litres as sold on the cargo and again on the trucking PFI.
+ */
+function assertNotTransfer(order) {
+  if (isTransferOrder(order)) {
+    throw httpError(
+      409,
+      `${order.orderNumber || "This order"} moves stock to a trucking PFI. Nothing is owed on it, so no payment can be matched to it.`,
+    );
+  }
+}
+
 const recomputeOrder = async (orderId, tx) => {
   const [order] = await tx
     .select({
@@ -242,6 +258,8 @@ const recordFromStatementLines = async (
         orderNumber: orders.orderNumber,
         status: orders.status,
         pricingStatus: orders.pricingStatus,
+        paymentStatus: orders.paymentStatus,
+        idempotencyKey: orders.idempotencyKey,
         pfiId: orders.pfiId,
       })
       .from(orders)
@@ -249,6 +267,7 @@ const recordFromStatementLines = async (
       .limit(1);
     if (!order) throw httpError(404, "Order not found");
     assertPriced(order);
+    assertNotTransfer(order);
 
     /*
       Every statement line that becomes an order payment passes through here,
@@ -500,6 +519,8 @@ const transferSurplus = async (
         // cannot act on a status another transaction has since moved.
         status: orders.status,
         pricingStatus: orders.pricingStatus,
+        paymentStatus: orders.paymentStatus,
+        idempotencyKey: orders.idempotencyKey,
       })
       .from(orders)
       .where(inArray(orders.id, ids))
@@ -513,6 +534,7 @@ const transferSurplus = async (
     // Only the RECEIVING side needs a price. Moving surplus off an unpriced
     // order is impossible anyway — it has taken no money to have a surplus of.
     assertPriced(to);
+    assertNotTransfer(to);
 
     const fromRows = await trx
       .select({ amount: orderPayments.amount, source: orderPayments.source })

@@ -1,6 +1,11 @@
 const { client, db } = require("../db");
 const { cfoReportEntries } = require("../db/schema");
 const { and, eq, gte, lte, inArray } = require("drizzle-orm");
+const { transferSql } = require("../lib/allocationOrders");
+const { saleSql } = require("../lib/orderSale");
+
+/** Stock moved to a trucking PFI: neither a sale nor awaiting payment. */
+const TRANSFER = client.unsafe(transferSql("o"));
 
 /**
  * The raw material for the CFO report: every figure, bucketed by PFI and by
@@ -21,15 +26,15 @@ const { and, eq, gte, lte, inArray } = require("drizzle-orm");
  */
 
 /**
- * A sale is an order whose payment is confirmed. Nothing else.
+ * A sale is an order money has landed on — paid in full or part paid
+ * (lib/orderSale). Nothing else.
  *
- * The same rule, on the same column, that the PFI page uses for its Total
- * Sold (pfiExpense.repository's `sold` query) and that the finance report
- * uses for its Total Quantity. Sharing it by construction is what makes the
- * CFO report's cumulative column reconcile against the PFI page to the
- * litre instead of approximately.
+ * The same rule that the PFI page uses for its Total Sold and Sales Value and
+ * that the finance report's default view uses for its Total Quantity. Sharing
+ * it by construction is what makes the CFO report's cumulative column
+ * reconcile against the PFI page to the litre instead of approximately.
  */
-const SALE = client`o.payment_status = 'Paid'`;
+const SALE = client.unsafe(saleSql("o"));
 
 /**
  * The day a sale counts towards: the day the ORDER WAS PLACED.
@@ -205,8 +210,59 @@ const unpaidByDay = async ({ tz, from, to, pfiIds }) => {
            COUNT(*)::int                  AS orders
       FROM orders o
      WHERE o.pfi_id IS NOT NULL
-       AND o.payment_status <> 'Paid'
+       -- Nothing paid yet. A part-paid order is a sale.
+       AND o.payment_status NOT IN ('Paid', 'Part Paid')
        AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
+       AND NOT ${TRANSFER}
+       ${from ? client`AND ${day} >= ${from}::date` : client``}
+       AND ${day} <= ${to}::date
+       ${pfiFilter(pfiIds)}
+     GROUP BY 1, 2
+  `;
+};
+
+/**
+ * Of the sales, the litres on part-paid orders, per PFI per day. Same
+ * `from`/`to` contract as salesByDay, dated the same way. Already inside the
+ * sales volume — named beneath it so a reader can see how much of what is sold
+ * is still being paid for.
+ */
+const partPaidByDay = async ({ tz, from, to, pfiIds }) => {
+  const day = SALE_DAY(tz);
+  return client`
+    SELECT o.pfi_id                       AS pfi_id,
+           ${from ? day : client`NULL::date`} AS day,
+           SUM(o.quantity)::numeric       AS qty,
+           COUNT(*)::int                  AS orders
+      FROM orders o
+     WHERE o.pfi_id IS NOT NULL
+       AND o.payment_status = 'Part Paid'
+       AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
+       ${from ? client`AND ${day} >= ${from}::date` : client``}
+       AND ${day} <= ${to}::date
+       ${pfiFilter(pfiIds)}
+     GROUP BY 1, 2
+  `;
+};
+
+/**
+ * Stock moved off each PFI to its trucking PFIs, per day. Same `from`/`to`
+ * contract as salesByDay, dated the same way: the day the allocation's order
+ * was placed, which is the day it was approved.
+ *
+ * Neither a sale nor awaiting payment (lib/allocationOrders), so it is in
+ * neither query above. It comes off the stock balance on its own line, the way
+ * an operational loss does.
+ */
+const truckedByDay = async ({ tz, from, to, pfiIds }) => {
+  const day = SALE_DAY(tz);
+  return client`
+    SELECT o.pfi_id                       AS pfi_id,
+           ${from ? day : client`NULL::date`} AS day,
+           SUM(o.quantity)::numeric       AS qty
+      FROM orders o
+     WHERE o.pfi_id IS NOT NULL
+       AND ${TRANSFER}
        ${from ? client`AND ${day} >= ${from}::date` : client``}
        AND ${day} <= ${to}::date
        ${pfiFilter(pfiIds)}
@@ -282,32 +338,6 @@ const duplicatesExcluded = async ({ tz, to, pfiIds }) => {
      WHERE o.pfi_id IS NOT NULL
        AND ${SALE}
        AND op.id IN (${DUPLICATE_LEGACY_IDS})
-       AND ${day} <= ${to}::date
-       ${pfiFilter(pfiIds)}
-     GROUP BY 1
-  `;
-};
-
-/**
- * Money sitting on orders this report counts on NEITHER side.
- *
- * A part-paid order is not a sale by the rule above, so its litres and its
- * value are absent from the report — and its money has to be absent too, or
- * the surplus column would show cash against sales that were never booked.
- * Excluding both sides is right; excluding them silently is not. The page
- * prints this under the table.
- */
-const partPaidHeld = async ({ tz, to, pfiIds }) => {
-  const day = PAYMENT_DAY(tz);
-  return client`
-    SELECT o.pfi_id AS pfi_id,
-           SUM(op.amount)::numeric AS amount,
-           COUNT(DISTINCT o.id)::int AS orders
-      FROM order_payments op
-      JOIN orders o ON o.id = op.order_id
-     WHERE o.pfi_id IS NOT NULL
-       AND o.payment_status = 'Part Paid'
-       AND op.id NOT IN (${DUPLICATE_LEGACY_IDS})
        AND ${day} <= ${to}::date
        ${pfiFilter(pfiIds)}
      GROUP BY 1
@@ -458,10 +488,11 @@ const editorsFor = async (staffIds) => {
 
 module.exports = {
   unpaidByDay,
+  partPaidByDay,
+  truckedByDay,
   salesByDay,
   inflowByDay,
   duplicatesExcluded,
-  partPaidHeld,
   tradingSpan,
   listPfis,
   visiblePfiIds,

@@ -1,4 +1,5 @@
 const { client } = require("../config/db");
+const { transferSql } = require("../lib/allocationOrders");
 
 /**
  * Everything about a PFI that is not on its own row — who raised and released
@@ -162,10 +163,15 @@ const collectionsFor = async (pfiIds) => {
 const UNPRICED = client.unsafe(
   "o.pricing_status = 'pending' AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')",
 );
-/** A priced order trusted to load before payment, and not yet paid. */
+/**
+ * A priced order trusted to load before payment, and not yet paid. Not a
+ * transfer to a trucking PFI: that is on credit too, but nobody owes it — it
+ * is trucked out (lib/allocationOrders).
+ */
 const CREDIT_UNPAID = client.unsafe(
   "o.credit_qty > 0 AND o.pricing_status = 'priced' AND o.payment_status::text <> 'Paid' "
-  + "AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')",
+  + "AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired') "
+  + `AND NOT ${transferSql("o")}`,
 );
 
 const activityFor = async (pfiIds) => {

@@ -168,13 +168,16 @@ describe("an allocation's trucking PFI — its trucks carry through to its order
     assert.ok(audit, "the change is on the trucking PFI's record");
   });
 
-  test("the finance report shows the new value, on credit", async () => {
+  test("the cargo reads the new litres as trucked out, and the finance report leaves them out", async () => {
+    const pfiRes = await as(admin).get(`/api/pfis/${parent.id}`);
+    assert.equal(pfiRes.status, 200, JSON.stringify(pfiRes.body));
+    assert.equal(pfiRes.body.data.pfi.financials.truckedOut, 118000);
+    assert.equal(pfiRes.body.data.pfi.financials.truckedOutValue, 118000 * 925);
+    assert.equal(pfiRes.body.data.pfi.financials.awaitingPayment, 0);
+
     const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}`);
     assert.equal(res.status, 200, JSON.stringify(res.body));
-    const listed = res.body.data.orders.find((x) => x.id === order.id);
-    assert.ok(listed);
-    assert.equal(listed.onCredit, true);
-    assert.equal(res.body.data.totals.totalOnCredit, 118000 * 925);
+    assert.ok(!res.body.data.orders.some((x) => x.id === order.id));
   });
 
   test("a truck's litres changed on the batch change its load", async () => {

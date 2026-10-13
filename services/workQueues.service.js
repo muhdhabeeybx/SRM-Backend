@@ -2,6 +2,7 @@ const { and, eq, inArray, notInArray, count, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
 const { outstandingTrucks } = require("./truckProgress.service");
+const { transferSql } = require("../lib/allocationOrders");
 
 /**
  * How much work is waiting, per desk.
@@ -141,6 +142,8 @@ const QUEUES = [
           where(
             inArray(orders.paymentStatus, ["Unpaid", "Part Paid"]),
             inArray(orders.status, PAYABLE_STATUSES),
+            // Not a transfer to a trucking PFI: nobody pays it.
+            sql`NOT ${sql.raw(transferSql('"orders"'))}`,
             notOnClosedPfi(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),

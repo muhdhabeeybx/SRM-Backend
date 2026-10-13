@@ -273,22 +273,40 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(orderService.computeExpiresAt(aged), null);
   });
 
-  test("the finance report lists it, marked on credit, and not as owed", async () => {
-    const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}`);
+  test("the cargo reads it as trucked out — not sold, not awaiting payment", async () => {
+    const res = await as(admin).get(`${API}/${parent.id}`);
     assert.equal(res.status, 200, JSON.stringify(res.body));
-    const { orders: listed, totals, customerDifferentials } = res.body.data;
-    const row = listed.find((o) => o.id === order.id);
-    assert.ok(row, "in the normal view, beside the paid orders");
-    assert.equal(row.onCredit, true);
-    assert.equal(totals.onCreditCount, 1);
-    assert.equal(totals.totalOnCredit, 78000 * 925);
-    assert.equal(totals.totalShortfall, 0, "the company selling to itself owes nothing");
-    assert.ok(!customerDifferentials.some((c) => c.customerId === order.customerId), "not a customer's position");
+    const f = res.body.data.pfi.financials;
+    assert.equal(f.truckedOut, 78000);
+    assert.equal(f.truckedOutValue, 78000 * 925);
+    assert.equal(f.truckedOutCount, 1);
+    assert.equal(f.sold, 0, "a transfer is not a sale");
+    assert.equal(f.revenue, 0, "nor sales value");
+    assert.equal(f.awaitingPayment, 0, "and nobody is waiting to be paid for it");
+    assert.equal(f.remaining, 100000 - 78000, "initial − trucked out");
+    assert.equal(f.trulyUnsold, 100000 - 78000);
+    assert.equal(f.sellThrough, 0.78);
+  });
 
-    const filtered = await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=on_credit`);
-    assert.deepEqual(filtered.body.data.orders.map((o) => o.id), [order.id]);
-    const paid = await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=Paid`);
-    assert.equal(paid.body.data.orders.length, 0);
+  test("the finance report leaves it out — it is no money received or owed", async () => {
+    for (const status of ["", "&paymentStatus=all", "&paymentStatus=Unpaid"]) {
+      const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}${status}`);
+      assert.equal(res.status, 200, JSON.stringify(res.body));
+      assert.ok(!res.body.data.orders.some((o) => o.id === order.id), `not listed under '${status}'`);
+      assert.equal(res.body.data.totals.totalShortfall, 0);
+    }
+  });
+
+  test("the payable desk does not offer it, and no payment can land on it", async () => {
+    const res = await as(admin).get("/api/orders/payable");
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.ok(!res.body.data.orders.some((o) => o.id === order.id));
+
+    const paymentService = require("../services/orderPayment.service");
+    await assert.rejects(
+      paymentService.recordFromStatementLines({ orderId: order.id, bankAccountId: account.id, lineIds: [1] }),
+      (err) => err.status === 409 && /trucking PFI/.test(err.message),
+    );
   });
 
   test("the order cannot be cancelled while the trucking PFI holds its litres", async () => {

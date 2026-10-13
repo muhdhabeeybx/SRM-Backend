@@ -1,6 +1,11 @@
 const { client } = require("../db");
 const { stockQty } = require("../lib/pfiStock");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
+const { transferSql } = require("../lib/allocationOrders");
+const { saleSql } = require("../lib/orderSale");
+
+/** Stock moved to a trucking PFI: not an order anybody placed (lib/allocationOrders). */
+const TRANSFER = client.unsafe(transferSql("o"));
 const { generateOrderReference } = require("../utils/helpers");
 
 /**
@@ -182,6 +187,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         LEFT JOIN customers c ON c.id = o.customer_id
         LEFT JOIN products pr ON pr.id = o.product_id
         WHERE o.created_at >= ${start.toISOString()} AND o.created_at < ${end.toISOString()}
+          AND NOT ${TRANSFER}
         ORDER BY o.created_at ASC
       `,
       // The seven days BEFORE this one, a day at a time. The summary needs
@@ -197,13 +203,15 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         FROM orders o
         WHERE o.created_at >= ${new Date(start.getTime() - 7 * 86400000).toISOString()}
           AND o.created_at <  ${start.toISOString()}
+          AND NOT ${TRANSFER}
         GROUP BY 1
         ORDER BY 1 DESC
       `,
       client`
-        SELECT pfi_id, COALESCE(SUM(total_amount - delivery_fee), 0)::text AS total
-        FROM orders WHERE payment_status = 'Paid' AND pfi_id IS NOT NULL
-        GROUP BY pfi_id
+        -- Every sale, paid in full or part paid (lib/orderSale): the PFI's sales value.
+        SELECT o.pfi_id, COALESCE(SUM(o.total_amount - o.delivery_fee), 0)::text AS total
+        FROM orders o WHERE ${client.unsafe(saleSql("o"))} AND o.pfi_id IS NOT NULL
+        GROUP BY o.pfi_id
       `,
       /**
        * The day's trading, per PFI, plus what left the batch after it.
@@ -232,7 +240,8 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
                  COALESCE(a.quantity, o.quantity)::numeric AS qty,
                  (o.total_amount - o.delivery_fee)::numeric AS value,
                  o.payment_status,
-                 o.created_at
+                 o.created_at,
+                 ${TRANSFER} AS is_transfer
           FROM orders o
           LEFT JOIN order_pfi_allocations a ON a.order_id = o.id
           WHERE o.status NOT IN ('Cancelled', 'Expired')
@@ -240,18 +249,26 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         )
         SELECT pfi_id,
                COALESCE(SUM(qty) FILTER (WHERE created_at >= ${start.toISOString()}
-                                           AND created_at <  ${end.toISOString()}), 0)::bigint
+                                           AND created_at <  ${end.toISOString()}
+                                           AND NOT is_transfer), 0)::bigint
                  AS ordered_qty,
                COALESCE(SUM(value) FILTER (WHERE created_at >= ${start.toISOString()}
-                                             AND created_at <  ${end.toISOString()}), 0)::text
+                                             AND created_at <  ${end.toISOString()}
+                                             AND NOT is_transfer), 0)::text
                  AS ordered_value,
+               -- Moved to a trucking PFI on the day: gone from the batch, but
+               -- no order anybody placed.
                COALESCE(SUM(qty) FILTER (WHERE created_at >= ${start.toISOString()}
                                            AND created_at <  ${end.toISOString()}
-                                           AND payment_status = 'Paid'), 0)::bigint
+                                           AND is_transfer), 0)::bigint
+                 AS trucked_qty,
+               COALESCE(SUM(qty) FILTER (WHERE created_at >= ${start.toISOString()}
+                                           AND created_at <  ${end.toISOString()}
+                                           AND payment_status IN ('Paid', 'Part Paid')), 0)::bigint
                  AS confirmed_qty,
                COALESCE(SUM(value) FILTER (WHERE created_at >= ${start.toISOString()}
                                              AND created_at <  ${end.toISOString()}
-                                             AND payment_status = 'Paid'), 0)::text
+                                             AND payment_status IN ('Paid', 'Part Paid')), 0)::text
                  AS confirmed_value,
                COALESCE(SUM(qty) FILTER (WHERE created_at >= ${end.toISOString()}), 0)::bigint
                  AS qty_after_day
@@ -267,6 +284,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
       {
         orderedQty: num(r.ordered_qty),
         orderedValue: num(r.ordered_value),
+        truckedQty: num(r.trucked_qty),
         confirmedQty: num(r.confirmed_qty),
         confirmedValue: num(r.confirmed_value),
         qtyAfterDay: num(r.qty_after_day),
@@ -390,6 +408,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
           const t = tradingByPfi.get(pfiId) || {
             orderedQty: 0,
             orderedValue: 0,
+            truckedQty: 0,
             confirmedQty: 0,
             confirmedValue: 0,
             qtyAfterDay: 0,
@@ -415,7 +434,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
           // which this figure is anchored to. See lib/pfiStock.js.
           const balanceNow = pfi ? stockQty(pfi) - num(pfi.sold_qty_litres) : 0;
           const closingStock = balanceNow + t.qtyAfterDay;
-          const openingStock = closingStock + t.orderedQty;
+          const openingStock = closingStock + t.orderedQty + t.truckedQty;
 
           return {
             pfiNumber: pfi?.pfi_number || `PFI #${pfiId}`,
@@ -426,6 +445,8 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
             closingStock,
             orderedQty: t.orderedQty,
             orderedValue: t.orderedValue,
+            /** To a trucking PFI on the day — opening − ordered − this = closing. */
+            truckedQty: t.truckedQty,
             confirmedQty: t.confirmedQty,
             confirmedValue: t.confirmedValue,
             // Volume-weighted, not the average of the prices: a 500,000 L order
@@ -480,11 +501,12 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
           acc.closing += r.closingStock;
           acc.orderedQty += r.orderedQty;
           acc.orderedValue += r.orderedValue;
+          acc.truckedQty += r.truckedQty;
           acc.confirmedQty += r.confirmedQty;
           acc.confirmedValue += r.confirmedValue;
           return acc;
         },
-        { opening: 0, closing: 0, orderedQty: 0, orderedValue: 0, confirmedQty: 0, confirmedValue: 0 }
+        { opening: 0, closing: 0, orderedQty: 0, orderedValue: 0, truckedQty: 0, confirmedQty: 0, confirmedValue: 0 }
       );
 
       return { name: g.name, staffEntries, pfiStock, orders, orderCount, orderLitres, orderValue, stock };
@@ -498,6 +520,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
       acc.amountNaira += loc.orderValue;
       acc.openingStock += loc.stock.opening;
       acc.closingStock += loc.stock.closing;
+      acc.truckedQty += loc.stock.truckedQty;
       acc.confirmedQty += loc.stock.confirmedQty;
       acc.confirmedValue += loc.stock.confirmedValue;
       return acc;
@@ -509,6 +532,7 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
       amountNaira: 0,
       openingStock: 0,
       closingStock: 0,
+      truckedQty: 0,
       confirmedQty: 0,
       confirmedValue: 0,
     }

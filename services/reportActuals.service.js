@@ -1,5 +1,6 @@
 const { sql } = require("drizzle-orm");
 const { db } = require("../config/db");
+const { transferSql } = require("../lib/allocationOrders");
 
 /**
  * What the system already knows, for a report somebody is about to file.
@@ -35,6 +36,8 @@ const ordersOn = (date, pfiId) => sql`
     FROM orders o
    WHERE o.created_at >= ${date}::date
      AND o.created_at < (${date}::date + interval '1 day')
+     -- Stock moved to a trucking PFI is no sale a desk reports.
+     AND NOT ${sql.raw(transferSql("o"))}
      ${pfiId ? sql`AND o.pfi_id = ${Number(pfiId)}` : sql``}
 `;
 

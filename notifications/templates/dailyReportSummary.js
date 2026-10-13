@@ -89,6 +89,14 @@ function stockStatement(d) {
   // placed against a batch that has not moved, and the sentence is about the
   // tank rather than the order book.
   const moved = t.openingStock - t.closingStock;
+  // Stock moved to a trucking PFI left the tank too, but was not sold.
+  const trucked = Math.min(Math.max(0, t.truckedQty || 0), Math.max(0, moved));
+  if (moved > 0 && trucked > 0) {
+    return (
+      `Total stock opened at ${litres(t.openingStock)}, with ${litres(moved - trucked)} sold today ` +
+      `and ${litres(trucked)} trucked out, leaving a closing stock of ${litres(t.closingStock)}.`
+    );
+  }
   if (moved > 0) {
     return (
       `Total stock opened at ${litres(t.openingStock)}, with ${litres(moved)} sold today, ` +

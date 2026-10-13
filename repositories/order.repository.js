@@ -1,5 +1,5 @@
 const { eq, ne, and, or, ilike, inArray, notInArray, desc, asc, count, sql, gte, lte } = require("drizzle-orm");
-const { PREFIX: ALLOCATION_ORDER_PREFIX } = require("../lib/allocationOrders");
+const { PREFIX: ALLOCATION_ORDER_PREFIX, transferSql } = require("../lib/allocationOrders");
 const { PREFIX: UPLOADED_ORDER_PREFIX } = require("../lib/uploadedOrders");
 const { db } = require("../config/db");
 const {
@@ -809,19 +809,17 @@ const findFinanceReport = async ({
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
   /**
-   * On credit by design: the company selling to itself — a truck allocation's
-   * order (services/pfiAllocation.service.js), placed on credit and never
-   * paid for like a customer's. Listed with the paid orders, marked ON CREDIT,
-   * and kept out of what is owed, which it is not. The first was placed on
-   * 2 October 2026, after the audit, so no audited figure includes one.
+   * Never a transfer to a trucking PFI (lib/allocationOrders): stock the
+   * company moved to itself, which nobody pays and nobody owes, so it is no
+   * row of a report about money received — under any status filter. A PAID
+   * allocation order (PFI/47C's) stays, as the sale its bank line made it.
+   * The first transfer was placed after the audit, so no audited figure moves.
    */
-  const onCreditHouse = sql`(${orders.creditQty} > 0 AND ${customers.houseAccount} IS NOT NULL AND ${orders.paymentStatus} <> 'Paid')`;
-  if (paymentStatus === "on_credit") {
-    conditions.push(onCreditHouse);
-  } else if (paymentStatus && paymentStatus !== "all") {
+  conditions.push(sql`NOT ${sql.raw(transferSql('"orders"'))}`);
+  if (paymentStatus && paymentStatus !== "all") {
     conditions.push(eq(orders.paymentStatus, paymentStatus));
   } else if (!paymentStatus) {
-    conditions.push(or(inArray(orders.paymentStatus, ["Paid", "Part Paid"]), onCreditHouse));
+    conditions.push(inArray(orders.paymentStatus, ["Paid", "Part Paid"]));
   }
   if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
   if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));
@@ -918,8 +916,6 @@ const findFinanceReport = async ({
   const columns = {
     ...FULL_ORDER_COLUMNS,
     pfiLocationName: pfis.locationName,
-    /** Marked ON CREDIT on the report and left out of what is owed. */
-    onCredit: sql`${onCreditHouse}`.mapWith(Boolean),
     /** Set on the company's own account, whose position is not a customer's. */
     customerHouseAccount: customers.houseAccount,
   };
@@ -1001,15 +997,9 @@ const findFinanceReport = async ({
         totalSurplus: sql`COALESCE(SUM(GREATEST(0, (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         ) - (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric)), 0)`,
-        // Owed by customers — an order on credit by design is not, and is
-        // totalled on its own below.
-        totalShortfall: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN 0 ELSE GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
+        totalShortfall: sql`COALESCE(SUM(GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
-        )) END), 0)`,
-        totalOnCredit: sql`COALESCE(SUM(CASE WHEN ${onCreditHouse} THEN GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
-          SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
-        )) ELSE 0 END), 0)`,
-        onCreditCount: sql`COUNT(*) FILTER (WHERE ${onCreditHouse})::int`,
+        ))), 0)`,
         reconciledCount: sql`COUNT(*) FILTER (WHERE ${hasStatement})::int`,
         partPaidCount: sql`COUNT(*) FILTER (WHERE ${orders.paymentStatus} = 'Part Paid')::int`,
         /**
@@ -1540,9 +1530,6 @@ const findFinanceReport = async ({
       /** Summed per order, never netted — see the SQL above. */
       totalSurplus: Number(totalsRow.totalSurplus),
       totalShortfall: Number(totalsRow.totalShortfall),
-      /** Value on orders placed on credit by design — not owed by any customer. */
-      totalOnCredit: Number(totalsRow.totalOnCredit),
-      onCreditCount: Number(totalsRow.onCreditCount),
       /** How much of the book an external audit can actually check. */
       reconciledCount,
       unreconciledCount: total - reconciledCount,
@@ -1670,6 +1657,8 @@ const findPayableOrders = async (scopeUser) => {
      * list until it is priced, and arrives here the moment it is.
      */
     ne(orders.pricingStatus, "pending"),
+    // Not a transfer to a trucking PFI: nobody pays it (lib/allocationOrders).
+    sql`NOT ${sql.raw(transferSql('"orders"'))}`,
   ];
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);

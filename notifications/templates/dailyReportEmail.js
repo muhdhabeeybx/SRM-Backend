@@ -136,7 +136,13 @@ function stockTable(pfiStock) {
         cell(escapeHtml(r.pfiNumber)) +
         cell(escapeHtml(r.productName) || "—", { s: `color:${MUTED};` }) +
         cell(`${n0(r.openingStock)} ${u}`, { r: true, s: KEY_S, bg: TINT }) +
-        cell(r.orderedQty ? `${n0(r.orderedQty)} ${u}` : "—", { r: true, s: CREDIT_S }) +
+        // Stock moved to a trucking PFI on the day is named under Ordered, not
+        // counted in it, so Opening − Ordered − trucked out is still Closing.
+        cell(
+          (r.orderedQty ? `${n0(r.orderedQty)} ${u}` : "—") +
+            (r.truckedQty > 0 ? `<br><span style="font-size:11px">+ ${n0(r.truckedQty)} ${u} trucked out</span>` : ""),
+          { r: true, s: CREDIT_S }
+        ) +
         cell(m(r.orderedValue), { r: true, s: CREDIT_S }) +
         cell(r.confirmedQty ? `${n0(r.confirmedQty)} ${u}` : "—", { r: true, s: CREDIT_S }) +
         cell(m(r.confirmedValue), { r: true, s: CREDIT_S }) +

@@ -1,5 +1,6 @@
 const { sql } = require("drizzle-orm");
 const { db } = require("../config/db");
+const { transferSql } = require("../lib/allocationOrders");
 
 /**
  * The panels on the company overview that had to be rebuilt, and why.
@@ -122,6 +123,8 @@ const financeSummary = async ({ from, to }) => {
       WHERE o.created_at >= ${from} AND o.created_at <= ${to}
         AND o.payment_status IN ('Unpaid', 'Part Paid')
         AND o.status NOT IN ('Cancelled', 'Expired')
+        -- A transfer to a trucking PFI is owed by nobody.
+        AND NOT ${sql.raw(transferSql("o"))}
     `),
   );
 
