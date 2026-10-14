@@ -4,6 +4,7 @@ const { db, client } = require("../../config/db");
 const auditLogRepo = require("../../repositories/auditLog.repository");
 const { bankAccountRepo } = require("../../repositories");
 const pfiBankScope = require("../../lib/pfiBankScope");
+const { ensureBankAccounts } = require("../../lib/accounting/chart");
 
 const getBankAccounts = asyncHandler(async (req, res) => {
   const { search, status, depotId, lpgStationId, usage } = req.query;
@@ -242,6 +243,10 @@ const createBankAccount = asyncHandler(async (req, res) => {
     usage: Array.isArray(usage) ? usage : [],
     notes: notes || "",
   });
+
+  // Its own account in the chart (11xx), so the ledger has somewhere to post
+  // money paid into it. Never fails the create: the next posting run adds it.
+  await ensureBankAccounts().catch((err) => console.error("Chart account for new bank account:", err.message));
 
   res.status(201).json({
     success: true,

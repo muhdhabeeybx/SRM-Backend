@@ -12,6 +12,7 @@ const {
 } = require("../services/workReminders.service");
 const { resetPricesForTheDay } = require("../services/priceReset.service");
 const { syncTermii } = require("../services/messageLog.service");
+const ledgerPosting = require("../services/accounting/posting.service");
 
 // An ad-hoc pg-boss queue created on demand, mirroring the WhatsApp maintenance
 // cron — not part of the WhatsApp queue set.
@@ -22,6 +23,9 @@ const DESK_NUDGE_QUEUE = "desk-nudge-sweep";
 const WORK_REMINDER_QUEUE = "work-reminders";
 const PRICE_RESET_QUEUE = "depot-price-reset";
 const MESSAGE_COST_QUEUE = "message-cost-sync";
+const LEDGER_POSTING_QUEUE = "ledger-posting";
+/** Every ten minutes, so the books are never far behind the desks. */
+const LEDGER_POSTING_CRON = "*/10 * * * *";
 const MESSAGE_COST_CRON = process.env.MESSAGE_COST_CRON || "*/30 * * * *";
 
 /**
@@ -183,6 +187,37 @@ const start = async () => {
   });
   await scheduleCron(MESSAGE_COST_QUEUE, MESSAGE_COST_CRON, {}, { tz: DAILY_REPORT_TZ });
   console.log(`[scheduler] message cost sync scheduled (${MESSAGE_COST_CRON} ${DAILY_REPORT_TZ})`);
+
+  // ── The general ledger ────────────────────────────────────────────────────
+  //
+  // Books whatever the desks recorded since the last run (posting.service).
+  // Off until LEDGER_POSTING_ENABLED=true: the first run books the whole of
+  // October, and the owner looks at that on a copy before it goes live.
+  // Swallows its failure — the next run picks up everything this one missed.
+  if (process.env.LEDGER_POSTING_ENABLED === "true") {
+    await registerWorker(LEDGER_POSTING_QUEUE, async () => {
+      try {
+        const result = await ledgerPosting.run();
+        if (result.busy) return { busy: true };
+        const totals = Object.values(result.sources).reduce(
+          (t, s) => ({ booked: t.booked + s.booked, adjusted: t.adjusted + s.adjusted, takenBack: t.takenBack + s.takenBack, failed: t.failed + s.failed.length }),
+          { booked: 0, adjusted: 0, takenBack: 0, failed: 0 },
+        );
+        if (totals.booked + totals.adjusted + totals.takenBack + totals.failed > 0) {
+          console.log(`[scheduler] ledger — ${totals.booked} booked, ${totals.adjusted} adjusted, ${totals.takenBack} taken back, ${totals.failed} failed`);
+        }
+        return totals;
+      } catch (err) {
+        console.error("[scheduler] ledger posting failed:", err.message);
+        return { failed: true };
+      }
+    });
+    await scheduleCron(LEDGER_POSTING_QUEUE, LEDGER_POSTING_CRON, {}, { tz: DAILY_REPORT_TZ });
+    console.log(`[scheduler] ledger posting scheduled (${LEDGER_POSTING_CRON})`);
+  } else {
+    await unschedule(LEDGER_POSTING_QUEUE);
+    console.log("[scheduler] ledger posting is switched off (LEDGER_POSTING_ENABLED is not true)");
+  }
 
   // Say at boot whether this can actually work, rather than at 23:50 when
   // nobody is looking. An unset REPORT_RECIPIENTS is the single most likely

@@ -4,7 +4,10 @@ const { orders, orderPayments, orderRefunds, customers, bankAccounts } = require
 const { PAYMENT_SOURCE, CONFIRMATION_BASIS } = require("../db/schema/orderPayment");
 const { recomputeOrder, httpError } = require("./orderPayment.service");
 const auditLogRepo = require("../repositories/auditLog.repository");
-const { DUPLICATE_LEGACY_IDS, DUPLICATE_LEGACY_IDS_SQL } = require("../repositories/cfoReport.repository");
+// The finance report's duplicate rule (lib/duplicatePayments) — the same one
+// the customer statement and the books read. The CFO report's narrower rule
+// offered ₦53.1m of order 9437's duplicate for refund (2026-10-14).
+const { DUPLICATE_PAYMENT_IDS_SQL } = require("../lib/duplicatePayments");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { generateOrderReference } = require("../utils/helpers");
 
@@ -82,6 +85,7 @@ const RESURRECTED_PAYMENT_IDS_SQL = `
      )
 `;
 const RESURRECTED_PAYMENT_IDS = client.unsafe(RESURRECTED_PAYMENT_IDS_SQL);
+const DUPLICATE_IDS = client.unsafe(DUPLICATE_PAYMENT_IDS_SQL);
 
 /**
  * Overpayment goes back to the customer.
@@ -109,7 +113,7 @@ const RESURRECTED_PAYMENT_IDS = client.unsafe(RESURRECTED_PAYMENT_IDS_SQL);
  * orders that received a transfer — the same money counted twice. Refunding
  * the raw surplus would pay real cash back against a bookkeeping artefact.
  * Every amount here is computed with those rows read past, by the same rule
- * the CFO report uses (DUPLICATE_LEGACY_IDS). The rows themselves stay — the
+ * the finance report uses (lib/duplicatePayments). The rows themselves stay — the
  * finance report is audited against them.
  */
 
@@ -155,7 +159,7 @@ const realSurplus = async (orderId, trx = db) => {
    * removed at the same moment — and a refund computed against a stale figure
    * leaves the order short by money that has already left.
    */
-  const dup = sql.raw(DUPLICATE_LEGACY_IDS_SQL);
+  const dup = sql.raw(DUPLICATE_PAYMENT_IDS_SQL);
   const back = sql.raw(RESURRECTED_PAYMENT_IDS_SQL);
   const result = await trx.execute(sql`
     SELECT o.total_amount::numeric AS total,
@@ -200,11 +204,11 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
     WITH p AS (
       SELECT order_id,
              SUM(amount) FILTER (
-               WHERE id NOT IN (${DUPLICATE_LEGACY_IDS})
+               WHERE id NOT IN (${DUPLICATE_IDS})
                  AND id NOT IN (${RESURRECTED_PAYMENT_IDS})
              ) AS received,
              SUM(amount) FILTER (WHERE id IN (${RESURRECTED_PAYMENT_IDS})) AS resurrected,
-             SUM(amount) FILTER (WHERE id IN (${DUPLICATE_LEGACY_IDS}))     AS phantom,
+             SUM(amount) FILTER (WHERE id IN (${DUPLICATE_IDS}))     AS phantom,
              -- Money that reached this order by being moved off another one,
              -- back when surplus was transferred rather than refunded. It is
              -- often the whole reason the order is on this list, and it reads
@@ -327,7 +331,7 @@ const REFUND_SELECT = (scopeUser, where) => client`
               order's payments changed after it was raised. */
            (COALESCE((SELECT SUM(op.amount) FROM order_payments op
                        WHERE op.order_id = o.id
-                         AND op.id NOT IN (${DUPLICATE_LEGACY_IDS})
+                         AND op.id NOT IN (${DUPLICATE_IDS})
                          AND op.id NOT IN (${RESURRECTED_PAYMENT_IDS})), 0)
              - ${client.unsafe(WALLET_MOVED_OUT_SQL("o.id"))}
              - o.total_amount::numeric) AS current_surplus,

@@ -49,6 +49,15 @@ const expenseCategories = pgTable(
     isSystemCategory: boolean("is_system_category").default(false).notNull(),
     /** Customer refunds (migration 0065): money returned, never a cost. */
     isRefund: boolean("is_refund").default(false).notNull(),
+    /**
+     * The name the general ledger finds this account by (0081):
+     * 'customer_receivables', 'bank:54'. Null on every cost account.
+     */
+    systemKey: varchar("system_key", { length: 60 }),
+    /** The bank account a 11xx account stands for (0081). FK in the migration. */
+    bankAccountId: integer("bank_account_id"),
+    /** operating | investing | financing, where the group's default is wrong (0081). */
+    cashFlowClass: varchar("cash_flow_class", { length: 20 }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },

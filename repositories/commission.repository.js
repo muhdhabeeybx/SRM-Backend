@@ -587,7 +587,86 @@ const getSummary = async ({ depotId, customerId, dateFrom, dateTo } = {}) => {
   };
 };
 
+/**
+ * Commission money with staff, PFI by PFI (0084).
+ *
+ * Money for commissions is requested on a 5410 expense and handed to a member
+ * of staff, who pays customers out of it until it runs out. So for each PFI:
+ *
+ *   given        approved or paid 5410 expenses — the whole invoice, as the
+ *                books take it (postingSources/expenses.js)
+ *   paid out     its orders' commissions marked paid — less any credited to a
+ *                customer's wallet, as paying did before 1 Sep 2026, which no
+ *                member of staff paid
+ *   still owed   its orders' commissions not yet paid (skipped ones are owed
+ *                to nobody)
+ *   left         given less paid out: what staff should still be holding. Below
+ *                nought, more was marked paid than was given.
+ *
+ * The same figures the general ledger keeps in Commission money with staff and
+ * Commissions payable (postingSources/commissions.js), read from the desks'
+ * own records so the page needs no posting run.
+ */
+const moneyWithStaff = async () => {
+  const rows = await client`
+    WITH given AS (
+      SELECT e.pfi_id,
+             SUM(COALESCE(e.amount_ngn, CASE WHEN COALESCE(e.currency, 'NGN') = 'NGN' THEN e.amount END)
+                 + ROUND(COALESCE(e.wht_deduction, 0) * x.rate, 2)
+                 + CASE WHEN e.vat_withheld THEN ROUND(COALESCE(e.vat_amount, 0) * x.rate, 2) ELSE 0 END) AS given,
+             COUNT(*) AS requests,
+             string_agg(DISTINCT COALESCE(v.name, NULLIF(btrim(e.vendor), '')), ', ') AS given_to
+        FROM pfi_expenses e
+        JOIN expense_categories c ON c.id = e.category_id
+        LEFT JOIN vendors v ON v.id = e.vendor_id
+        CROSS JOIN LATERAL (SELECT CASE WHEN COALESCE(e.currency, 'NGN') = 'NGN' THEN 1 ELSE e.exchange_rate END AS rate) x
+       WHERE c.system_key = 'customer_commission' AND e.deleted_at IS NULL
+         AND e.status IN ('admin_approved', 'paid') AND x.rate IS NOT NULL
+       GROUP BY e.pfi_id),
+    earned AS (
+      SELECT o.pfi_id,
+             SUM(c.commission_amount) FILTER (WHERE c.status = 'paid' AND NOT w.to_wallet) AS paid_out,
+             SUM(c.commission_amount) FILTER (WHERE c.status = 'pending') AS owed
+        FROM commissions c
+        JOIN orders o ON o.id = c.order_id
+        CROSS JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM deposits d WHERE d.reference ILIKE 'COM-%-' || c.id) AS to_wallet) w
+       WHERE c.status <> 'skipped' AND c.commission_amount > 0
+       GROUP BY o.pfi_id)
+    SELECT COALESCE(g.pfi_id, n.pfi_id) AS pfi_id, p.pfi_number, g.given_to,
+           COALESCE(g.requests, 0)::int AS requests,
+           COALESCE(g.given, 0)::numeric AS given, COALESCE(n.paid_out, 0)::numeric AS paid_out,
+           COALESCE(n.owed, 0)::numeric AS owed
+      FROM given g
+      -- No PFI on either side meets as 0: a full join needs a plain equality.
+      FULL JOIN earned n ON COALESCE(n.pfi_id, 0) = COALESCE(g.pfi_id, 0)
+      LEFT JOIN pfis p ON p.id = COALESCE(g.pfi_id, n.pfi_id)
+     ORDER BY COALESCE(g.pfi_id, n.pfi_id) DESC NULLS LAST`;
+  const money = (v) => Math.round((Number(v) || 0) * 100) / 100;
+  const out = rows
+    .map((r) => {
+      const given = money(r.given);
+      const paidOut = money(r.paid_out);
+      return {
+        pfiId: r.pfi_id == null ? null : Number(r.pfi_id),
+        pfiNumber: r.pfi_number || "No PFI",
+        givenTo: r.given_to || "",
+        requests: r.requests,
+        given,
+        paidOut,
+        owed: money(r.owed),
+        left: money(given - paidOut),
+      };
+    })
+    .filter((r) => r.given || r.paidOut || r.owed);
+  const sum = (f) => money(out.reduce((t, r) => t + f(r), 0));
+  return {
+    rows: out,
+    totals: { given: sum((r) => r.given), paidOut: sum((r) => r.paidOut), owed: sum((r) => r.owed), left: sum((r) => r.left) },
+  };
+};
+
 module.exports = {
+  moneyWithStaff,
   getRate,
   getRates,
   upsertRate,

@@ -111,6 +111,7 @@ app.use("/api/deposits", require("./routes/administration/deposit.route"));
 app.use("/api/expected-payments", require("./routes/administration/expectedPayment.route"));
 app.use("/api/bank-accounts", require("./routes/administration/bankAccount.route"));
 app.use("/api/vendors", require("./routes/administration/vendor.route"));
+app.use("/api/accounts", require("./routes/administration/accounts.route"));
 app.use("/api/finance-report", require("./routes/administration/financeReport.route"));
 // Sales and money per batch per day — the CFO's own sheet. See
 // services/cfoReport.service.js for how every column is arrived at.

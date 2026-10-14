@@ -111,6 +111,8 @@ const pfis = pgTable(
     commissionOfficerId: integer("commission_officer_id").references(() => staff.id, { onDelete: "set null" }),
     commissionOfficerName: varchar("commission_officer_name", { length: 255 }).default(""),
     salesManagerId: integer("sales_manager_id").references(() => staff.id, { onDelete: "set null" }),
+    /** Who the product was bought from (0083). FK to vendors in the migration. */
+    supplierVendorId: integer("supplier_vendor_id"),
     salesManagerName: varchar("sales_manager_name", { length: 255 }).default(""),
     // Vessel & Surveyor
     vesselBroker: varchar("vessel_broker", { length: 255 }).default(""),

@@ -4,10 +4,12 @@ const verifyStaff = require("../../middleware/verifyStaff");
 const { enforceRole } = require("../../middleware/verifyStaff");
 const validate = require("../../middleware/validate");
 const customerSchemas = require("../../schemas/customer.schema");
+const { statementQuery } = require("../../schemas/statement.schema");
 const {
   getCustomers,
   getCustomerById,
   getCustomerPayments,
+  getCustomerStatement,
   createCustomer,
   updateCustomer,
   deleteCustomer,
@@ -21,6 +23,7 @@ router.get("/", verifyStaff, validate({ query: customerSchemas.listCustomers }),
 router.get("/segments", verifyStaff, validate({ query: customerSchemas.segmentCustomers }), getCustomerSegment);
 router.get("/:id", verifyStaff, validate({ params: customerSchemas.idParam }), getCustomerById);
 router.get("/:id/payments", verifyStaff, validate({ params: customerSchemas.idParam }), getCustomerPayments);
+router.get("/:id/statement", verifyStaff, validate({ params: customerSchemas.idParam, query: statementQuery }), getCustomerStatement);
 router.post("/", verifyStaff, validate({ body: customerSchemas.createCustomer }), createCustomer);
 router.patch("/:id", verifyStaff, validate({ params: customerSchemas.idParam, body: customerSchemas.updateCustomer }), updateCustomer);
 // Reading, creating and editing a customer stay open to every desk — the app

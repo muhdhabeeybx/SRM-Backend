@@ -331,10 +331,10 @@ const bankStatementRepo = {
   async upsertMapping(bankAccountId, m) {
     const [row] = await client`
       INSERT INTO bank_statement_column_mappings
-        (bank_account_id, header_row, date_column, amount_column, credit_column,
+        (bank_account_id, header_row, date_column, amount_column, credit_column, debit_column,
          depositor_column, reference_column, narration_column, sample_headers, updated_at)
       VALUES (${bankAccountId}, ${m.headerRow ?? 0}, ${m.dateColumn},
-              ${m.amountColumn ?? null}, ${m.creditColumn ?? null},
+              ${m.amountColumn ?? null}, ${m.creditColumn ?? null}, ${m.debitColumn ?? null},
               ${m.depositorColumn ?? null}, ${m.referenceColumn ?? null},
               ${m.narrationColumn ?? null},
               ${JSON.stringify(m.sampleHeaders || [])}::jsonb, now())
@@ -343,6 +343,8 @@ const bankStatementRepo = {
         date_column = EXCLUDED.date_column,
         amount_column = EXCLUDED.amount_column,
         credit_column = EXCLUDED.credit_column,
+        -- A screen that does not know the debit column yet leaves it alone.
+        debit_column = ${m.debitColumn === undefined ? client`bank_statement_column_mappings.debit_column` : client`EXCLUDED.debit_column`},
         depositor_column = EXCLUDED.depositor_column,
         reference_column = EXCLUDED.reference_column,
         narration_column = EXCLUDED.narration_column,
@@ -437,6 +439,47 @@ const bankStatementRepo = {
     }
 
     return { added: fresh.length, duplicates, repeatedReferences, excluded, excludedRows, referencesAdded, statement };
+  },
+
+  /**
+   * Stores a statement's withdrawals (0083) — money out, for the books.
+   *
+   * Kept apart from the credits, so nothing that offers a line to a payment
+   * desk can offer one of these. Deduplicated per account by the same
+   * fingerprint as credits, so uploading an overlapping statement twice adds
+   * each withdrawal once. The bank's own charges are kept: they are money out
+   * like any other.
+   */
+  async ingestDebits({ bankAccountId, statementId = null, uploadedBy = null, rows }) {
+    const day = (d) => String(d).slice(0, 10);
+    let added = 0;
+    // Two withdrawals alike in every particular are two withdrawals — the
+    // ₦50 SMS alert charged twice in a day. Each gets its place among its
+    // twins in this file, so they are kept apart, while the same file (or a
+    // statement overlapping it) uploaded again numbers them the same way and
+    // adds nothing. The narration is part of what a withdrawal is: with no
+    // reference, two payments of one amount on one day differ by it.
+    const seen = new Map();
+    for (const r of rows) {
+      const amount = Math.abs(Number(r.amount));
+      if (!(amount > 0)) continue;
+      const who = `${String(r.depositor || "").trim()}|${String(r.narration || "").trim()}`;
+      const twin = [day(r.txnDate), String(r.bankRef || "").trim().toLowerCase(), amount.toFixed(2), who.toLowerCase()].join("|");
+      const nth = (seen.get(twin) || 0) + 1;
+      seen.set(twin, nth);
+      const [row] = await client`
+        INSERT INTO bank_statement_debits
+          (bank_account_id, statement_id, txn_date, amount, beneficiary, bank_ref, narration, raw_row, dedup_key, uploaded_by)
+        VALUES (${bankAccountId}, ${statementId}, ${day(r.txnDate)}, ${amount},
+                ${r.depositor || ""}, ${r.bankRef || ""}, ${r.narration || ""},
+                ${JSON.stringify(r.rawRow || [])}::jsonb,
+                ${dedupKey({ txnDate: r.txnDate, bankRef: r.bankRef, amount, depositor: nth === 1 ? who : `${who}#${nth}` })},
+                ${uploadedBy})
+        ON CONFLICT (bank_account_id, dedup_key) DO NOTHING
+        RETURNING id`;
+      if (row) added += 1;
+    }
+    return { added, duplicates: rows.length - added };
   },
 
   /**
@@ -959,3 +1002,5 @@ const bankStatementRepo = {
 bankStatementRepo.bankOwnEntry = bankOwnEntry;
 
 module.exports = bankStatementRepo;
+/** The running balance a statement prints beside a row — read by the opening balances (services/accounting/opening). */
+module.exports.balanceOf = balanceOf;

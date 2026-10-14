@@ -13,6 +13,11 @@ const getCommissions = asyncHandler(async (req, res) => {
   res.json({ success: true, data: result });
 });
 
+/** Commission money with staff, PFI by PFI — see the repository. */
+const getMoneyWithStaff = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await commissionRepo.moneyWithStaff() });
+});
+
 const getCommissionById = asyncHandler(async (req, res) => {
   const commission = await commissionRepo.findById(parseInt(req.params.id));
   if (!commission) {
@@ -301,6 +306,7 @@ module.exports = {
   revertCommission,
   bulkResolve,
   getSummary,
+  getMoneyWithStaff,
   getRates,
   upsertRate,
   generateDailyReport,

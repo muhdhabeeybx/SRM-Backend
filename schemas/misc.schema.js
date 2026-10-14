@@ -388,52 +388,62 @@ const columnIndex = (label) =>
     z.number().int(`${label} must be a whole number`).min(0, `${label} must be zero or greater`)
   );
 
-const createBankStatement = z.object({
-  bankAccountId: id("Bank account"),
-  filename: optionalString("Filename", 255),
-  rows: z
-    .array(
-      z.object({
-        txnDate: requiredString("Transaction date", 40),
-        amount: numberLike("Amount"),
-        depositor: optionalString("Depositor", 255),
-        bankRef: optionalString("Bank reference", 255),
-        narration: optionalString("Narration", 1000),
-        /**
-         * The row exactly as the bank wrote it.
-         *
-         * bank_statement_lines.raw_row exists "for traceability" and had been
-         * getting nothing: a Zod object strips unknown keys, and this schema
-         * never listed rawRow, so validate() deleted it on the way past. The
-         * damage is dated — every line imported in July carries its original
-         * row, 44% of August's do, and every one of September's 1,433 is an
-         * empty array. The column a disputed credit would be checked against
-         * was empty for exactly the period anybody would be disputing.
-         *
-         * Cells only, as strings, and capped: this is evidence, not input,
-         * and nothing downstream reads it as anything but text.
-         *
-         * A blank cell arrives as null and is kept as "". The spreadsheet
-         * reader returns a row with an empty leading cell as a sparse array,
-         * and a hole becomes null the moment it is serialised — so the day
-         * this field started being checked, any statement with a blank first
-         * column was refused outright: "rows.2.rawRow.0 — expected string,
-         * received null". An empty cell is a true fact about the bank's row,
-         * and refusing a whole statement over it loses every line in it.
-         */
-        rawRow: z
-          .array(z.string().max(2000).nullable().transform((v) => v ?? ""))
-          .max(100)
-          .optional(),
-      })
-    )
-    .min(1, "At least one row is required"),
+/** One statement row, credit or debit — the shape the dashboard's parser sends. */
+const statementRow = z.object({
+  txnDate: requiredString("Transaction date", 40),
+  amount: numberLike("Amount"),
+  depositor: optionalString("Depositor", 255),
+  bankRef: optionalString("Bank reference", 255),
+  narration: optionalString("Narration", 1000),
+  /**
+   * The row exactly as the bank wrote it.
+   *
+   * bank_statement_lines.raw_row exists "for traceability" and had been
+   * getting nothing: a Zod object strips unknown keys, and this schema
+   * never listed rawRow, so validate() deleted it on the way past. The
+   * damage is dated — every line imported in July carries its original
+   * row, 44% of August's do, and every one of September's 1,433 is an
+   * empty array. The column a disputed credit would be checked against
+   * was empty for exactly the period anybody would be disputing.
+   *
+   * Cells only, as strings, and capped: this is evidence, not input,
+   * and nothing downstream reads it as anything but text.
+   *
+   * A blank cell arrives as null and is kept as "". The spreadsheet
+   * reader returns a row with an empty leading cell as a sparse array,
+   * and a hole becomes null the moment it is serialised — so the day
+   * this field started being checked, any statement with a blank first
+   * column was refused outright: "rows.2.rawRow.0 — expected string,
+   * received null". An empty cell is a true fact about the bank's row,
+   * and refusing a whole statement over it loses every line in it.
+   */
+  rawRow: z
+    .array(z.string().max(2000).nullable().transform((v) => v ?? ""))
+    .max(100)
+    .optional(),
 });
+
+const createBankStatement = z
+  .object({
+    bankAccountId: id("Bank account"),
+    filename: optionalString("Filename", 255),
+    /** Money in: what the payment desks match to orders and trucks. */
+    rows: z.array(statementRow).default([]),
+    /**
+     * Money out (0083), kept for the books only — never offered to the
+     * payment desks. Optional, so a dashboard that does not send them yet
+     * uploads exactly as before.
+     */
+    debits: z.array(statementRow).default([]),
+  })
+  .refine((b) => b.rows.length + b.debits.length > 0, { message: "At least one row is required", path: ["rows"] });
 const bankStatementMapping = z.object({
   headerRow: columnIndex("Header row").optional(),
   dateColumn: columnIndex("Date column").optional().nullable(),
   amountColumn: columnIndex("Amount column").optional().nullable(),
   creditColumn: columnIndex("Credit column").optional().nullable(),
+  /** Where withdrawals are, beside a credit column (0083). */
+  debitColumn: columnIndex("Debit column").optional().nullable(),
   depositorColumn: columnIndex("Depositor column").optional().nullable(),
   referenceColumn: columnIndex("Reference column").optional().nullable(),
   narrationColumn: columnIndex("Narration column").optional().nullable(),
@@ -666,6 +676,8 @@ const categoryBase = {
   glGroup: optionalString("GL group", 40),
   gl_subgroup: optionalString("GL subgroup", 60),
   glSubgroup: optionalString("GL subgroup", 60),
+  into_stock: z.boolean({ error: "into_stock must be true or false" }).optional(),
+  intoStock: z.boolean({ error: "intoStock must be true or false" }).optional(),
 };
 const createCategory = z.object(categoryBase);
 
@@ -689,6 +701,9 @@ const updateCategory = z.object({
   glGroup: chartField("GL group", 40),
   gl_subgroup: chartField("GL subgroup", 60),
   glSubgroup: chartField("GL subgroup", 60),
+  /** A cargo cost that goes into the PFI's stock value, not straight to profit (0081). */
+  into_stock: z.boolean({ error: "into_stock must be true or false" }).optional(),
+  intoStock: z.boolean({ error: "intoStock must be true or false" }).optional(),
 });
 
 // --- dangote products -----------------------------------------------------
@@ -900,6 +915,9 @@ const pfiBase = {
   salesManagerId: optPfiId("Sales manager"),
   sales_manager: optPfiId("Sales manager"),
   sales_manager_id: optPfiId("Sales manager"),
+  /** Who the product was bought from (0083), so what is owed is on their statement. */
+  supplierVendorId: optPfiId("Supplier"),
+  supplier_vendor_id: optPfiId("Supplier"),
   vesselBroker: optPfiStr("Vessel broker", 255),
   vessel_broker: optPfiStr("Vessel broker", 255),
   vesselName: optPfiStr("Vessel name", 255),

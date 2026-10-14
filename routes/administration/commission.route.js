@@ -11,6 +11,7 @@ const {
   revertCommission,
   bulkResolve,
   getSummary,
+  getMoneyWithStaff,
   getRates,
   upsertRate,
   setCustomerRate,
@@ -20,6 +21,9 @@ const {
 
 router.get("/", verifyStaff, validate({ query: commissionSchemas.listCommissions }), getCommissions);
 router.get("/summary", verifyStaff, getSummary);
+// Money handed to staff to pay commissions, and what is left of it, per PFI.
+// Above /:id, which would otherwise answer for it.
+router.get("/money-with-staff", verifyStaff, getMoneyWithStaff);
 router.get("/rates", verifyStaff, getRates);
 // Above /:id, which would otherwise answer for it — "customer-rates" is
 // not an id, but the route matcher does not know that.

@@ -124,7 +124,7 @@ async function saveMapping(req, res) {
  * uniqueness guarantee stay here, on the database, where they belong.
  */
 async function uploadStatement(req, res) {
-  const { bankAccountId, filename, rows } = req.body || {};
+  const { bankAccountId, filename, rows = [], debits = [] } = req.body || {};
   if (!bankAccountId) return fail(res, 400, "bankAccountId is required");
   await guard(req, bankAccountId);
 
@@ -132,11 +132,24 @@ async function uploadStatement(req, res) {
   if (!mapping) {
     return fail(res, 409, "Set up this account's statement format before uploading");
   }
-  if (!Array.isArray(rows) || rows.length === 0) {
+  if (rows.length === 0 && debits.length === 0) {
     return fail(res, 400, "No usable credit rows were found in that statement");
   }
-  const badDate = implausibleDate(rows);
+  const badDate = implausibleDate([...rows, ...debits]);
   if (badDate) return fail(res, 400, badDate);
+
+  // Money out (0083): kept for the books, under the same upload as the
+  // credits so deleting the upload takes them too.
+  const keepWithdrawals = async (statementId) => (debits.length
+    ? repo.ingestDebits({ bankAccountId: Number(bankAccountId), statementId, uploadedBy: req.user?.id ?? null, rows: debits })
+    : { added: 0, duplicates: 0 });
+  const said = (w) => (w.added ? `, ${w.added} withdrawal${w.added === 1 ? "" : "s"} kept for the books` : "");
+  if (rows.length === 0) {
+    const withdrawals = await keepWithdrawals(null);
+    return withdrawals.added
+      ? ok(res, { added: 0, withdrawals }, `No credits in that file${said(withdrawals)}`)
+      : fail(res, 409, "Every withdrawal in that file is already on record");
+  }
 
   const result = await repo.ingest({
     bankAccountId: Number(bankAccountId),
@@ -193,8 +206,16 @@ async function uploadStatement(req, res) {
     ? `${result.referencesAdded} reference${result.referencesAdded === 1 ? "" : "s"} added to credits already on file`
     : "";
 
+  const withdrawals = await keepWithdrawals(result.statement?.id ?? null);
+  result.withdrawals = withdrawals;
+  const out = said(withdrawals);
+
   if (result.added === 0 && refs) {
-    return ok(res, result, `No new rows — ${refs}${left}`);
+    return ok(res, result, `No new rows — ${refs}${left}${out}`);
+  }
+
+  if (result.added === 0 && withdrawals.added) {
+    return ok(res, result, `No new credits${out}`);
   }
 
   if (result.added === 0) {
@@ -207,7 +228,7 @@ async function uploadStatement(req, res) {
   return ok(
     res,
     result,
-    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped${repeats}${refs ? `, ${refs}` : ""}${left}`,
+    `${result.added} new row${result.added === 1 ? "" : "s"} added, ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped${repeats}${refs ? `, ${refs}` : ""}${left}${out}`,
   );
 }
 

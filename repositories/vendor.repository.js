@@ -96,6 +96,90 @@ const vendorRepo = {
     return mapVendor(row);
   },
 
+  /**
+   * Every vendor's money at a glance, read by the vendor statement's own rules
+   * (lib/accounting/sources/vendorExpenses), so a vendor's "owed now" here is
+   * its statement's closing balance:
+   *
+   *   billed    an expense approved for payment (or recorded as paid), at
+   *             what the vendor is owed — the invoice less WHT, and less VAT
+   *             where we keep it back — on the day it was approved
+   *   paid      the same expense paid, on the day it cleared
+   *   waiting   still on its way through approval: owed to nobody yet
+   *
+   * Refund expenses are not a vendor's. Billed, paid and tax kept back are for
+   * the period asked for; owed now, waiting and the oldest unpaid bill are as
+   * things stand today.
+   *
+   * @param {{ vendorId?: number, search?: string, status?: string, from?: string, to?: string }} p  Lagos days
+   */
+  async withMoney({ vendorId = null, search = "", status = "", from = null, to = null } = {}) {
+    const rows = await client`
+      WITH e AS (
+        SELECT e.vendor_id, e.status::text AS status, c.name AS category,
+               CASE WHEN COALESCE(e.currency, 'NGN') = 'NGN' THEN 1 ELSE e.exchange_rate END AS rate,
+               e.amount, e.amount_ngn, e.amount_paid, e.amount_paid_ngn, e.vat_withheld, e.vat_amount, e.wht_deduction,
+               (COALESCE(e.admin_approved_at, e.payment_date, e.expense_date, e.created_at) AT TIME ZONE 'Africa/Lagos')::date AS owed_day,
+               (COALESCE(e.payment_date, e.paid_at) AT TIME ZONE 'Africa/Lagos')::date AS paid_day
+          FROM pfi_expenses e JOIN expense_categories c ON c.id = e.category_id
+         WHERE e.vendor_id IS NOT NULL AND e.deleted_at IS NULL AND NOT COALESCE(c.is_refund, false)
+           AND (${vendorId}::int IS NULL OR e.vendor_id = ${vendorId})
+      ), m AS (
+        SELECT e.*,
+               COALESCE(amount_ngn, CASE WHEN rate = 1 THEN amount END) AS owed_ngn,
+               COALESCE(amount_paid_ngn, CASE WHEN rate = 1 THEN amount_paid END) AS paid_ngn,
+               status IN ('admin_approved', 'paid') AS approved,
+               status IN ('pending', 'verified', 'audit_approved', 'changes_requested') AS waiting,
+               (${from}::date IS NULL OR owed_day >= ${from}::date) AND (${to}::date IS NULL OR owed_day <= ${to}::date) AS billed_in,
+               (${from}::date IS NULL OR paid_day >= ${from}::date) AND (${to}::date IS NULL OR paid_day <= ${to}::date) AS paid_in
+          FROM e
+      ), agg AS (
+        SELECT vendor_id,
+               COALESCE(SUM(owed_ngn) FILTER (WHERE approved), 0)
+                 - COALESCE(SUM(paid_ngn) FILTER (WHERE status = 'paid' AND paid_day IS NOT NULL), 0) AS owed_now,
+               COALESCE(SUM(owed_ngn) FILTER (WHERE approved AND billed_in), 0) AS billed,
+               COALESCE(SUM(paid_ngn) FILTER (WHERE status = 'paid' AND paid_day IS NOT NULL AND paid_in), 0) AS paid,
+               COALESCE(SUM(CASE WHEN vat_withheld THEN ROUND(COALESCE(vat_amount, 0) * rate, 2) ELSE 0 END) FILTER (WHERE approved AND billed_in), 0) AS vat_kept,
+               COALESCE(SUM(ROUND(COALESCE(wht_deduction, 0) * rate, 2)) FILTER (WHERE approved AND billed_in), 0) AS wht_kept,
+               COUNT(*) FILTER (WHERE waiting) AS waiting_count,
+               COALESCE(SUM(owed_ngn) FILTER (WHERE waiting), 0) AS waiting_amount,
+               COUNT(*) FILTER (WHERE status <> 'rejected') AS expense_count,
+               MIN(owed_day) FILTER (WHERE status = 'admin_approved') AS oldest_unpaid,
+               MAX(paid_day) FILTER (WHERE status = 'paid') AS last_paid,
+               MAX(owed_day) FILTER (WHERE approved) AS last_billed,
+               MODE() WITHIN GROUP (ORDER BY category) FILTER (WHERE status <> 'rejected') AS usually
+          FROM m GROUP BY vendor_id
+      )
+      SELECT v.*, a.owed_now, a.billed, a.paid, a.vat_kept, a.wht_kept, a.waiting_count, a.waiting_amount,
+             a.expense_count, a.oldest_unpaid::text AS oldest_unpaid, a.last_paid::text AS last_paid,
+             a.last_billed::text AS last_billed, a.usually
+        FROM vendors v LEFT JOIN agg a ON a.vendor_id = v.id
+       WHERE (${vendorId}::int IS NULL OR v.id = ${vendorId})
+         AND (${search || ""} = '' OR v.name ILIKE ${`%${search || ""}%`} OR v.contact_person ILIKE ${`%${search || ""}%`})
+         AND (${status || ""} = '' OR ${status || ""} = 'all' OR v.status = ${status || ""})
+       ORDER BY v.name`;
+    const money = (x) => Math.round((Number(x) || 0) * 100) / 100;
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos" }).format(new Date());
+    const days = (d) => (d ? Math.round((Date.parse(`${today}T12:00:00Z`) - Date.parse(`${d}T12:00:00Z`)) / 86_400_000) : null);
+    return rows.map((r) => ({
+      ...mapVendor(r),
+      money: {
+        owedNow: money(r.owed_now),
+        billed: money(r.billed),
+        paid: money(r.paid),
+        vatKept: money(r.vat_kept),
+        whtKept: money(r.wht_kept),
+        waiting: { count: Number(r.waiting_count) || 0, amount: money(r.waiting_amount) },
+        expenseCount: Number(r.expense_count) || 0,
+        oldestUnpaidDay: r.oldest_unpaid || null,
+        oldestUnpaidDays: days(r.oldest_unpaid),
+        lastPaidDay: r.last_paid || null,
+        lastBilledDay: r.last_billed || null,
+        usually: r.usually || "",
+      },
+    }));
+  },
+
   /** Totals a vendor's expense history, for the vendor detail page. */
   async summaryFor(vendorId) {
     const numericId = Number(vendorId);
@@ -131,7 +215,9 @@ const vendorRepo = {
     const numericId = Number(vendorId);
     return client`
       SELECT e.id, e.reference_number, e.expense_date, e.description, e.amount, e.amount_paid,
-             e.bank_paid_from, e.status, c.name AS category_name, c.gl_code, p.pfi_number
+             e.bank_paid_from, e.status, c.name AS category_name, c.gl_code, p.pfi_number,
+             COALESCE(e.currency, 'NGN') AS currency, e.amount_ngn, e.amount_paid_ngn, e.invoice_number,
+             e.payment_date, e.admin_approved_at, COALESCE(c.is_refund, false) AS is_refund
       FROM pfi_expenses e
       JOIN expense_categories c ON c.id = e.category_id
       LEFT JOIN pfis p ON p.id = e.pfi_id

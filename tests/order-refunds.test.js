@@ -559,6 +559,52 @@ describe("setting an overpayment aside", () => {
   });
 });
 
+/**
+ * A legacy row beside the bank line it duplicates is not money we hold.
+ *
+ * Order 9437 on the live book: a ₦52,920,000 legacy row beside the
+ * ₦52,920,000 statement line it duplicates. The CFO report's rule only looks
+ * beside a transfer_in, so the refund desk offered ₦53,145,000 of it back
+ * (2026-10-14). The desk now reads the finance report's rule
+ * (lib/duplicatePayments), which the statements and the books read too.
+ */
+describe("a duplicate beside its bank line", () => {
+  let orderId = null;
+
+  before(async () => {
+    const [c] = await client`SELECT id FROM customers ORDER BY id LIMIT 1`;
+    const [o] = await client`
+      INSERT INTO orders (order_number, customer_id, state, depot_id, product_id, quantity,
+                          price, total_amount, delivery_type, company_name, payment_status)
+      SELECT ${"DB" + Math.floor(Math.random() * 1e9)}, ${Number(c.id)}, 'Lagos', d.id, p.id, 1000,
+             1000, 1000000, 'pickup', 'Duplicate Test Co', 'Paid'
+        FROM (SELECT id FROM depots LIMIT 1) d, (SELECT id FROM products LIMIT 1) p
+      RETURNING id`;
+    orderId = Number(o.id);
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, txn_date, depositor, narration, bank_ref)
+      VALUES (${orderId}, 1000000, 'statement', now(), 'Test', 'the real payment', ${"DB" + orderId})`;
+    await client`
+      INSERT INTO order_payments (order_id, amount, source, note)
+      VALUES (${orderId}, 1000000, 'legacy', 'Backfilled from the wallet allocation ledger (migration 0021)')`;
+  });
+
+  after(async () => {
+    await client`DELETE FROM order_payments WHERE order_id = ${orderId}`;
+    await client`DELETE FROM order_refunds WHERE order_id = ${orderId}`;
+    await client`DELETE FROM orders WHERE id = ${orderId}`;
+  });
+
+  test("is read past: the order holds exactly its value, nothing to refund", async () => {
+    const s = await refundService.realSurplus(orderId);
+    assert.equal(s.received, 1000000);
+    assert.equal(s.phantom, 1000000, "stated, not silently dropped");
+    assert.equal(s.surplus, 0);
+    const rows = await refundService.listRefundable({ limit: 5000 });
+    assert.equal(rows.find((r) => r.orderId === orderId), undefined);
+  });
+});
+
 describe("transfers and refunds run side by side", () => {
   after(async () => { await closeDb(); });
 
@@ -591,3 +637,4 @@ describe("transfers and refunds run side by side", () => {
     }
   });
 });
+

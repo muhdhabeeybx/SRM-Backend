@@ -148,6 +148,108 @@ const collectionsFor = async (pfiIds) => {
 };
 
 /**
+ * Which company account each PFI's money came into, for the full report.
+ *
+ * A statement payment carries the account it landed in. A payment from before
+ * the statements (source 'legacy') carries none, so it is counted against the
+ * account its order told the customer to pay into. Named from bank_accounts
+ * where the number is one of ours.
+ *
+ * @returns {Promise<Map<number, Array<object>>>}
+ */
+const paidIntoFor = async (pfiIds) => {
+  const out = new Map();
+  const list = ids(pfiIds);
+  if (!list.length) return out;
+  const rows = await client`
+    SELECT o.pfi_id AS "pfiId", a.acct AS "accountNumber",
+           COALESCE(MAX(ba.bank_name), MAX(a.bank)) AS "bankName",
+           COALESCE(MAX(ba.account_name), MAX(a.name)) AS "accountName",
+           SUM(op.amount)::text AS amount,
+           COUNT(*)::int AS payments
+      FROM order_payments op
+      JOIN orders o ON o.id = op.order_id
+     CROSS JOIN LATERAL (
+       SELECT CASE WHEN op.source = 'statement' THEN NULLIF(btrim(op.account_number), '') ELSE NULLIF(btrim(o.virtual_account_number), '') END AS acct,
+              CASE WHEN op.source = 'statement' THEN NULLIF(btrim(op.bank_name), '') ELSE NULLIF(btrim(o.virtual_account_bank), '') END AS bank,
+              CASE WHEN op.source = 'statement' THEN NULLIF(btrim(op.account_name), '') ELSE NULLIF(btrim(o.virtual_account_name), '') END AS name
+     ) a
+      LEFT JOIN LATERAL (
+        SELECT b.bank_name, b.account_name FROM bank_accounts b WHERE b.account_number = a.acct ORDER BY b.id LIMIT 1
+      ) ba ON true
+     WHERE o.pfi_id = ANY(${list}) AND op.source IN ('statement', 'legacy') AND a.acct IS NOT NULL
+     GROUP BY o.pfi_id, a.acct
+     ORDER BY o.pfi_id, SUM(op.amount) DESC
+  `;
+  for (const r of rows) {
+    const key = Number(r.pfiId);
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push({
+      bankName: r.bankName,
+      accountName: r.accountName,
+      accountNumber: r.accountNumber,
+      amount: Number(r.amount),
+      payments: r.payments,
+    });
+  }
+  return out;
+};
+
+/**
+ * Who did each PFI's work, by name — counted off what they did on its orders.
+ *
+ * For the full report, where a PFI raised before its people were named on it
+ * would otherwise show nobody. `confirmedBy` confirmed or recorded the most of
+ * its payments; `salesManager` and `productManager` acted most on its orders
+ * while holding that role.
+ *
+ * @returns {Promise<Map<number, {confirmedBy: string|null, salesManager: string|null, productManager: string|null}>>}
+ */
+const doersFor = async (pfiIds) => {
+  const out = new Map();
+  const list = ids(pfiIds);
+  if (!list.length) return out;
+  const rows = await client`
+    WITH acts AS (
+      SELECT o.pfi_id, a.actor_staff_id AS sid,
+             a.action IN ('PAYMENT_CONFIRMED', 'order.paid', 'order.payment_recorded') AS confirm
+        FROM audit_logs a
+        JOIN orders o ON a.entity_type = 'order' AND o.id::text = a.entity_id::text
+       WHERE a.actor_staff_id IS NOT NULL AND o.pfi_id = ANY(${list})
+      UNION ALL
+      SELECT o.pfi_id, op.recorded_by, true
+        FROM order_payments op
+        JOIN orders o ON o.id = op.order_id
+       WHERE op.recorded_by IS NOT NULL AND o.pfi_id = ANY(${list})
+    )
+    SELECT a.pfi_id AS "pfiId", ${STAFF_NAME("s")} AS name, s.roles::text[] AS roles,
+           COUNT(*) FILTER (WHERE a.confirm)::int AS confirms, COUNT(*)::int AS acts
+      FROM acts a
+      JOIN staff s ON s.id = a.sid
+     GROUP BY a.pfi_id, s.id
+  `;
+  const best = (list, score) => {
+    const top = list.filter((r) => r.name && score(r) > 0).sort((a, b) => score(b) - score(a) || a.name.localeCompare(b.name))[0];
+    return top ? top.name : null;
+  };
+  const byPfi = new Map();
+  for (const r of rows) {
+    const key = Number(r.pfiId);
+    if (!byPfi.has(key)) byPfi.set(key, []);
+    byPfi.get(key).push(r);
+  }
+  const has = (r, role) => (Array.isArray(r.roles) ? r.roles : []).includes(role);
+  for (const [key, list] of byPfi) {
+    out.set(key, {
+      confirmedBy: best(list, (r) => r.confirms),
+      salesManager: best(list, (r) => (has(r, "sales_manager") ? r.acts : 0)),
+      productManager: best(list, (r) => (has(r, "product_manager") ? r.acts : 0)),
+    });
+  }
+  return out;
+};
+
+/**
  * What each PFI's orders add up to, and when they happened.
  *
  * "Money landed" is Paid together with Part Paid — the finance report's own
@@ -322,6 +424,8 @@ module.exports = {
   peopleFor,
   banksFor,
   collectionsFor,
+  paidIntoFor,
+  doersFor,
   activityFor,
   trucksForPfi,
   orderTicketsForPfi,

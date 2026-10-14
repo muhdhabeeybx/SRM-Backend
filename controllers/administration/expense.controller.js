@@ -49,7 +49,8 @@ const actorFor = async (req) => {
  *   · a `pfi_direct` account must name a PFI, or the cost lands nowhere;
  *   · every other account must not, so a general overhead can never quietly
  *     inflate one batch's cost;
- *   · an `income` account is refused outright — it is not an expense.
+ *   · an `income` account, or any other account only the ledger posts to
+ *     (banks, payables, equity — migration 0081), is refused outright.
  *
  * Legacy per-PFI categories predate the chart and have no GL group. They keep
  * their old behaviour exactly: the category carries the link and the body's
@@ -58,6 +59,11 @@ const actorFor = async (req) => {
 const resolveBooking = async (categoryId, rawPfiId) => {
   const category = await pfiExpenseRepo.findCategoryById(categoryId);
   if (!category) throw httpErr(400, "Category not found");
+  // Banks, sales, payables and the rest of the chart (0081) are the ledger's,
+  // never something money is spent on.
+  if (gl.isLedgerGroup(category.gl_group)) {
+    throw httpErr(400, `${category.name} is a ledger account, not a kind of cost — choose what the money was spent on`);
+  }
 
   const group = gl.groupFor(category.gl_group);
   if (group?.isIncome) {
@@ -368,15 +374,22 @@ const createCategory = asyncHandler(async (req, res) => {
 
   const glCode = String(pick(req.body, "gl_code", "glCode") || "").trim();
   const glGroup = String(pick(req.body, "gl_group", "glGroup") || "").trim();
-  if (glGroup && !gl.groupFor(glGroup)) throw httpErr(400, "Unknown GL group");
+  if (glGroup && !gl.chartGroupFor(glGroup)) throw httpErr(400, "Unknown GL group");
   if (glCode && rows.some((c) => c.gl_code === glCode)) {
     throw httpErr(409, `GL code ${glCode} is already in use`);
   }
 
+  // A new cargo cost goes into the cargo's stock value unless Finance says
+  // otherwise, as the cargo costs already on the chart do (0081).
+  const asked = pick(req.body, "into_stock", "intoStock");
+  if (asked && glGroup !== "pfi_direct") {
+    throw httpErr(400, "Only a PFI attached cost can go into a cargo's stock value");
+  }
   const category = await pfiExpenseRepo.createCategory(name, {
     glCode,
     glGroup,
     glSubgroup: String(pick(req.body, "gl_subgroup", "glSubgroup") || "").trim(),
+    intoStock: glGroup === "pfi_direct" && asked !== false,
   });
   res.status(201).json({ success: true, message: "Category created", data: { category } });
 });
@@ -415,6 +428,20 @@ const updateCategory = asyncHandler(async (req, res) => {
   const glSubgroup = pick(req.body, "gl_subgroup", "glSubgroup");
   if (glSubgroup !== undefined) patch.gl_subgroup = String(glSubgroup).trim();
 
+  // Whether a cargo cost goes into the PFI's stock value. Only a cargo cost
+  // can: anything else is spent on the company, not on a cargo. Changing it
+  // re-costs every litre of that cargo — the posting engine books the change.
+  const intoStock = pick(req.body, "into_stock", "intoStock");
+  if (intoStock !== undefined) {
+    if (intoStock && category.gl_group !== "pfi_direct") {
+      throw httpErr(400, "Only a PFI attached cost can go into a cargo's stock value");
+    }
+    if (intoStock && category.system_key === "customer_commission") {
+      throw httpErr(400, "Commission money is handed to staff to pay customers — it never goes into stock");
+    }
+    patch.into_stock = !!intoStock;
+  }
+
   // The group is different. It decides whether the account takes a PFI, so
   // moving a live account between groups would leave every line already posted
   // to it on the wrong side of that rule — a cargo cost with no cargo, or an
@@ -422,8 +449,13 @@ const updateCategory = asyncHandler(async (req, res) => {
   const glGroup = pick(req.body, "gl_group", "glGroup");
   if (glGroup !== undefined) {
     const next = String(glGroup).trim() || null;
-    if (next && !gl.groupFor(next)) throw httpErr(400, "Unknown GL group");
+    if (next && !gl.chartGroupFor(next)) throw httpErr(400, "Unknown GL group");
     if (next !== (category.gl_group || null)) {
+      // The posting engine finds these by key and posts to them as what they
+      // are — a bank account moved into Income would be read as sales.
+      if (category.system_key) {
+        throw httpErr(400, `${category.name} is one the ledger posts to — its group cannot change`);
+      }
       const inUse = await pfiExpenseRepo.countExpensesInCategory(category.id);
       if (inUse > 0) {
         throw httpErr(
@@ -445,6 +477,9 @@ const deleteCategory = asyncHandler(async (req, res) => {
   if (!category) throw httpErr(404, "Category not found");
   if (category.is_system_category) {
     throw httpErr(400, "This category belongs to a PFI and cannot be deleted");
+  }
+  if (category.system_key) {
+    throw httpErr(400, `${category.name} is one the ledger posts to and cannot be deleted — rename it instead`);
   }
   // A used account is never deleted, GL or not: the lines posted to it would
   // lose the only record of where they were booked. The in-use check below is

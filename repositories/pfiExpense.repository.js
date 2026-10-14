@@ -381,10 +381,10 @@ const listCategories = async () => {
   `;
 };
 
-const createCategory = async (name, { glCode = null, glGroup = null, glSubgroup = "" } = {}) => {
+const createCategory = async (name, { glCode = null, glGroup = null, glSubgroup = "", intoStock = false } = {}) => {
   const [row] = await client`
-    INSERT INTO expense_categories (name, gl_code, gl_group, gl_subgroup, pfi_id, is_system_category)
-    VALUES (${name}, ${glCode || null}, ${glGroup || null}, ${glSubgroup || ""}, NULL, false)
+    INSERT INTO expense_categories (name, gl_code, gl_group, gl_subgroup, pfi_id, is_system_category, into_stock)
+    VALUES (${name}, ${glCode || null}, ${glGroup || null}, ${glSubgroup || ""}, NULL, false, ${!!intoStock})
     RETURNING *
   `;
   return row;

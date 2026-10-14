@@ -25,6 +25,7 @@ const { customerRepo, customerPhoneRepo, orderRepo, depositRepo } = require("../
 const { toE164 } = require("../../utils/phone");
 const auditLogRepo = require("../../repositories/auditLog.repository");
 const orderPaymentService = require("../../services/orderPayment.service");
+const statements = require("../../services/accounting/statements.service");
 
 const rolesOf = (req) => (Array.isArray(req.user?.roles) ? req.user.roles : []);
 const isSuper = (req) => rolesOf(req).includes("super_admin");
@@ -110,6 +111,21 @@ const getCustomerById = asyncHandler(async (req, res) => {
 const getCustomerPayments = asyncHandler(async (req, res) => {
   await assertCustomerVisible(req.user, req.params.id);
   const data = await orderPaymentService.forCustomer(req.params.id, { pfiIds: scopedPfiIds(req.user) });
+  res.json({ success: true, data });
+});
+
+/**
+ * The customer's statement: every sale and every naira in or out, oldest
+ * first, with a running balance (services/accounting/statements). Staff
+ * confined to a PFI see that PFI's orders only, the same as Payments.
+ */
+const getCustomerStatement = asyncHandler(async (req, res) => {
+  await assertCustomerVisible(req.user, req.params.id);
+  const data = await statements.customerStatement(req.params.id, {
+    from: req.query.from,
+    to: req.query.to,
+    pfiIds: scopedPfiIds(req.user),
+  });
   res.json({ success: true, data });
 });
 
@@ -363,4 +379,4 @@ const deleteCustomer = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Customer deleted successfully" });
 });
 
-module.exports = { getCustomers, getCustomerById, getCustomerPayments, createCustomer, updateCustomer, deleteCustomer, getCustomerSegment };
+module.exports = { getCustomers, getCustomerById, getCustomerPayments, getCustomerStatement, createCustomer, updateCustomer, deleteCustomer, getCustomerSegment };

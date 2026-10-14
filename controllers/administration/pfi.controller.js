@@ -169,6 +169,7 @@ const createPfi = asyncHandler(async (req, res) => {
   const security_exit_officer = req.body.security_exit_officer || req.body.securityExitOfficerId;
   const commission_officer = req.body.commission_officer || req.body.commissionOfficerId;
   const sales_manager = req.body.sales_manager || req.body.salesManagerId;
+  const supplier_vendor_id = req.body.supplier_vendor_id ?? req.body.supplierVendorId;
   const vessel_broker = req.body.vessel_broker || req.body.vesselBroker;
   const vessel_name = req.body.vessel_name || req.body.vesselName;
   const surveyor_name = req.body.surveyor_name || req.body.surveyorName;
@@ -293,6 +294,7 @@ const createPfi = asyncHandler(async (req, res) => {
     securityExitOfficerId: security_exit_officer ? (parseInt(security_exit_officer, 10) || security_exit_officer) : null,
     commissionOfficerId: commission_officer ? (parseInt(commission_officer, 10) || commission_officer) : null,
     salesManagerId: sales_manager ? (parseInt(sales_manager, 10) || sales_manager) : null,
+    supplierVendorId: supplier_vendor_id ? Number(supplier_vendor_id) || null : null,
     ...officerNames,
     vesselBroker: isGantry ? "" : vessel_broker || "",
     vesselName: isGantry ? "" : vessel_name || "",
@@ -377,7 +379,7 @@ const updatePfi = asyncHandler(async (req, res) => {
     "qty_volume_mt", "sold_qty_litres", "total_amount", "unit_price", "credit_balance", "product_unit",
     "vessel_broker", "vessel_name", "surveyor_name", "surveyor_phone",
     "closure_date", "total_inflow", "closure_bank", "purchase_cost",
-    "aggregate_expenses", "closure_handler", "closure_remarks",
+    "aggregate_expenses", "closure_handler", "closure_remarks", "supplier_vendor_id",
   ];
 
   const updateData = {};
@@ -400,6 +402,8 @@ const updatePfi = asyncHandler(async (req, res) => {
       } else if (field === "bl_qty_mt") {
         // Same "blank means unknown" rule as bl_qty_litres.
         updateData.blQtyMt = value === "" || value === null ? null : Number(value);
+      } else if (field === "supplier_vendor_id") {
+        updateData.supplierVendorId = value === "" || value === null ? null : Number(value) || null;
       } else if (field === "ticket_count") {
         updateData.ticketCount = value === "" || value === null ? null : Number(value);
       } else {
@@ -1388,13 +1392,15 @@ const getPfiRegister = asyncHandler(async (req, res) => {
   const { pfis: rows } = await pfiRepo.findAll({ scopeUser: req.user, limit: 1000 });
   const pfiIds = rows.map((p) => Number(p.id));
 
-  const [people, banks, collections, activity, notes, prices] = await Promise.all([
+  const [people, banks, collections, activity, notes, prices, paidInto, doers] = await Promise.all([
     pfiFileRepo.peopleFor(pfiIds),
     pfiFileRepo.banksFor(pfiIds),
     pfiFileRepo.collectionsFor(pfiIds),
     pfiFileRepo.activityFor(pfiIds),
     pfiNoteRepo.summaryFor(pfiIds),
     pfiPriceRepo.summaryFor(pfiIds),
+    pfiFileRepo.paidIntoFor(pfiIds),
+    pfiFileRepo.doersFor(pfiIds),
   ]);
 
   const register = {};
@@ -1408,6 +1414,10 @@ const getPfiRegister = asyncHandler(async (req, res) => {
       // Null until the price is reviewed: the price it was raised at is then
       // simply its price.
       prices: prices.get(id) || null,
+      // The accounts its money came into, older payments included, and who
+      // did its work — for the report's bank and people columns.
+      paidInto: paidInto.get(id) || [],
+      doers: doers.get(id) || null,
     };
   }
 
