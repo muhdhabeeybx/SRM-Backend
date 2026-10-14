@@ -70,6 +70,9 @@ const listDrivers = pagination.extend({
 
 // --- PFIs -----------------------------------------------------------------
 
+/** Every kind of PFI — the one list the write side and the list filter both read. */
+const PFI_TYPES = ["coastal", "gantry", "delivery", "trucking"];
+
 const listPfis = pagination.extend({
   search: searchTerm,
   status: z
@@ -88,12 +91,13 @@ const listPfis = pagination.extend({
   // was added there: creating a delivery batch worked, and the tab that then
   // listed them answered 400 before the query ran, because a filter the write
   // side accepts and the read side rejects is not a validation rule, it is a
-  // batch nobody can look at.
+  // batch nobody can look at. It happened again with 'trucking', so both
+  // sides now read PFI_TYPES.
   type: z
     .string()
     .trim()
     .toLowerCase()
-    .pipe(enumOf("Type", ["coastal", "gantry", "delivery", "all"]))
+    .pipe(enumOf("Type", [...PFI_TYPES, "all"]))
     .optional()
     .or(z.literal("")),
 });
@@ -831,8 +835,8 @@ const pfiBase = {
   // means coastal — the only kind that existed before the distinction did.
   // 'delivery' is an allocation loaded at one depot and sold at several —
   // see db/migrations/0027. It is a PFI in the same table, not a second thing.
-  pfiType: enumOf("PFI type", ["coastal", "gantry", "delivery", "trucking"]).optional(),
-  pfi_type: enumOf("PFI type", ["coastal", "gantry", "delivery", "trucking"]).optional(),
+  pfiType: enumOf("PFI type", PFI_TYPES).optional(),
+  pfi_type: enumOf("PFI type", PFI_TYPES).optional(),
   /**
    * A trucking PFI's batch, held until activation. Shape mirrors what the
    * delivery screens already write — see pfis.pending_batch in migration 0046.

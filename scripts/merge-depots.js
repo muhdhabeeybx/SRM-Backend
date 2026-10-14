@@ -84,12 +84,14 @@ const ident = (s) => `"${s.replace(/"/g, '""')}"`;
     if (APPLY) {
       await tx.unsafe(`CREATE TABLE IF NOT EXISTS ${undo} (tbl text, row_id integer, col text, old_value text, saved_at timestamptz DEFAULT now())`);
     }
+    // In one statement per table: a round trip each to a database far away
+    // (Railway, from a desk) made 545 rows take minutes.
     const save = async (table, col, rows) => {
       if (!APPLY || !rows.length) return;
-      for (const r of rows) {
-        await tx.unsafe(`INSERT INTO ${undo} (tbl, row_id, col, old_value) VALUES ($1, $2, $3, $4)`,
-          [table, r.id, col, typeof r.old === "object" ? JSON.stringify(r.old) : String(r.old)]);
-      }
+      await tx.unsafe(
+        `INSERT INTO ${undo} (tbl, row_id, col, old_value) SELECT $1, u.id, $2, u.old FROM unnest($3::int[], $4::text[]) AS u(id, old)`,
+        [table, col, rows.map((r) => r.id), rows.map((r) => (typeof r.old === "object" ? JSON.stringify(r.old) : String(r.old)))],
+      );
     };
     const summary = [];
 
