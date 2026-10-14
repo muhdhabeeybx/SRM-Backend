@@ -133,6 +133,14 @@ function difference(oldLines, newLines, booksStart = null) {
     });
 }
 
+/**
+ * The part of a difference to book. Before the opening entry is posted,
+ * lines dated before the books started are left to it (see runUnlocked).
+ */
+function bookable(delta, booksStart, openingPosted) {
+  return openingPosted ? delta : delta.filter((l) => l.d >= booksStart);
+}
+
 /** Book one set of difference lines: one entry per day they come to rest on. */
 async function book(tx, { type, record, delta, isNew, openDay }) {
   const byDay = new Map();
@@ -198,6 +206,16 @@ async function runUnlocked({ only = null, dryRun = false, log = () => {} } = {})
   await ensureBankAccounts();
   const { booksStart } = await settings();
   const openDay = await firstOpenDay(booksStart);
+  // Until the opening entry is posted, history before the books started is
+  // the opening's to carry: it is worked out from ledger_postings as they
+  // stand when it is posted (opening.service). A change to that history now
+  // is noted there and booked nowhere — booked as well, on the first open
+  // day, the opening would count it a second time.
+  const openingPosted = (await client`
+    SELECT 1 FROM journal_entries o
+     WHERE o.kind = 'opening'
+       AND NOT EXISTS (SELECT 1 FROM journal_entries r WHERE r.reverses_entry_id = o.id)
+     LIMIT 1`).length > 0;
   // Bank lines nothing has claimed — transfers between our accounts, the
   // withdrawals that paid expenses and refunds, charges, cargo payments —
   // recognised first, so the sources below book them as what they were.
@@ -263,7 +281,7 @@ async function runUnlocked({ only = null, dryRun = false, log = () => {} } = {})
       if (!prev && record.date < booksStart) {
         outcome = "opening";
       } else {
-        const delta = difference(before, lines, booksStart);
+        const delta = bookable(difference(before, lines, booksStart), booksStart, openingPosted);
         if (delta.length) {
           entryId = await book(tx, { type: source.type, record, delta, isNew: !prev, openDay });
         }
@@ -314,4 +332,4 @@ async function runUnlocked({ only = null, dryRun = false, log = () => {} } = {})
   return { booksStart, openDay, sources: summary };
 }
 
-module.exports = { run, settings, firstOpenDay, normalize, difference };
+module.exports = { run, settings, firstOpenDay, normalize, difference, bookable };

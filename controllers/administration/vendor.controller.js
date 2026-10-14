@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const { vendorRepo, staffRepo } = require("../../repositories");
 const statements = require("../../services/accounting/statements.service");
 const vendorLinks = require("../../services/vendorLinks.service");
+const vendorMerge = require("../../services/vendorMerge.service");
 
 const money = (n) => Math.round(n * 100) / 100;
 
@@ -40,10 +41,12 @@ const getVendors = asyncHandler(async (req, res) => {
 
 /** One vendor: its details, its money over the period, and every expense raised against it. */
 const getVendorById = asyncHandler(async (req, res) => {
-  const vendor = await vendorRepo.findById(req.params.id);
-  if (!vendor) {
+  const asked = await vendorRepo.findById(req.params.id);
+  if (!asked) {
     return res.status(404).json({ success: false, message: "Vendor not found" });
   }
+  // A name merged into another vendor opens the vendor it became.
+  const vendor = asked.mergedIntoId ? await vendorRepo.findById(await vendorMerge.resolve(asked.id)) : asked;
 
   const [summary, expenses, [withMoney]] = await Promise.all([
     vendorRepo.summaryFor(vendor.id),
@@ -53,7 +56,10 @@ const getVendorById = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    data: { vendor, summary, money: withMoney?.money ?? null, expenses },
+    data: {
+      vendor, summary, money: withMoney?.money ?? null, expenses,
+      mergedFrom: asked.mergedIntoId ? { id: asked.id, name: asked.name } : null,
+    },
   });
 });
 
@@ -83,7 +89,8 @@ const getVendorStatement = asyncHandler(async (req, res) => {
   if (!vendor) {
     return res.status(404).json({ success: false, message: "Vendor not found" });
   }
-  const data = await statements.vendorStatement(vendor.id, { from: req.query.from, to: req.query.to });
+  const id = vendor.mergedIntoId ? await vendorMerge.resolve(vendor.id) : vendor.id;
+  const data = await statements.vendorStatement(id, { from: req.query.from, to: req.query.to });
   res.json({ success: true, data });
 });
 
@@ -121,7 +128,31 @@ const updateVendor = asyncHandler(async (req, res) => {
   });
 });
 
+/** Vendors saved under several names, grouped, each with what to keep (services/vendorMerge). */
+const getDuplicates = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: { groups: await vendorMerge.duplicates() } });
+});
+
+/** Merge vendors into one — Finance's call, as linking is. */
+const mergeVendors = asyncHandler(async (req, res) => {
+  const staff = req.user?.id ? await staffRepo.findById(req.user.id).catch(() => null) : null;
+  const actorName = (staff ? `${staff.firstName || ""} ${staff.surname || ""}`.trim() : "") || req.user?.email || "Vendors page";
+  try {
+    const r = await vendorMerge.merge({ ...req.body, staffId: req.user?.id ?? null, actorName });
+    res.json({
+      success: true,
+      message: `${r.merged + 1} vendors are now one: ${r.name}${r.expenses ? ` — ${r.expenses} expense${r.expenses === 1 ? "" : "s"} moved` : ""}`,
+      data: r,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, message: err.message });
+    throw err;
+  }
+});
+
 module.exports = {
+  getDuplicates,
+  mergeVendors,
   getVendors,
   getVendorById,
   getVendorStatement,

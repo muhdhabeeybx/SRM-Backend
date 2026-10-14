@@ -4,7 +4,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 
 const { client } = require("../config/db");
-const { run, normalize, difference } = require("../services/accounting/posting.service");
+const { run, normalize, difference, bookable } = require("../services/accounting/posting.service");
 const { closeDb } = require("./helpers");
 
 /**
@@ -17,6 +17,8 @@ const { closeDb } = require("./helpers");
  *   opening     a record from before the books started books nothing
  *   late        a change landing in a closed month goes on the first open
  *               day, marked late, with its own day kept
+ *   carried     until the opening is posted, a change to history before the
+ *               books is the opening's to carry, not booked as well
  */
 const RUN = Date.now();
 const ONLY = ["order_sale", "order_payment"];
@@ -100,6 +102,17 @@ describe("the posting engine", () => {
     const repriced = [{ d: "2026-09-20", a: 1, k: 700, u: "depot" }, { d: "2026-09-20", a: 2, k: -700, u: "depot" }];
     const delta = difference(before, repriced, "2026-10-01");
     assert.deepEqual(delta.map((l) => [l.a, l.k, l.u]), [[1, 200, "depot"], [2, -200, "depot"]]);
+  });
+
+  test("before the opening is posted, a change to history before the books is left to it", () => {
+    // A May truck sale taken back, and an October one repriced, in one run.
+    const delta = [
+      { d: "2026-05-19", a: 1, k: -6750000000 }, { d: "2026-05-19", a: 2, k: 6750000000 },
+      { d: "2026-10-05", a: 1, k: 20000000 }, { d: "2026-10-05", a: 2, k: -20000000 },
+    ];
+    assert.deepEqual(bookable(delta, "2026-09-01", false).map((l) => l.d), ["2026-10-05", "2026-10-05"]);
+    // Once the opening is posted it has already read that history: the change is booked, late.
+    assert.equal(bookable(delta, "2026-09-01", true).length, 4);
   });
 
   test("books a sale and its payment, balanced, on their own days", async () => {

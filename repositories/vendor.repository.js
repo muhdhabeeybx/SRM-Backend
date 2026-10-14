@@ -15,13 +15,16 @@ const mapVendor = (row) =>
         accountName: row.account_name || "",
         taxId: row.tax_id || "",
         status: row.status || "Active",
+        /** Set: this name was merged into that vendor (0086) and is a name only. */
+        mergedIntoId: row.merged_into_id == null ? null : Number(row.merged_into_id),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };
 
 const vendorRepo = {
   async findAll({ search, status } = {}) {
-    const where = [client`true`];
+    // A vendor merged into another is a name only: never listed or offered.
+    const where = [client`merged_into_id IS NULL`];
     if (search) where.push(client`name ILIKE ${"%" + search + "%"}`);
     if (status && status !== "all") where.push(client`status = ${status}`);
     const clause = where.reduce((a, c, i) => (i === 0 ? c : client`${a} AND ${c}`));
@@ -48,11 +51,13 @@ const vendorRepo = {
   async findByName(name) {
     const key = String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
     if (!key) return null;
+    // A name merged into another vendor (0086) finds the vendor kept.
     const [row] = await client`
-      SELECT * FROM vendors
-      WHERE regexp_replace(LOWER(name), '[^a-z0-9]', '', 'g') = ${key}
-      ORDER BY id LIMIT 1`;
-    return mapVendor(row);
+      SELECT COALESCE(t.id, v.id) AS id FROM vendors v
+        LEFT JOIN vendors t ON t.id = v.merged_into_id
+      WHERE regexp_replace(LOWER(v.name), '[^a-z0-9]', '', 'g') = ${key}
+      ORDER BY (v.merged_into_id IS NULL) DESC, v.id LIMIT 1`;
+    return row ? this.findById(row.id) : null;
   },
 
   async create(data) {
@@ -155,6 +160,7 @@ const vendorRepo = {
              a.last_billed::text AS last_billed, a.usually
         FROM vendors v LEFT JOIN agg a ON a.vendor_id = v.id
        WHERE (${vendorId}::int IS NULL OR v.id = ${vendorId})
+         AND v.merged_into_id IS NULL
          AND (${search || ""} = '' OR v.name ILIKE ${`%${search || ""}%`} OR v.contact_person ILIKE ${`%${search || ""}%`})
          AND (${status || ""} = '' OR ${status || ""} = 'all' OR v.status = ${status || ""})
        ORDER BY v.name`;

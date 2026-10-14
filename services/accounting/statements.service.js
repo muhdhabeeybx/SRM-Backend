@@ -75,7 +75,9 @@ function paymentRow(p) {
         .filter(Boolean).join(" ");
       break;
     case "legacy":
-      description = "Paid before 1 Sep 2026, carried from the wallet";
+      description = p.untraced
+        ? "Paid before 1 Sep 2026: a wallet credit left off this order, matched to it by amount"
+        : "Paid before 1 Sep 2026, carried from the wallet";
       break;
     case "transfer_out":
       description = [`Moved to ${p.counterpart || "another order"}`, p.reason].filter(Boolean).join(": ");

@@ -19,12 +19,19 @@ const { client } = require("../db");
 const keyOf = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
 async function look() {
-  const vendors = await client`SELECT id, name FROM vendors`;
+  // Every name, merged ones too (0086), each standing for the vendor it is now.
+  const vendors = await client`
+    SELECT v.id AS name_id, v.name AS name_text, COALESCE(t.id, v.id) AS id, COALESCE(t.name, v.name) AS name,
+           v.merged_into_id IS NULL AS own
+      FROM vendors v LEFT JOIN vendors t ON t.id = v.merged_into_id`;
   const byKey = new Map();
   for (const v of vendors) {
-    const k = keyOf(v.name);
-    // Two vendors that read the same: the older one, as findByName picks.
-    if (k && (!byKey.has(k) || Number(v.id) < Number(byKey.get(k).id))) byKey.set(k, v);
+    const k = keyOf(v.name_text);
+    if (!k) continue;
+    const held = byKey.get(k);
+    // Two names that read the same: a vendor's own name over a merged one,
+    // then the older, as findByName picks.
+    if (!held || (v.own && !held.own) || (v.own === held.own && Number(v.name_id) < Number(held.name_id))) byKey.set(k, v);
   }
   const unlinked = await client`
     SELECT e.id, e.vendor, e.status::text AS status, COALESCE(c.is_refund, false) AS refund,

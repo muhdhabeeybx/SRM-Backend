@@ -33,4 +33,11 @@ const vendorListQuery = z
     path: ["from"],
   });
 
-module.exports = { statementQuery, vendorListQuery };
+/** Merging vendors: the one kept, the others, and the name to keep it under. */
+const vendorMergeBody = z.object({
+  keepId: z.coerce.number().int().positive(),
+  mergeIds: z.array(z.coerce.number().int().positive()).min(1).max(50),
+  name: z.string().trim().min(1).max(255).optional(),
+});
+
+module.exports = { statementQuery, vendorListQuery, vendorMergeBody };
