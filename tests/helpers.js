@@ -326,3 +326,16 @@ async function payRefundThroughExpense({ refundId, paidFromAccountId, paymentRef
 }
 
 module.exports.payRefundThroughExpense = payRefundThroughExpense;
+
+/**
+ * A per-person page grant, as Manage Users writes it (staff_page_overrides) —
+ * how a page closed to a role is opened to one person.
+ */
+async function grantPage(staffId, routePath, allowed = true) {
+  await client`
+    INSERT INTO staff_page_overrides (staff_id, route_path, allowed)
+    VALUES (${staffId}, ${routePath}, ${allowed})
+    ON CONFLICT (staff_id, route_path) DO UPDATE SET allowed = EXCLUDED.allowed`;
+}
+
+module.exports.grantPage = grantPage;

@@ -9,7 +9,14 @@ const { client } = require("../config/db");
 const { run } = require("../services/accounting/posting.service");
 const reports = require("../services/accounting/reports.service");
 const opening = require("../services/accounting/opening.service");
-const { staffToken, staffTokenWithRoles, closeDb } = require("./helpers");
+const { staffToken, staffTokenWithRoles, grantPage, closeDb } = require("./helpers");
+
+/** A finance member of staff the books were opened to — they are the admins' otherwise (middleware/accountsAccess). */
+const grantedFinance = async () => {
+  const { staff, accessToken } = await staffTokenWithRoles(["finance"], "test-accounts-finance@soroman.test");
+  await grantPage(staff.id, "/accounts");
+  return accessToken;
+};
 
 /**
  * What the books print (services/accounting/reports, opening).
@@ -60,7 +67,7 @@ describe("the books' reports", () => {
   });
 
   test("what the books still need is listed, each item counted, the done ones left off", async () => {
-    const token = (await staffTokenWithRoles(["finance"], "test-accounts-finance@soroman.test")).accessToken;
+    const token = await grantedFinance();
     const res = await request(app).get("/api/accounts/readiness").set("Authorization", `Bearer ${token}`);
     assert.equal(res.status, 200, JSON.stringify(res.body));
     const { items } = res.body.data;
@@ -71,7 +78,7 @@ describe("the books' reports", () => {
   });
 
   test("Post now answers, and says so when a run is already going", async () => {
-    const finance = (await staffTokenWithRoles(["finance"], "test-accounts-finance@soroman.test")).accessToken;
+    const finance = await grantedFinance();
     const ok = await request(app).post("/api/accounts/post-now").set("Authorization", `Bearer ${finance}`);
     assert.ok([200, 202].includes(ok.status), JSON.stringify(ok.body));
 
@@ -89,7 +96,7 @@ describe("the books' reports", () => {
 
   test("months close in order, once ended; reopening is a super admin's, latest first", async () => {
     await client`DELETE FROM accounting_periods WHERE period >= '2026-10'`;
-    const finance = (await staffTokenWithRoles(["finance"], "test-accounts-finance@soroman.test")).accessToken;
+    const finance = await grantedFinance();
     const superToken = await staffToken(request, app);
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos" }).format(new Date());
     const list = await opening.periods(today);

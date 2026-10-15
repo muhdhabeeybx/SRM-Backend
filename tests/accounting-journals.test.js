@@ -6,7 +6,7 @@ const request = require("supertest");
 
 const app = require("../app");
 const { client } = require("../config/db");
-const { staffToken, staffTokenWithRoles, closeDb } = require("./helpers");
+const { staffToken, staffTokenWithRoles, grantPage, closeDb } = require("./helpers");
 
 /**
  * Journals written by hand (services/accounting/journals).
@@ -39,7 +39,10 @@ describe("journals written by hand", () => {
   before(async () => {
     token = await staffToken(request, app);
     weak = (await staffTokenWithRoles(["expenditure_officer"], "test-journal-weak@soroman.test")).accessToken;
-    approver = (await staffTokenWithRoles(["finance"], "test-journal-approver@soroman.test")).accessToken;
+    // Finance, opened the books by a grant — they are the admins' otherwise.
+    const second = await staffTokenWithRoles(["finance"], "test-journal-approver@soroman.test");
+    await grantPage(second.staff.id, "/accounts");
+    approver = second.accessToken;
     depreciation = Number((await client`SELECT id FROM expense_categories WHERE gl_code = '6260'`)[0].id);
     accumulated = Number((await client`SELECT id FROM expense_categories WHERE system_key = 'accumulated_depreciation'`)[0].id);
     bank = Number((await client`SELECT id FROM expense_categories WHERE bank_account_id IS NOT NULL LIMIT 1`)[0].id);
