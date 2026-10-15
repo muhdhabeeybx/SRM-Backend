@@ -4,18 +4,23 @@ const { notify } = require("../notifications");
 /**
  * Messages between members of staff — one person to another, nothing else.
  *
- * Privacy is the rule everything here keeps: a message's text is returned only
- * to its sender and its recipient. There is no endpoint, admin or otherwise,
- * that reads another person's conversation. What admins get (`activity`) is
- * who wrote to whom, how often and when — never a word of it. The alert that
- * goes out (catalog `staff.direct_message`) names the sender and nothing more,
- * because texts and emails land in the message ledger other people can read.
+ * A message's text is returned in the dashboard only to its sender and its
+ * recipient. What admins get here (`activity`) is who wrote to whom, how often
+ * and when. The text alert (catalog `staff.direct_message`) names the sender
+ * and nothing more.
+ *
+ * Since 15 Oct 2026 every message is also EMAILED to its recipient, text and
+ * all, and a reply to that email comes back in as a message (migration 0087,
+ * services/staffMessageEmail.service.js) — the owner wants conversations in
+ * inboxes as well as here, every word of them kept here. `via` says which.
  *
  * Messages are never edited or deleted, and they outlive the accounts: names
  * are kept on the row (migration 0076).
  */
 
 const MAX_BODY = 4000;
+/** How long sending a message waits for its email copy before answering anyway. */
+const EMAIL_WAIT_MS = 8000;
 const PREVIEW = 120;
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
@@ -112,6 +117,10 @@ const messageOut = (me) => (r) => ({
   body: r.body,
   createdAt: r.created_at,
   readAt: r.read_at,
+  /** 'app', or 'email' when it came in as a reply to a message email. */
+  via: r.via || "app",
+  /** When its email copy went to the recipient, or null. */
+  emailedAt: r.emailed_at || null,
 });
 
 /**
@@ -129,7 +138,7 @@ const thread = async (meId, otherId, { before = null, limit = 50 } = {}) => {
   const take = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const beforeId = asId(before);
   const rows = await client`
-    SELECT id, sender_id, recipient_id, body, created_at, read_at
+    SELECT id, sender_id, recipient_id, body, created_at, read_at, via, emailed_at
       FROM staff_messages
      WHERE LEAST(sender_id, recipient_id) = ${Math.min(me, other)}
        AND GREATEST(sender_id, recipient_id) = ${Math.max(me, other)}
@@ -158,8 +167,14 @@ const thread = async (meId, otherId, { before = null, limit = 50 } = {}) => {
  * Send one message. The recipient gets a text (and the bell) only when
  * nothing earlier from this sender is still waiting unread with a text already
  * sent for it — one alert per conversation until they read it.
+ *
+ * Every message is also emailed to the recipient, after it is saved and
+ * without holding up the reply (staffMessageEmail.emailMessage records how
+ * that went on the row). `via: 'email'` is a reply that arrived by email: it
+ * carries the received email's id, and answering is reading, so what the
+ * other person sent them is marked read.
  */
-const send = async (meId, otherId, rawBody) => {
+const send = async (meId, otherId, rawBody, { via = "app", inboundEmailId = null } = {}) => {
   const me = asId(meId);
   const other = asId(otherId);
   const body = String(rawBody ?? "").trim();
@@ -175,10 +190,18 @@ const send = async (meId, otherId, rawBody) => {
   }
 
   const [row] = await client`
-    INSERT INTO staff_messages (sender_id, recipient_id, sender_name, recipient_name, body)
-    VALUES (${me}, ${other}, ${nameOf(sender)}, ${nameOf(recipient)}, ${body})
-    RETURNING id, sender_id, recipient_id, body, created_at, read_at
+    INSERT INTO staff_messages (sender_id, recipient_id, sender_name, recipient_name, body, via, inbound_email_id)
+    VALUES (${me}, ${other}, ${nameOf(sender)}, ${nameOf(recipient)}, ${body},
+            ${via === "email" ? "email" : "app"}, ${inboundEmailId})
+    RETURNING id, sender_id, recipient_id, body, created_at, read_at, via, emailed_at
   `;
+
+  if (via === "email") {
+    await client`
+      UPDATE staff_messages SET read_at = now()
+       WHERE recipient_id = ${me} AND sender_id = ${other} AND read_at IS NULL
+    `;
+  }
 
   const [alert] = await client`
     UPDATE staff_messages SET alerted_at = now()
@@ -202,6 +225,15 @@ const send = async (meId, otherId, rawBody) => {
     }).catch((err) => console.error("[staff-messages] alert failed:", err.message));
   }
 
+  // Waited for, so the conversation shows "Emailed" as soon as it reloads —
+  // but never more than a few seconds: a slow mail provider must not hold up
+  // the chat, and the email carries on in the background. emailMessage never
+  // throws; the catch is for a module that fails to load.
+  const emailing = require("./staffMessageEmail.service").emailMessage(Number(row.id)).catch(() => null);
+  await Promise.race([emailing, new Promise((done) => setTimeout(done, EMAIL_WAIT_MS).unref())]);
+  const [after] = await client`SELECT emailed_at FROM staff_messages WHERE id = ${row.id}`;
+  row.emailed_at = after?.emailed_at || null;
+
   return { message: messageOut(me)(row), alerted: Boolean(alert) };
 };
 
@@ -222,6 +254,8 @@ const activity = async ({ from = null, to = null } = {}) => {
            COUNT(*)::int AS messages,
            COUNT(*) FILTER (WHERE m.read_at IS NULL)::int AS unread,
            COUNT(*) FILTER (WHERE m.alerted_at IS NOT NULL)::int AS texts,
+           COUNT(*) FILTER (WHERE m.emailed_at IS NOT NULL)::int AS emails,
+           COUNT(*) FILTER (WHERE m.via = 'email')::int AS by_email,
            MIN(m.created_at) AS first_at,
            MAX(m.created_at) AS last_at
       FROM staff_messages m
@@ -241,6 +275,9 @@ const activity = async ({ from = null, to = null } = {}) => {
     messages: Number(r.messages) || 0,
     unread: Number(r.unread) || 0,
     texts: Number(r.texts) || 0,
+    /** Emailed to the recipient, and written as a reply by email. */
+    emails: Number(r.emails) || 0,
+    byEmail: Number(r.by_email) || 0,
     firstAt: r.first_at,
     lastAt: r.last_at,
   }));
@@ -251,6 +288,8 @@ const activity = async ({ from = null, to = null } = {}) => {
       messages: pairs.reduce((s, p) => s + p.messages, 0),
       unread: pairs.reduce((s, p) => s + p.unread, 0),
       texts: pairs.reduce((s, p) => s + p.texts, 0),
+      emails: pairs.reduce((s, p) => s + p.emails, 0),
+      byEmail: pairs.reduce((s, p) => s + p.byEmail, 0),
       senders: new Set(pairs.map((p) => p.senderId)).size,
     },
     pairs,

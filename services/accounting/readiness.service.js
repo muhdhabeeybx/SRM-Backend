@@ -26,6 +26,8 @@ const opening = require("./opening.service");
  *                 one from (a trucking batch takes its cargo's)
  *   vendors       expenses naming a vendor only as typed text are on nobody's
  *                 statement (scripts/link-expense-vendors.js links them)
+ *   trucks        Fleet Trucks nobody has costed on the Fixed Assets
+ *                 register (0088)
  *   approvals     journals waiting for somebody else to approve them
  */
 async function readiness() {
@@ -84,6 +86,13 @@ async function readiness() {
      WHERE e.deleted_at IS NULL AND e.vendor_id IS NULL AND btrim(COALESCE(e.vendor, '')) <> ''
        AND e.status IN ('admin_approved', 'paid') AND NOT COALESCE(c.is_refund, false)`;
   add("vendors", "Approved expenses naming a vendor only as typed text — on no vendor's statement", typedVendor, "/vendors");
+
+  // Every Fleet Truck is on the Fixed Assets register to cost (0088).
+  const [{ n: trucks }] = await client`
+    SELECT COUNT(*)::int AS n FROM fleet_trucks t
+     WHERE t.is_active
+       AND NOT EXISTS (SELECT 1 FROM fixed_assets a WHERE a.fleet_truck_id = t.id AND a.deleted_at IS NULL)`;
+  add("trucks", "Fleet trucks with no cost on the Fixed Assets register yet", trucks, "/accounts/fixed-assets");
 
   const [{ n: waiting }] = await client`SELECT COUNT(*)::int AS n FROM journal_drafts WHERE status = 'waiting'`;
   add("approvals", "Journals waiting for somebody else to approve them", waiting, "/accounts/journals");

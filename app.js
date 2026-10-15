@@ -26,6 +26,9 @@ app.use("/api/whatsapp/webhook", require("./routes/whatsappWebhook.route"));
 // Termii delivery reports. Mounted here with the other webhooks, above the
 // auth middleware — a provider callback carries no session.
 app.use("/api/webhooks/termii", require("./routes/termiiWebhook.route"));
+// Mail Resend receives — replies to staff message emails. Signed (Svix) over
+// the raw body, so it sits up here with the others.
+app.use("/api/webhooks/resend-inbound", require("./routes/resendInbound.route"));
 
 app.use(mobileCorsBypass);
 // Skip cors() for requests already handled by the mobile bypass — otherwise

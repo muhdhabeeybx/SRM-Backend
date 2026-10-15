@@ -18,6 +18,7 @@ const FINANCE = enforceRole("finance", "audit", "admin", {
   message: "Only finance, audit or an admin can post to the books",
 });
 
+router.get("/report", validate({ query: s.reportQuery }), c.getReport);
 router.get("/chart", c.getChart);
 router.get("/status", c.getStatus);
 router.get("/dimensions", c.getDimensions);
@@ -41,6 +42,20 @@ router.get("/banks", validate({ query: s.periodQuery }), c.getBanks);
 router.get("/reconciliation", validate({ query: s.reconciliationQuery }), c.getReconciliation);
 router.post("/bank-lines/:direction/:lineId/classify", FINANCE, validate({ params: s.lineParam, body: s.classifyBody }), c.classifyLine);
 router.delete("/bank-lines/:direction/:lineId/classify", FINANCE, validate({ params: s.lineParam }), c.unclassifyLine);
+
+// What the company owns and keeps, and what it has borrowed (0088).
+router.get("/fixed-assets", c.getFixedAssets);
+router.post("/fixed-assets", FINANCE, validate({ body: s.assetBody }), c.createFixedAsset);
+router.patch("/fixed-assets/:assetId", FINANCE, validate({ params: s.assetParam, body: s.assetBody }), c.updateFixedAsset);
+router.delete("/fixed-assets/:assetId", FINANCE, validate({ params: s.assetParam }), c.deleteFixedAsset);
+router.post("/fixed-assets/:assetId/dispose", FINANCE, validate({ params: s.assetParam, body: s.disposeBody }), c.disposeFixedAsset);
+router.delete("/fixed-assets/:assetId/dispose", FINANCE, validate({ params: s.assetParam }), c.undisposeFixedAsset);
+router.get("/loans", c.getLoans);
+router.post("/loans", FINANCE, validate({ body: s.loanBody }), c.createLoan);
+router.patch("/loans/:loanId", FINANCE, validate({ params: s.loanParam, body: s.loanBody }), c.updateLoan);
+router.delete("/loans/:loanId", FINANCE, validate({ params: s.loanParam }), c.deleteLoan);
+router.post("/loans/:loanId/repayments", FINANCE, validate({ params: s.loanParam, body: s.repaymentBody }), c.addLoanRepayment);
+router.delete("/loans/:loanId/repayments/:repaymentId", FINANCE, validate({ params: s.repaymentParam }), c.deleteLoanRepayment);
 
 router.get("/opening-balances", c.getOpening);
 router.post("/opening-balances", FINANCE, validate({ body: s.openingBody }), c.postOpening);

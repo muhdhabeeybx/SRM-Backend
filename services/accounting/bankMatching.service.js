@@ -24,6 +24,11 @@ const { client } = require("../../db");
  *              less "commission", which commission payments are called too)
  *              and ₦100,000 or less
  *   supplier   paid to a cargo's supplier (named on the PFI), or to Dangote
+ *   asset,     the Fixed Assets and Loans registers (0088): an asset paid
+ *   loan, …    for from a bank (or a hire purchase's deposit), a loan paid
+ *              back, money in from a lender or for an asset sold — the same
+ *              amount, in the bank the record names, from three days before
+ *              to a week after its day
  *
  * Never over a person: a line Finance has named, or looked at and left, is
  * not touched. A match is written once and stays; the posting engine books it
@@ -174,6 +179,59 @@ async function recognise({ booksStart }) {
        AND NOT EXISTS (SELECT 1 FROM bank_line_classifications k WHERE k.kind = 'refund' AND k.ref_id = p.id)
      ORDER BY COALESCE(p.txn_date, p.created_at), p.id`;
   pair(refunds, "refund", "customer_receivables", (r) => `Refund paid on ${r.ref}`);
+
+  // ── The Fixed Assets and Loans registers (0088) ─────────────────────────
+  if (keys.has("fixed_assets") && keys.has("loans")) {
+    const assetsPaid = await client`
+      SELECT a.id, a.name, a.bank_account_id AS bank, to_char(a.bought_on, 'YYYY-MM-DD') AS day,
+             (CASE WHEN a.paid_how = 'bank' THEN a.cost ELSE a.cost - COALESCE(a.financed, a.cost) END)::numeric AS amount
+        FROM fixed_assets a
+       WHERE a.deleted_at IS NULL AND a.paid_how IN ('bank', 'loan') AND a.bank_account_id IS NOT NULL
+         AND a.bought_on >= ${since}::date
+         AND NOT EXISTS (SELECT 1 FROM bank_line_classifications k WHERE k.kind = 'asset' AND k.ref_id = a.id)
+       ORDER BY a.bought_on, a.id`;
+    pair(assetsPaid.filter((a) => Number(a.amount) > 0), "asset", "fixed_assets", (a) => `Paid for ${a.name}`);
+
+    const repaid = await client`
+      SELECT r.id, n.lender, r.bank_account_id AS bank, to_char(r.paid_on, 'YYYY-MM-DD') AS day,
+             (r.principal + r.interest)::numeric AS amount
+        FROM loan_repayments r JOIN loans n ON n.id = r.loan_id
+       WHERE r.deleted_at IS NULL AND n.deleted_at IS NULL AND r.bank_account_id IS NOT NULL
+         AND r.paid_on >= ${since}::date
+         AND NOT EXISTS (SELECT 1 FROM bank_line_classifications k WHERE k.kind = 'loan_repayment' AND k.ref_id = r.id)
+       ORDER BY r.paid_on, r.id`;
+    pair(repaid, "loan_repayment", "loans", (r) => `Loan repaid to ${r.lender}`);
+
+    // Money in: a lender's money, and what an asset fetched.
+    const pairIn = (rows, kind, account, noteOf) => {
+      for (const r of rows) {
+        const cands = credits.filter((c) => !credited.has(c.id) && !c.kind && c.k === kobo(r.amount)
+          && c.bank === Number(r.bank)
+          && dayNo(c.day) - dayNo(r.day) >= -3 && dayNo(c.day) - dayNo(r.day) <= 7);
+        const c = nearest(cands, r.day);
+        if (!c) continue;
+        credited.add(c.id);
+        found.push({ direction: "credit", lineId: c.id, kind, account, refId: Number(r.id), note: noteOf(r) });
+      }
+    };
+    const lent = await client`
+      SELECT n.id, n.lender, n.bank_account_id AS bank, to_char(n.received_on, 'YYYY-MM-DD') AS day, n.amount::numeric AS amount
+        FROM loans n
+       WHERE n.deleted_at IS NULL AND n.kind <> 'hire_purchase' AND n.amount > 0 AND n.bank_account_id IS NOT NULL
+         AND n.received_on >= ${since}::date
+         AND NOT EXISTS (SELECT 1 FROM bank_line_classifications k WHERE k.kind = 'loan' AND k.ref_id = n.id)
+       ORDER BY n.received_on, n.id`;
+    pairIn(lent, "loan", "loans", (n) => `Loan from ${n.lender}`);
+    const fetched = await client`
+      SELECT a.id, a.name, a.disposed_bank_account_id AS bank, to_char(a.disposed_on, 'YYYY-MM-DD') AS day,
+             a.disposed_for::numeric AS amount
+        FROM fixed_assets a
+       WHERE a.deleted_at IS NULL AND a.disposed_on IS NOT NULL AND a.disposed_for > 0
+         AND a.disposed_bank_account_id IS NOT NULL AND a.disposed_on >= ${since}::date
+         AND NOT EXISTS (SELECT 1 FROM bank_line_classifications k WHERE k.kind = 'asset_sale' AND k.ref_id = a.id)
+       ORDER BY a.disposed_on, a.id`;
+    pairIn(fetched, "asset_sale", "fixed_assets", (a) => `${a.name} sold`);
+  }
 
   // ── The bank's own charges ──────────────────────────────────────────────
   for (const d of debits) {

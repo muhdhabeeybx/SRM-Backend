@@ -102,4 +102,67 @@ const draftsQuery = z.object({ status: z.enum(["waiting", "posted", "rejected"])
 const rejectBody = z.object({ reason: z.string().trim().min(1, "Say why it is rejected").max(500) });
 const reverseBody = z.object({ day: day.optional() });
 
-module.exports = { ageingQuery, journalBody, entryParam, draftParam, draftsQuery, rejectBody, reverseBody, reconciliationQuery, lineParam, classifyBody, periodQuery, profitQuery, ledgerQuery, journalsQuery, accountParam, atQuery, periodParam, openingBody };
+/** The Report: a period, and the whole business or one PFI. */
+const reportQuery = z.object({
+  from: day.optional(),
+  to: day.optional(),
+  pfi: z.coerce.number().int().positive().optional(),
+  place: z.string().regex(/^(depot|station|plant):\d+$/, "That place is not one the books know").optional(),
+})
+  .refine((q) => !q.from || !q.to || q.from <= q.to, { message: "from must not be after to", path: ["from"] })
+  .refine((q) => !(q.pfi && q.place), { message: "Look at one PFI or one place, not both", path: ["place"] });
+
+// ── The Fixed Assets and Loans registers (0088) ─────────────────────────────
+
+const amount = z.coerce.number().finite();
+const optionalId = z.union([z.coerce.number().int().positive(), z.literal(""), z.null()]).optional()
+  .transform((v) => (v === "" || v == null ? null : v));
+const optionalNumber = z.union([z.coerce.number().finite(), z.literal(""), z.null()]).optional()
+  .transform((v) => (v === "" || v == null ? null : v));
+
+const assetParam = z.object({ assetId: z.coerce.number().int().positive() });
+const assetBody = z.object({
+  name: z.string().trim().min(1, "Give the asset a name").max(255),
+  kind: z.enum(["truck", "vehicle", "generator", "tank", "building", "land", "equipment", "computer", "furniture", "other"]),
+  fleetTruckId: optionalId,
+  boughtOn: day.optional().nullable(),
+  cost: optionalNumber,
+  residual: optionalNumber,
+  lifeMonths: optionalNumber,
+  paidHow: z.enum(["bank", "expense", "loan", "owned"]),
+  bankAccountId: optionalId,
+  expenseId: optionalId,
+  loanId: optionalId,
+  financed: optionalNumber,
+  unit: z.enum(["depot", "trucking", "stations", "lpg_plants", "fleet", "head_office"]).optional().nullable(),
+  location: z.string().regex(/^(depot|station|plant):\d+$/).optional().nullable().or(z.literal("")),
+  notes: z.string().max(2000).optional().default(""),
+});
+const disposeBody = z.object({
+  disposedOn: day,
+  disposedFor: amount.min(0).optional().default(0),
+  bankAccountId: optionalId,
+});
+
+const loanParam = z.object({ loanId: z.coerce.number().int().positive() });
+const repaymentParam = z.object({ loanId: z.coerce.number().int().positive(), repaymentId: z.coerce.number().int().positive() });
+const loanBody = z.object({
+  kind: z.enum(["bank_loan", "hire_purchase", "other_lender"]),
+  lender: z.string().trim().min(1, "Say who lent the money").max(255),
+  amount: optionalNumber,
+  receivedOn: day.optional().nullable().or(z.literal("")),
+  bankAccountId: optionalId,
+  interestRate: optionalNumber,
+  termMonths: optionalNumber,
+  notes: z.string().max(2000).optional().default(""),
+  closedOn: day.optional().nullable().or(z.literal("")),
+});
+const repaymentBody = z.object({
+  paidOn: day,
+  principal: amount.min(0).optional().default(0),
+  interest: amount.min(0).optional().default(0),
+  bankAccountId: z.coerce.number().int().positive({ message: "Say which bank account it was paid from" }),
+  notes: z.string().max(2000).optional().default(""),
+});
+
+module.exports = { reportQuery, assetParam, assetBody, disposeBody, loanParam, repaymentParam, loanBody, repaymentBody, ageingQuery, journalBody, entryParam, draftParam, draftsQuery, rejectBody, reverseBody, reconciliationQuery, lineParam, classifyBody, periodQuery, profitQuery, ledgerQuery, journalsQuery, accountParam, atQuery, periodParam, openingBody };

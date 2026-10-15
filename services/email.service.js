@@ -374,6 +374,10 @@ const sendLpgOrderConfirmedEmail = async (email, requestData) => {
 };
 
 module.exports = {
+  // For senders with their own email that is not a document here — staff
+  // messages (services/staffMessageEmail.service.js). The same guards and the
+  // same message ledger.
+  sendMail,
   sendOrderInvoiceEmail,
   sendDangoteRequestReceivedEmail,
   sendDangoteOrderConfirmedEmail,

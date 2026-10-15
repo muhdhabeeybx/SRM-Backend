@@ -19,8 +19,11 @@ const gl = require("../../lib/glAccounts");
  *   stock            each cargo's cost before that day — the product and the
  *                    cargo costs that go into stock — less the cost of what
  *                    it sold, at its landed cost per litre
- *   the rest         typed by the accountant: trucks and equipment, loans,
- *                    capital, what is owed to cargo suppliers
+ *   fixed assets,    the Fixed Assets and Loans registers (0088): what each
+ *   their wear,      asset owned that day cost and had worn, and what each
+ *   loans            loan still owed
+ *   the rest         typed by the accountant: capital, what is owed to cargo
+ *                    suppliers
  *
  * Whatever does not balance goes to Opening balance equity. The entry is
  * posted once; it can be replaced only while the first month is open, by a
@@ -38,7 +41,14 @@ const dayBefore = (day) => {
 const FROM_RECORDS = [
   "customer_receivables", "trucking_receivables", "station_takings", "plant_takings",
   "vendor_payables", "vat_payable", "wht_payable", "commissions_payable",
+  "fixed_assets", "accumulated_depreciation", "loans",
 ];
+/** Carried from a register rather than the desks' records (0088). */
+const FROM_REGISTER = {
+  fixed_assets: "the Fixed Assets register",
+  accumulated_depreciation: "the Fixed Assets register",
+  loans: "the Loans register",
+};
 
 async function proposal() {
   const { booksStart } = await settings();
@@ -80,9 +90,12 @@ async function proposal() {
     if (!a) continue;
     const parties = carried.filter((r) => Number(r.account_id) === Number(a.id));
     const total = money(parties.reduce((t, r) => t + Number(r.kobo), 0) / 100);
+    const register = FROM_REGISTER[key];
     lines.push({
       accountId: Number(a.id), code: a.gl_code, name: a.name, amount: total,
-      source: parties.length ? `From the records before ${booksStart}, ${parties.length} ${parties.length === 1 ? "party" : "parties"}` : "Nothing before the books started",
+      source: register
+        ? (parties.length ? `From ${register}, as it stood on ${day}` : `Nothing on ${register} before ${booksStart}`)
+        : parties.length ? `From the records before ${booksStart}, ${parties.length} ${parties.length === 1 ? "party" : "parties"}` : "Nothing before the books started",
       editable: false,
       parties: parties.map((r) => ({ partyType: r.party_type, partyId: r.party_id, amount: money(Number(r.kobo) / 100) })),
     });
@@ -138,7 +151,7 @@ async function proposal() {
   }
 
   // The rest is the accountant's.
-  for (const key of ["fixed_assets", "accumulated_depreciation", "supplier_payables", "loans", "share_capital", "retained_earnings"]) {
+  for (const key of ["supplier_payables", "share_capital", "retained_earnings"]) {
     const a = byKey.get(key);
     if (a) lines.push({ accountId: Number(a.id), code: a.gl_code, name: a.name, amount: 0, source: "Type it", editable: true });
   }

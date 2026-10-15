@@ -574,4 +574,4 @@ const nextDay = (day) => {
   return d.toISOString().slice(0, 10);
 };
 
-module.exports = { linksFor, trialBalance, balancesAt, accountLedger, journals, status, profitAndLoss, balanceSheet, cashFlow, dimensions, UNITS };
+module.exports = { linksFor, trialBalance, balancesAt, accountLedger, journals, status, profitAndLoss, balanceSheet, cashFlow, dimensions, locationNames, UNITS };

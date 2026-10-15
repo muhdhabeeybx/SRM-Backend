@@ -9,6 +9,9 @@ const recon = require("../../services/accounting/reconciliation.service");
 const journalsSvc = require("../../services/accounting/journals.service");
 const ageingSvc = require("../../services/accounting/ageing.service");
 const readinessSvc = require("../../services/accounting/readiness.service");
+const businessReport = require("../../services/accounting/businessReport.service");
+const assetsSvc = require("../../services/accounting/assets.service");
+const loansSvc = require("../../services/accounting/loans.service");
 
 /**
  * The Accounts pages: the chart of accounts and the general ledger built on
@@ -224,7 +227,45 @@ const postNow = asyncHandler(async (req, res) => {
   res.json({ success: true, message: "The books are up to date", data: result });
 });
 
+/** The Report — the first Accounts page: the whole business or one PFI, over a period. */
+const getReport = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await businessReport.report({ from: req.query.from || null, to: req.query.to || null, pfiId: req.query.pfi || null, place: req.query.place || null }) });
+});
+
+// ── The Fixed Assets and Loans registers (0088) ─────────────────────────────
+
+/** A register change, answered with the service's own words when it refuses. */
+const registerChange = (fn, message, status = 200) => asyncHandler(async (req, res) => {
+  try {
+    const data = await fn(req);
+    res.status(status).json({ success: true, message, data });
+  } catch (err) {
+    answer(res, err);
+  }
+});
+const staffOf = (req) => req.user?.id ?? null;
+
+const getFixedAssets = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await assetsSvc.list() });
+});
+const createFixedAsset = registerChange((req) => assetsSvc.create(req.body, staffOf(req)), "Asset added", 201);
+const updateFixedAsset = registerChange((req) => assetsSvc.update(req.params.assetId, req.body, staffOf(req)), "Asset saved");
+const deleteFixedAsset = registerChange((req) => assetsSvc.remove(req.params.assetId, staffOf(req)), "Asset taken off the register");
+const disposeFixedAsset = registerChange((req) => assetsSvc.dispose(req.params.assetId, req.body, staffOf(req)), "Asset marked sold or written off");
+const undisposeFixedAsset = registerChange((req) => assetsSvc.undispose(req.params.assetId, staffOf(req)), "Asset back in use");
+
+const getLoans = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: await loansSvc.list() });
+});
+const createLoan = registerChange((req) => loansSvc.create(req.body, staffOf(req)), "Loan added", 201);
+const updateLoan = registerChange((req) => loansSvc.update(req.params.loanId, req.body, staffOf(req)), "Loan saved");
+const deleteLoan = registerChange((req) => loansSvc.remove(req.params.loanId, staffOf(req)), "Loan taken off the register");
+const addLoanRepayment = registerChange((req) => loansSvc.addRepayment(req.params.loanId, req.body, staffOf(req)), "Repayment added", 201);
+const deleteLoanRepayment = registerChange((req) => loansSvc.removeRepayment(req.params.loanId, req.params.repaymentId), "Repayment removed");
+
 module.exports = {
+  getReport, getFixedAssets, createFixedAsset, updateFixedAsset, deleteFixedAsset, disposeFixedAsset, undisposeFixedAsset,
+  getLoans, createLoan, updateLoan, deleteLoan, addLoanRepayment, deleteLoanRepayment,
   getChart, getDimensions, getStatus, getTrialBalance, getAccountLedger, getJournals, getProfitAndLoss, getBalanceSheet, getCashFlow,
   getOpening, postOpening, getPeriods, closePeriod, reopenPeriod, postNow,
   getReconciliation, classifyLine, unclassifyLine, writeJournal, reverseJournal, getJournalDrafts, approveJournal, rejectJournal, getAgeing, getReadiness, getBanks,
