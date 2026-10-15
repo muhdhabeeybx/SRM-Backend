@@ -809,17 +809,23 @@ const findFinanceReport = async ({
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
   /**
-   * Never a transfer to a trucking PFI (lib/allocationOrders): stock the
-   * company moved to itself, which nobody pays and nobody owes, so it is no
-   * row of a report about money received — under any status filter. A PAID
-   * allocation order (PFI/47C's) stays, as the sale its bank line made it.
-   * The first transfer was placed after the audit, so no audited figure moves.
+   * A transfer to a trucking PFI (lib/allocationOrders): stock the company
+   * moved to itself, on credit. On THIS report it is a sale on credit (the
+   * owner's choice, 15 Oct 2026) — listed in the default view beside the paid
+   * orders, marked ON CREDIT, and kept out of what is owed, which it is not.
+   * Everywhere else it stays "Trucked out". It is none of Paid, Part Paid or
+   * Unpaid, so those filters leave it out; 'on_credit' lists only these. A
+   * PAID allocation order (PFI/47C's) is not one, and stays the sale its bank
+   * line made it. The first was placed 2 Oct 2026, after the audit, so no
+   * audited figure moves.
    */
-  conditions.push(sql`NOT ${sql.raw(transferSql('"orders"'))}`);
-  if (paymentStatus && paymentStatus !== "all") {
-    conditions.push(eq(orders.paymentStatus, paymentStatus));
+  const onCredit = sql.raw(transferSql('"orders"'));
+  if (paymentStatus === "on_credit") {
+    conditions.push(onCredit);
+  } else if (paymentStatus && paymentStatus !== "all") {
+    conditions.push(eq(orders.paymentStatus, paymentStatus), sql`NOT ${onCredit}`);
   } else if (!paymentStatus) {
-    conditions.push(inArray(orders.paymentStatus, ["Paid", "Part Paid"]));
+    conditions.push(or(inArray(orders.paymentStatus, ["Paid", "Part Paid"]), onCredit));
   }
   if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
   if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));
@@ -916,6 +922,8 @@ const findFinanceReport = async ({
   const columns = {
     ...FULL_ORDER_COLUMNS,
     pfiLocationName: pfis.locationName,
+    /** A transfer to a trucking PFI: marked ON CREDIT, and owed by nobody. */
+    onCredit: sql`${onCredit}`.mapWith(Boolean),
     /** Set on the company's own account, whose position is not a customer's. */
     customerHouseAccount: customers.houseAccount,
   };
@@ -997,9 +1005,16 @@ const findFinanceReport = async ({
         totalSurplus: sql`COALESCE(SUM(GREATEST(0, (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         ) - (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric)), 0)`,
-        totalShortfall: sql`COALESCE(SUM(GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
+        // Owed by customers — an order on credit is not, and is totalled on
+        // its own below.
+        totalShortfall: sql`COALESCE(SUM(CASE WHEN ${onCredit} THEN 0 ELSE GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
-        ))), 0)`,
+        )) END), 0)`,
+        totalOnCredit: sql`COALESCE(SUM(CASE WHEN ${onCredit} THEN GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
+          SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
+        )) ELSE 0 END), 0)`,
+        onCreditQuantity: sql`COALESCE(SUM(${orders.quantity}) FILTER (WHERE ${onCredit}), 0)`,
+        onCreditCount: sql`COUNT(*) FILTER (WHERE ${onCredit})::int`,
         reconciledCount: sql`COUNT(*) FILTER (WHERE ${hasStatement})::int`,
         partPaidCount: sql`COUNT(*) FILTER (WHERE ${orders.paymentStatus} = 'Part Paid')::int`,
         /**
@@ -1517,8 +1532,13 @@ const findFinanceReport = async ({
        * reconciliation against the statement is checked against.
        */
       totalAmountPaidIn: Number(totalsRow.totalAmountPaidIn),
-      /** Sales value against the bank figure, before any transfer. */
-      totalDifferential: Number(totalsRow.totalAmount) - Number(totalsRow.totalAmountPaidIn),
+      /**
+       * Sales value against the bank figure, before any transfer. Here and in
+       * totalBalance an order on credit is left out — nobody owes it — and
+       * totalOnCredit states it instead.
+       */
+      totalDifferential:
+        Number(totalsRow.totalAmount) - Number(totalsRow.totalAmountPaidIn) - Number(totalsRow.totalOnCredit),
       /** Movement between orders: netted, and the outgoing side unsigned. */
       totalNetTransfers: Number(totalsRow.totalNetTransfers),
       totalTransferredOut: Number(totalsRow.totalTransferredOut),
@@ -1526,10 +1546,15 @@ const findFinanceReport = async ({
       /** What the listed orders hold once transfers are taken into account. */
       totalReceived: Number(totalsRow.totalReceived),
       /** What is left after both — zero on a fully settled window. */
-      totalBalance: Number(totalsRow.totalAmount) - Number(totalsRow.totalReceived),
+      totalBalance:
+        Number(totalsRow.totalAmount) - Number(totalsRow.totalReceived) - Number(totalsRow.totalOnCredit),
       /** Summed per order, never netted — see the SQL above. */
       totalSurplus: Number(totalsRow.totalSurplus),
       totalShortfall: Number(totalsRow.totalShortfall),
+      /** Value and litres on orders on credit (transfers to trucking PFIs) — sold, not owed. */
+      totalOnCredit: Number(totalsRow.totalOnCredit),
+      onCreditQuantity: Number(totalsRow.onCreditQuantity),
+      onCreditCount: Number(totalsRow.onCreditCount),
       /** How much of the book an external audit can actually check. */
       reconciledCount,
       unreconciledCount: total - reconciledCount,
