@@ -10,7 +10,9 @@ const { db } = require("../config/db");
 const { depots, products, depotProductPrices, pfis } = require("../db/schema");
 const { customerRepo, pfiRepo, bankAccountRepo, orderPfiAllocationRepo } = require("../repositories");
 const { placeOrder } = require("../services/order.service");
-const { staffTokenWithRoles, closeDb, seedLegacyHold } = require("./helpers");
+const {
+  staffTokenWithRoles, closeDb, seedLegacyHold, payOrderWithStatementLine, makeStatementLine,
+} = require("./helpers");
 
 const RUN = Date.now();
 const UNIT_PRICE = 100;
@@ -163,6 +165,85 @@ describe("DELETE /api/orders/:id — hard delete must give the PFI its stock bac
       funded,
       "deleting the order returned the held money — it must not vanish with the hold row",
     );
+  });
+
+  /** The fixture statement's account, assigned to this PFI so its orders can be paid into it. */
+  async function paidOrder(quantity) {
+    const { client } = require("../config/db");
+    const { bankAccountId } = await makeStatementLine(1);
+    await client`UPDATE bank_accounts SET pfi_ids = ${JSON.stringify([String(pfiId)])}::jsonb WHERE id = ${bankAccountId}`;
+    const { order } = await placeOrder({
+      customerId, state: "Lagos", depotId, productId, quantity, deliveryType: "pickup", trucks: [],
+    });
+    await payOrderWithStatementLine(order.id);
+    return order;
+  }
+
+  /**
+   * The credit that paid for a deleted order goes back to the pool.
+   *
+   * order_payments cascades with the order, but the statement line has no
+   * foreign key to it, so the line used to stay MATCHED against nothing —
+   * unspendable, and printed on the bank statement as "Order deleted".
+   */
+  test("deleting a paid order returns its bank credit to the unmatched pool", async () => {
+    const { client } = require("../config/db");
+    const order = await paidOrder(1500);
+    const [paid] = await client`
+      SELECT l.id, l.status FROM bank_statement_lines l
+        JOIN order_payments op ON op.statement_line_id = l.id
+       WHERE op.order_id = ${order.id}`;
+    assert.equal(paid.status, "MATCHED");
+
+    const res = await request(app)
+      .delete(`/api/orders/${order.id}`)
+      .set("Authorization", `Bearer ${superStaff.accessToken}`)
+      .send({});
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.data.deleted.statementLinesReturned, 1);
+
+    const [line] = await client`
+      SELECT status, matched_order_id, matched_deposit_id, matched_by, matched_at
+        FROM bank_statement_lines WHERE id = ${paid.id}`;
+    assert.equal(line.status, "UNMATCHED", "back in the pool, ready for the order it belongs to");
+    assert.equal(line.matched_order_id, null);
+    assert.equal(line.matched_by, null);
+    assert.equal(line.matched_at, null);
+
+    const [audit] = await client`
+      SELECT metadata FROM audit_logs
+       WHERE entity_type = 'order' AND entity_id = ${order.id} AND action = 'order.deleted'`;
+    assert.deepEqual(audit.metadata.statementLinesReturned.map((l) => l.id), [Number(paid.id)]);
+  });
+
+  /**
+   * A credit matched in the wallet era went to a deposit, and the deposit to
+   * an order, so matched_order_id was never filled in — only its payment row
+   * names the order. The statement must read the order from there, not print
+   * "Order deleted" beside a live order.
+   */
+  test("the statement names the order a credit paid, even with no matched_order_id", async () => {
+    const { client } = require("../config/db");
+    const repo = require("../repositories/bankStatement.repository");
+    const order = await paidOrder(1200);
+    const [line] = await client`
+      SELECT l.id, l.bank_account_id, l.statement_id FROM bank_statement_lines l
+        JOIN order_payments op ON op.statement_line_id = l.id
+       WHERE op.order_id = ${order.id}`;
+    // As the wallet-era matches stand on the live book.
+    await client`UPDATE bank_statement_lines SET matched_order_id = NULL WHERE id = ${line.id}`;
+
+    const { lines } = await repo.accountLines({ bankAccountId: line.bank_account_id, limit: 5000 });
+    const found = lines.find((l) => Number(l.id) === Number(line.id));
+    assert.equal(Number(found.order_id), order.id, "the account statement names the order");
+
+    const bySearch = await repo.accountLines({
+      bankAccountId: line.bank_account_id, q: String(order.id), limit: 5000,
+    });
+    assert.ok(bySearch.lines.some((l) => Number(l.id) === Number(line.id)), "and finds the line by the order");
+
+    const { lines: inUpload } = await repo.listStatementLines({ statementId: line.statement_id, limit: 5000 });
+    assert.equal(Number(inUpload.find((l) => Number(l.id) === Number(line.id)).order_id), order.id);
   });
 
   test("a non-super-admin cannot delete an order", async () => {

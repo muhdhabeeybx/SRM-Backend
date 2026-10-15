@@ -643,6 +643,15 @@ const bankStatementRepo = {
    * `limit` goes up to 5,000 here rather than the 200 the per-file view caps
    * at, because this is also what the export reads — and an export that
    * silently stops at 200 rows is the failure mode described in the parser.
+   *
+   * LINE_ORDER — which order a credit paid for. The payment row is the
+   * record (order_payments.statement_line_id: payments live on the order), so
+   * it is read first; matched_order_id is only the fallback. They are not the
+   * same thing: a credit matched in the wallet era went to a DEPOSIT, the
+   * deposit later to an order, and matched_order_id was never filled in.
+   * Reading that column alone printed 15 such credits on three Zenith
+   * accounts — ₦4,333,446,000, every one paying a live order (CE11303,
+   * DT11362, NR11359, FB11287, BG11302) — as "Order deleted".
    */
   async accountLines({
     bankAccountId, from = null, to = null, day = null,
@@ -691,7 +700,14 @@ const bankStatementRepo = {
         JOIN bank_statements st ON st.id = l.statement_id
         LEFT JOIN staff up ON up.id = st.uploaded_by
         LEFT JOIN deposits d ON d.id = l.matched_deposit_id
-        LEFT JOIN orders o ON o.id = l.matched_order_id
+        LEFT JOIN LATERAL (
+          -- The order this credit paid for is the one its payment row names
+          -- (order_payments.statement_line_id) — see LINE_ORDER below.
+          SELECT op.order_id FROM order_payments op
+           WHERE op.statement_line_id = l.id AND op.source = 'statement'
+           ORDER BY op.id LIMIT 1
+        ) lop ON true
+        LEFT JOIN orders o ON o.id = COALESCE(lop.order_id, l.matched_order_id)
         LEFT JOIN delivery_sales ds ON ds.id = l.matched_delivery_sale_id
         LEFT JOIN customers c ON c.id = d.customer_id
         LEFT JOIN staff s ON s.id = l.matched_by
@@ -707,7 +723,10 @@ const bankStatementRepo = {
            OR l.narration ILIKE ${like}::text
            OR st.filename ILIKE ${like}::text
            OR (${amount}::numeric IS NOT NULL AND l.amount = ${amount}::numeric)
-           OR (${orderId}::int IS NOT NULL AND l.matched_order_id = ${orderId}::int)
+           OR (${orderId}::int IS NOT NULL AND (
+                 l.matched_order_id = ${orderId}::int
+                 OR EXISTS (SELECT 1 FROM order_payments opq
+                             WHERE opq.statement_line_id = l.id AND opq.order_id = ${orderId}::int)))
            OR EXISTS (SELECT 1 FROM deposits dq
                        WHERE dq.id = l.matched_deposit_id
                          AND dq.reference ILIKE ${like}::text)
@@ -747,7 +766,10 @@ const bankStatementRepo = {
            OR l.narration ILIKE ${like}::text
            OR st.filename ILIKE ${like}::text
            OR (${amount}::numeric IS NOT NULL AND l.amount = ${amount}::numeric)
-           OR (${orderId}::int IS NOT NULL AND l.matched_order_id = ${orderId}::int)
+           OR (${orderId}::int IS NOT NULL AND (
+                 l.matched_order_id = ${orderId}::int
+                 OR EXISTS (SELECT 1 FROM order_payments opq
+                             WHERE opq.statement_line_id = l.id AND opq.order_id = ${orderId}::int)))
            OR EXISTS (SELECT 1 FROM deposits dq
                        WHERE dq.id = l.matched_deposit_id
                          AND dq.reference ILIKE ${like}::text)
@@ -786,9 +808,8 @@ const bankStatementRepo = {
    *
    * The order reference is assembled here from the company name and id, the
    * same way every other screen builds it, so a reference read off this page
-   * is the one to search for elsewhere. A matched line whose order has since
-   * been deleted keeps its deposit but resolves to no order — that state is
-   * real (see the PU11486 deletion) and showing it blank would hide it.
+   * is the one to search for elsewhere. The order is the one the credit's
+   * payment row names — see LINE_ORDER on accountLines.
    */
   async listStatementLines({ statementId, page = 1, limit = 25, status = null }) {
     const offset = (Math.max(1, Number(page)) - 1) * Number(limit);
@@ -802,7 +823,14 @@ const bankStatementRepo = {
              s.first_name AS matched_by_first_name, s.surname AS matched_by_surname
         FROM bank_statement_lines l
         LEFT JOIN deposits d ON d.id = l.matched_deposit_id
-        LEFT JOIN orders o ON o.id = l.matched_order_id
+        LEFT JOIN LATERAL (
+          -- The order this credit paid for is the one its payment row names
+          -- (order_payments.statement_line_id) — see LINE_ORDER below.
+          SELECT op.order_id FROM order_payments op
+           WHERE op.statement_line_id = l.id AND op.source = 'statement'
+           ORDER BY op.id LIMIT 1
+        ) lop ON true
+        LEFT JOIN orders o ON o.id = COALESCE(lop.order_id, l.matched_order_id)
         LEFT JOIN delivery_sales ds ON ds.id = l.matched_delivery_sale_id
         LEFT JOIN customers c ON c.id = d.customer_id
         LEFT JOIN staff s ON s.id = l.matched_by

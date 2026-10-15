@@ -793,6 +793,15 @@ const gateOutTruck = asyncHandler(async (req, res) => {
  * allocation is released explicitly, before the cascade, or the litres stay
  * claimed on a PFI forever against an order that no longer exists.
  *
+ * Every bank statement line that paid for the order goes back to the
+ * unmatched pool, in the same transaction. order_payments cascades with the
+ * order, but bank_statement_lines.matched_order_id has no foreign key, so the
+ * lines used to stay MATCHED against an order that no longer existed — spent
+ * on nothing, never matchable again, and printed on the bank statement as
+ * "Matched" beside "Order deleted". This is what
+ * scripts/delete-order-unmatch-lines.js did by hand for AS12388. A line that
+ * also pays another order (a split credit) stays matched, to that order.
+ *
  * The audit row is written BEFORE the delete and survives it — audit_logs has
  * no foreign key to orders — so a deleted order still leaves a record of what
  * was destroyed, by whom, and what it was worth. That is the only trace left,
@@ -806,6 +815,20 @@ const deleteOrder = asyncHandler(async (req, res) => {
   if (!order) throw httpErr(404, "Order not found");
 
   const removed = await db.transaction(async (tx) => {
+    // The credits this order took, locked: by its payment rows, and by the
+    // older matched_order_id pointer a wallet-era match may carry alone.
+    const lineRows = await tx.execute(sql`
+      SELECT l.id, l.amount, l.bank_ref,
+             EXISTS (SELECT 1 FROM order_payments o2
+                      WHERE o2.statement_line_id = l.id AND o2.order_id <> ${orderId}) AS held_elsewhere
+        FROM bank_statement_lines l
+       WHERE l.matched_order_id = ${orderId}
+          OR l.id IN (SELECT op.statement_line_id FROM order_payments op
+                       WHERE op.order_id = ${orderId} AND op.statement_line_id IS NOT NULL)
+         FOR UPDATE OF l`);
+    const lines = lineRows.rows ?? lineRows;
+    const toPool = lines.filter((l) => !l.held_elsewhere).map((l) => Number(l.id));
+
     // Snapshot first: once the row is gone this is all that is left.
     await auditLogRepo.record(
       {
@@ -825,6 +848,10 @@ const deleteOrder = asyncHandler(async (req, res) => {
           productName: order.productName,
           pfiId: order.pfiId,
           createdAt: order.createdAt,
+          // The credits put back in the pool, so each can be traced to here.
+          statementLinesReturned: lines
+            .filter((l) => !l.held_elsewhere)
+            .map((l) => ({ id: Number(l.id), amount: String(l.amount), bankRef: l.bank_ref })),
         },
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
@@ -868,6 +895,19 @@ const deleteOrder = asyncHandler(async (req, res) => {
       counts[table] = rows.length ?? rows.rowCount ?? 0;
     }
     counts.walletReleased = released?.success ? Number(order.totalAmount) : 0;
+
+    // Its credits back to the pool; a split credit keeps its other order.
+    if (toPool.length) {
+      await tx.execute(sql`
+        UPDATE bank_statement_lines
+           SET status = 'UNMATCHED', matched_order_id = NULL, matched_deposit_id = NULL,
+               matched_by = NULL, matched_at = NULL
+         WHERE id IN (${sql.join(toPool.map((id) => sql`${id}`), sql`, `)})`);
+    }
+    await tx.execute(sql`
+      UPDATE bank_statement_lines SET matched_order_id = NULL
+       WHERE matched_order_id = ${orderId}`);
+    counts.statementLinesReturned = toPool.length;
 
     // Everything else cascades or nulls out via its own constraint.
     await tx.execute(sql`DELETE FROM orders WHERE id = ${orderId}`);

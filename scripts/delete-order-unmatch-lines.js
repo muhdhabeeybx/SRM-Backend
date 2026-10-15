@@ -5,6 +5,10 @@
  *
  * ── Why this is a script and not the Delete button ─────────────────────────
  *
+ * (Since 2026-10-15 the Delete button returns the lines to the pool too —
+ * controllers/administration/order.controller.js deleteOrder. This script is
+ * still the one with the dry run, the backup file and --with-merged.)
+ *
  * The super-admin DELETE /orders/:id removes the order and lets order_payments
  * cascade with it — but bank_statement_lines.matched_order_id has no foreign
  * key, so every line that paid for the order is left MATCHED, pointing at an
