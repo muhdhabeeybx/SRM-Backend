@@ -314,6 +314,52 @@ async function partitionRows({ bankAccountId, rows }) {
   return { fresh, skipped, duplicates, repeatedReferences, excluded, adopted };
 }
 
+/**
+ * Which PFI a credit belongs to (the owner's ask, 16 Oct 2026): one bank
+ * account often collects for several cargos, one after another or at once,
+ * and the statement has to be read PFI by PFI.
+ *
+ *   an order     the PFI of the order the credit paid — the one its payment
+ *                row names, else matched_order_id (LINE_ORDER, accountLines)
+ *   a truck sale the PFI its batch code names (delivery_sales.allocation_code
+ *   or a station  → pfis.allocation_code), or, for a code no PFI carries as
+ *   or plant     its own, the one PFI every load sent under it names — the
+ *   deposit      rule the books use (lib/accounting/postingSources/delivery)
+ *   unmatched    none yet: nothing says whose money it is until it is matched
+ *
+ * CODE_PFI is a CTE (put it in a WITH); LINE_PFI joins `lp.pfi_id` onto a
+ * query over bank_statement_lines aliased `l`.
+ */
+const CODE_PFI = client`
+  code_pfi AS (
+    SELECT upper(btrim(p.allocation_code)) AS code, p.id AS pfi_id
+      FROM pfis p
+     WHERE btrim(COALESCE(p.allocation_code, '')) <> ''
+    UNION ALL
+    SELECT upper(btrim(di.allocation_code)), min(di.pfi_id)
+      FROM delivery_inventory di
+     WHERE btrim(COALESCE(di.allocation_code, '')) <> '' AND di.pfi_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM pfis p2 WHERE upper(btrim(p2.allocation_code)) = upper(btrim(di.allocation_code)))
+     GROUP BY 1
+    HAVING count(DISTINCT di.pfi_id) = 1
+  )`;
+const LINE_PFI = client`
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(
+      (SELECT o2.pfi_id FROM order_payments op2 JOIN orders o2 ON o2.id = op2.order_id
+        WHERE op2.statement_line_id = l.id AND op2.source = 'statement'
+        ORDER BY op2.id LIMIT 1),
+      (SELECT o3.pfi_id FROM orders o3 WHERE o3.id = l.matched_order_id),
+      (SELECT cp.pfi_id FROM delivery_sales s2
+         JOIN code_pfi cp ON cp.code = upper(btrim(s2.allocation_code))
+        WHERE s2.id = l.matched_delivery_sale_id OR s2.statement_line_id = l.id
+        ORDER BY s2.id, cp.pfi_id LIMIT 1)
+    ) AS pfi_id
+  ) lp ON true`;
+/** One PFI's lines ('<id>'), the lines no PFI has claimed yet ('none'), or every line (null). */
+const pfiWhere = (pfi) =>
+  pfi == null ? client`` : pfi === "none" ? client`AND lp.pfi_id IS NULL` : client`AND lp.pfi_id = ${Number(pfi)}`;
+
 const bankStatementRepo = {
   paymentReference,
   dedupKey,
@@ -609,8 +655,9 @@ const bankStatementRepo = {
    * one day here, which is the point: how many files it took to assemble is an
    * accident of how somebody exported it, not a property of the money.
    */
-  async accountDays({ bankAccountId, from = null, to = null }) {
+  async accountDays({ bankAccountId, from = null, to = null, pfi = null }) {
     return client`
+      WITH ${CODE_PFI}
       SELECT l.txn_date::text AS day,
              count(*)::int AS line_count,
              COALESCE(sum(l.amount), 0)::numeric AS total_amount,
@@ -622,12 +669,91 @@ const bankStatementRepo = {
              min(l.created_at) AS first_imported_at,
              max(l.created_at) AS last_imported_at
         FROM bank_statement_lines l
+        ${LINE_PFI}
        WHERE l.bank_account_id = ${bankAccountId}
          AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
          AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
+         ${pfiWhere(pfi)}
        GROUP BY l.txn_date
        ORDER BY l.txn_date DESC
     `;
+  },
+
+  /**
+   * The PFIs one account collected for, and from which day to which: each
+   * PFI's first and last credit here, how many and how much — and the credits
+   * no PFI has claimed yet, apart. Oldest first, so it reads as the account's
+   * story: "1–9 Oct PFI/47, then PFI/50 from the 10th".
+   */
+  async accountPfis({ bankAccountId, from = null, to = null }) {
+    return client`
+      WITH ${CODE_PFI}
+      SELECT lp.pfi_id, p.pfi_number, p.status::text AS pfi_status,
+             min(l.txn_date)::text AS first_day, max(l.txn_date)::text AS last_day,
+             count(*)::int AS line_count,
+             COALESCE(sum(l.amount), 0)::numeric AS amount
+        FROM bank_statement_lines l
+        ${LINE_PFI}
+        LEFT JOIN pfis p ON p.id = lp.pfi_id
+       WHERE l.bank_account_id = ${bankAccountId}
+         AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
+         AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
+       GROUP BY lp.pfi_id, p.pfi_number, p.status
+       ORDER BY (lp.pfi_id IS NULL), min(l.txn_date), lp.pfi_id
+    `;
+  },
+
+  /**
+   * One PFI on one account: the orders its credits here paid, and the truck
+   * sales and station or plant deposits they paid, with what each order is
+   * worth, what came into this account for it, what it has been paid in all
+   * and what is still owed on it.
+   */
+  async accountPfiReport({ bankAccountId, pfiId, from = null, to = null }) {
+    const orders = await client`
+      WITH ${CODE_PFI},
+      here AS (
+        SELECT l.id FROM bank_statement_lines l
+        ${LINE_PFI}
+         WHERE l.bank_account_id = ${bankAccountId} AND lp.pfi_id = ${pfiId}
+           AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
+           AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
+      )
+      SELECT o.id, o.company_name, c.name AS customer_name,
+             to_char(o.created_at AT TIME ZONE 'Africa/Lagos', 'YYYY-MM-DD') AS order_day,
+             o.quantity, pr.name AS product, o.total_amount::numeric AS total_amount,
+             COALESCE(o.amount_paid, 0)::numeric AS amount_paid, o.payment_status::text AS payment_status,
+             o.pfi_id, COALESCE(sum(op.amount), 0)::numeric AS paid_here, count(op.id)::int AS payments_here,
+             min(bl.txn_date)::text AS first_paid, max(bl.txn_date)::text AS last_paid
+        FROM order_payments op
+        JOIN here h ON h.id = op.statement_line_id
+        JOIN bank_statement_lines bl ON bl.id = op.statement_line_id
+        JOIN orders o ON o.id = op.order_id
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN products pr ON pr.id = o.product_id
+       WHERE op.source = 'statement'
+       GROUP BY o.id, c.name, pr.name
+       ORDER BY max(bl.txn_date) DESC, o.id DESC
+    `;
+    const deliveries = await client`
+      WITH ${CODE_PFI},
+      here AS (
+        SELECT l.id, l.matched_delivery_sale_id, l.txn_date, l.amount FROM bank_statement_lines l
+        ${LINE_PFI}
+         WHERE l.bank_account_id = ${bankAccountId} AND lp.pfi_id = ${pfiId}
+           AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
+           AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
+      )
+      SELECT DISTINCT ON (s.id) s.id, s.customer_id, s.customer_name, s.truck_number, s.quantity,
+             s.sales_value::numeric AS sales_value, s.payment_amount::numeric AS payment_amount,
+             h.txn_date::text AS paid_day, h.amount::numeric AS line_amount,
+             dc.customer_type::text AS customer_type, dc.name AS customer_label
+        FROM here h
+        JOIN delivery_sales s ON s.id = h.matched_delivery_sale_id OR s.statement_line_id = h.id
+        LEFT JOIN delivery_customers dc ON dc.id = s.customer_id
+       ORDER BY s.id, h.txn_date DESC
+    `;
+    return { orders, deliveries };
   },
 
   /**
@@ -655,7 +781,7 @@ const bankStatementRepo = {
    */
   async accountLines({
     bankAccountId, from = null, to = null, day = null,
-    status = null, q = null, page = 1, limit = 50,
+    status = null, q = null, page = 1, limit = 50, pfi = null,
   }) {
     const size = Math.min(Math.max(Number(limit) || 50, 1), 5000);
     const offset = (Math.max(1, Number(page)) - 1) * size;
@@ -686,8 +812,10 @@ const bankStatementRepo = {
     const orderId = term ? parseOrderReference(term) : null;
 
     const rows = await client`
+      WITH ${CODE_PFI}
       SELECT l.id, l.txn_date::text AS txn_date, l.amount, l.depositor, l.narration,
              l.bank_ref, l.status, l.created_at AS imported_at,
+             lp.pfi_id, pfl.pfi_number,
              l.matched_deposit_id, l.matched_order_id, l.matched_at,
              st.id AS statement_id, st.filename, st.created_at AS uploaded_at,
              NULLIF(trim(concat_ws(' ', up.first_name, up.surname)), '') AS uploaded_by_name,
@@ -711,7 +839,10 @@ const bankStatementRepo = {
         LEFT JOIN delivery_sales ds ON ds.id = l.matched_delivery_sale_id
         LEFT JOIN customers c ON c.id = d.customer_id
         LEFT JOIN staff s ON s.id = l.matched_by
+        ${LINE_PFI}
+        LEFT JOIN pfis pfl ON pfl.id = lp.pfi_id
        WHERE l.bank_account_id = ${bankAccountId}
+         ${pfiWhere(pfi)}
          AND (${day}::date IS NULL OR l.txn_date = ${day}::date)
          AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
          AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
@@ -746,6 +877,7 @@ const bankStatementRepo = {
     `;
 
     const [totals] = await client`
+      WITH ${CODE_PFI}
       SELECT count(*)::int AS total,
              count(*) FILTER (WHERE l.status = 'MATCHED')::int AS matched,
              count(*) FILTER (WHERE l.status <> 'MATCHED')::int AS unmatched,
@@ -754,7 +886,9 @@ const bankStatementRepo = {
              COALESCE(sum(l.amount) FILTER (WHERE l.status <> 'MATCHED'), 0)::numeric AS unmatched_amount
         FROM bank_statement_lines l
         JOIN bank_statements st ON st.id = l.statement_id
+        ${LINE_PFI}
        WHERE l.bank_account_id = ${bankAccountId}
+         ${pfiWhere(pfi)}
          AND (${day}::date IS NULL OR l.txn_date = ${day}::date)
          AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
          AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)

@@ -41,6 +41,10 @@ const fail = (res, code, message) => res.status(code).json({ success: false, mes
  */
 const day = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : null);
 
+/** A PFI filter from a query string: a PFI id, 'none' (no PFI yet), or null for every line. */
+const pfiParam = (v) => (v === "none" ? "none" : /^\d+$/.test(String(v || "")) ? String(Number(v)) : null);
+const money = (v) => Math.round((Number(v) || 0) * 100) / 100;
+
 /**
  * The two derived fields every line view needs.
  *
@@ -334,14 +338,108 @@ async function accountSummary(req, res) {
  * unit it is actually read in.
  */
 async function accountDays(req, res) {
-  const { from, to } = req.query;
+  const { from, to, pfi } = req.query;
   await guard(req, req.params.bankAccountId);
   const days = await repo.accountDays({
     bankAccountId: Number(req.params.bankAccountId),
     from: day(from),
     to: day(to),
+    pfi: pfiParam(pfi),
   });
   return ok(res, { days });
+}
+
+/**
+ * GET /api/bank-statements/accounts/:bankAccountId/pfis?from=&to=
+ *
+ * The PFIs this account collected for, each from its first credit here to its
+ * last, and the credits no PFI has claimed yet — see repo.accountPfis.
+ */
+async function accountPfis(req, res) {
+  await guard(req, req.params.bankAccountId);
+  const rows = await repo.accountPfis({
+    bankAccountId: Number(req.params.bankAccountId),
+    from: day(req.query.from),
+    to: day(req.query.to),
+  });
+  const pfis = rows.map((r) => ({
+    pfiId: r.pfi_id == null ? null : Number(r.pfi_id),
+    pfiNumber: r.pfi_number || null,
+    pfiStatus: r.pfi_status || null,
+    firstDay: r.first_day,
+    lastDay: r.last_day,
+    lineCount: Number(r.line_count),
+    amount: money(r.amount),
+  }));
+  return ok(res, { pfis });
+}
+
+/**
+ * GET /api/bank-statements/accounts/:bankAccountId/pfis/:pfiId?from=&to=
+ *
+ * One PFI on one account: the orders and truck or station payments its
+ * credits here paid, and what is still owed on those orders.
+ */
+async function accountPfiReport(req, res) {
+  await guard(req, req.params.bankAccountId);
+  const pfiId = Number(req.params.pfiId);
+  if (!Number.isInteger(pfiId) || pfiId <= 0) return fail(res, 400, "That PFI is not one on file");
+  const { orders, deliveries } = await repo.accountPfiReport({
+    bankAccountId: Number(req.params.bankAccountId),
+    pfiId,
+    from: day(req.query.from),
+    to: day(req.query.to),
+  });
+  const [pfi] = await client`SELECT id, pfi_number, status::text AS status FROM pfis WHERE id = ${pfiId}`;
+  const list = orders.map((o) => {
+    const total = money(o.total_amount);
+    const paid = money(o.amount_paid);
+    return {
+      orderId: Number(o.id),
+      reference: generateOrderReference(o.company_name, o.id),
+      customer: o.customer_name || o.company_name || "",
+      orderDay: o.order_day,
+      product: o.product || "",
+      quantity: o.quantity == null ? null : Number(o.quantity),
+      orderValue: total,
+      paidHere: money(o.paid_here),
+      paymentsHere: Number(o.payments_here),
+      paidElsewhere: money(paid - Number(o.paid_here)),
+      paidInAll: paid,
+      stillOwed: money(total - paid),
+      paymentStatus: o.payment_status || "",
+      firstPaid: o.first_paid,
+      lastPaid: o.last_paid,
+    };
+  });
+  const trucks = deliveries.map((d) => ({
+    id: Number(d.id),
+    customerId: d.customer_id == null ? null : Number(d.customer_id),
+    customer: d.customer_label || d.customer_name || "",
+    customerType: d.customer_type || null,
+    truck: d.truck_number || "",
+    quantity: d.quantity == null ? null : Number(d.quantity),
+    salesValue: d.sales_value == null ? null : money(d.sales_value),
+    paidHere: money(d.line_amount),
+    paidDay: d.paid_day,
+  }));
+  const sum = (xs, k) => money(xs.reduce((t, x) => t + (Number(x[k]) || 0), 0));
+  return ok(res, {
+    pfi: pfi ? { id: Number(pfi.id), pfiNumber: pfi.pfi_number, status: pfi.status } : null,
+    orders: list,
+    deliveries: trucks,
+    totals: {
+      orderCount: list.length,
+      orderValue: sum(list, "orderValue"),
+      paidHere: sum(list, "paidHere"),
+      paidElsewhere: sum(list, "paidElsewhere"),
+      paidInAll: sum(list, "paidInAll"),
+      stillOwed: money(list.reduce((t, o) => t + Math.max(0, o.stillOwed), 0)),
+      paidOver: money(list.reduce((t, o) => t + Math.max(0, -o.stillOwed), 0)),
+      deliveryCount: trucks.length,
+      deliveryPaidHere: sum(trucks, "paidHere"),
+    },
+  });
 }
 
 /**
@@ -352,9 +450,10 @@ async function accountDays(req, res) {
  * where it went. This is also what the export reads.
  */
 async function accountLines(req, res) {
-  const { from, to, day: onDay, status, q, page, limit } = req.query;
+  const { from, to, day: onDay, status, q, page, limit, pfi } = req.query;
   await guard(req, req.params.bankAccountId);
   const result = await repo.accountLines({
+    pfi: pfiParam(pfi),
     bankAccountId: Number(req.params.bankAccountId),
     from: day(from),
     to: day(to),
@@ -497,6 +596,8 @@ module.exports = {
   statementLines,
   accountSummary,
   accountDays,
+  accountPfis,
+  accountPfiReport,
   accountLines,
   deleteStatement,
   searchLines,

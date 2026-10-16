@@ -12,6 +12,8 @@ const {
   statementLines,
   accountSummary,
   accountDays,
+  accountPfis,
+  accountPfiReport,
   accountLines,
   deleteStatement,
   searchLines,
@@ -27,6 +29,9 @@ router.post("/match", verifyStaff, validate({ body: misc.matchBankLines }), matc
 router.get("/summary", verifyStaff, accountSummary);
 router.get("/accounts/:bankAccountId/days", verifyStaff, accountDays);
 router.get("/accounts/:bankAccountId/lines", verifyStaff, accountLines);
+// One account read PFI by PFI: which PFI, from which day to which; one PFI's orders.
+router.get("/accounts/:bankAccountId/pfis", verifyStaff, accountPfis);
+router.get("/accounts/:bankAccountId/pfis/:pfiId", verifyStaff, accountPfiReport);
 
 // Per-account statement format.
 router.get("/mapping/:bankAccountId", verifyStaff, getMapping);
