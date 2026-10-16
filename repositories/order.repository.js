@@ -1122,14 +1122,26 @@ const findFinanceReport = async ({
            * source of the money in both directions), and only when that order
            * has exactly one payer — with several, naming one of them would be
            * a guess, and the leg falls back to naming the order alone.
+           *
+           * A transfer traced to its line (source_statement_line_id, 0089)
+           * names that line whatever the giving order had: it is no longer a
+           * guess. The line's own payment row is read, not the line, so the
+           * leg prints the snapshot the giving order's row already prints.
            */
-          (
-            SELECT CASE WHEN COUNT(DISTINCT sp.depositor) = 1 THEN MIN(sp.depositor) END
-            FROM order_payments sp
-            WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.depositor <> ''
+          COALESCE(
+            (
+              SELECT sl.depositor FROM order_payments sl
+              WHERE sl.statement_line_id = t.source_statement_line_id AND sl.source = 'statement'
+            ),
+            (
+              SELECT CASE WHEN COUNT(DISTINCT sp.depositor) = 1 THEN MIN(sp.depositor) END
+              FROM order_payments sp
+              WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.depositor <> ''
+            )
           ) AS "originDepositor",
           /**
-           * Only where the source order has exactly ONE statement line.
+           * Only where the source order has exactly ONE statement line, or
+           * the transfer was traced to one.
            *
            * This used to string_agg every reference on the source order, so
            * the three transfers out of AM11589 each printed the same four
@@ -1140,12 +1152,35 @@ const findFinanceReport = async ({
            * where there are several, the honest answer is nothing, and the
            * transfer is identified by its own id instead.
            */
-          (
-            SELECT MIN(sp.bank_ref)
-            FROM order_payments sp
-            WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
-            HAVING COUNT(*) = 1
+          COALESCE(
+            (
+              SELECT sl.bank_ref FROM order_payments sl
+              WHERE sl.statement_line_id = t.source_statement_line_id AND sl.source = 'statement'
+            ),
+            (
+              SELECT MIN(sp.bank_ref)
+              FROM order_payments sp
+              WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
+              HAVING COUNT(*) = 1
+            )
           ) AS "originBankRefs",
+          /**
+           * The whole bank credit that reference names — ₦10,000,000 where
+           * the transfer is ₦270,000 of it. Printed beside the transfer so the
+           * two are never read as one figure. Same line as originBankRefs.
+           */
+          COALESCE(
+            (
+              SELECT sl.amount FROM order_payments sl
+              WHERE sl.statement_line_id = t.source_statement_line_id AND sl.source = 'statement'
+            ),
+            (
+              SELECT MIN(sp.amount)
+              FROM order_payments sp
+              WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
+              HAVING COUNT(*) = 1
+            )
+          ) AS "originCreditAmount",
           /**
            * How much of this payment the OLD ledger actually applied to this
            * order — and therefore how much of it never was.
@@ -1268,6 +1303,7 @@ const findFinanceReport = async ({
     // is a different fact from "it applied nothing", and only the first is
     // true of every payment recorded since the wallet path was retired.
     p.appliedAmount = p.appliedAmount == null ? null : Number(p.appliedAmount);
+    p.originCreditAmount = p.originCreditAmount == null ? null : Number(p.originCreditAmount);
     p.counterpartOrderRef =
       p.counterpartOrderId != null
         ? generateOrderReference(p.counterpartCompany, p.counterpartOrderId)
@@ -1354,6 +1390,7 @@ const findFinanceReport = async ({
         transferReason: "Wallet-era surplus movement",
         originDepositor: null,
         originBankRefs: null,
+        originCreditAmount: null,
         appliedAmount: null,
         walletFromOrderRef: null,
         /** Not a row in order_payments. Nothing may offer to reverse it. */

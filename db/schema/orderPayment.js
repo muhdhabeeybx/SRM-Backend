@@ -49,6 +49,11 @@ const orderPaymentTransfers = pgTable(
     reviewedBy: integer("reviewed_by").references(() => staff.id, { onDelete: "set null" }),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     reviewNote: text("review_note").default("").notNull(),
+    // The bank line the money came out of, where it has been traced — a
+    // pointer, not a claim: the line stays with the order it paid. See 0089.
+    sourceStatementLineId: integer("source_statement_line_id").references(() => bankStatementLines.id, {
+      onDelete: "set null",
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

@@ -925,11 +925,18 @@ const listForOrder = async (orderId, tx = db) => {
            WHEN p.source = 'transfer_in'  THEN ${orderReferenceSql("o_from", null)} END AS "counterpartOrderNumber",
       t.reason AS "transferReason",
       -- The bank payment a transfer leg's money originally arrived as. See the
-      -- same subqueries in order.repository.findFinanceReport for why.
-      (
-        SELECT CASE WHEN COUNT(DISTINCT sp.depositor) = 1 THEN MIN(sp.depositor) END
-        FROM order_payments sp
-        WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.depositor <> ''
+      -- same subqueries in order.repository.findFinanceReport for why. A
+      -- transfer traced to its line (0089) names that line first.
+      COALESCE(
+        (
+          SELECT sl.depositor FROM order_payments sl
+          WHERE sl.statement_line_id = t.source_statement_line_id AND sl.source = 'statement'
+        ),
+        (
+          SELECT CASE WHEN COUNT(DISTINCT sp.depositor) = 1 THEN MIN(sp.depositor) END
+          FROM order_payments sp
+          WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.depositor <> ''
+        )
       ) AS "originDepositor",
       /**
        * Only where the source order has exactly ONE statement line.
@@ -943,12 +950,32 @@ const listForOrder = async (orderId, tx = db) => {
        * where there are several, the honest answer is nothing, and the
        * transfer is identified by its own id instead.
        */
-      (
-        SELECT MIN(sp.bank_ref)
-        FROM order_payments sp
-        WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
-        HAVING COUNT(*) = 1
-      ) AS "originBankRefs"
+      COALESCE(
+        (
+          SELECT sl.bank_ref FROM order_payments sl
+          WHERE sl.statement_line_id = t.source_statement_line_id AND sl.source = 'statement'
+        ),
+        (
+          SELECT MIN(sp.bank_ref)
+          FROM order_payments sp
+          WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
+          HAVING COUNT(*) = 1
+        )
+      ) AS "originBankRefs",
+      -- The whole credit that reference names, so a transfer of part of it
+      -- is never read as the credit itself.
+      COALESCE(
+        (
+          SELECT sl.amount FROM order_payments sl
+          WHERE sl.statement_line_id = t.source_statement_line_id AND sl.source = 'statement'
+        ),
+        (
+          SELECT MIN(sp.amount)
+          FROM order_payments sp
+          WHERE sp.order_id = t.from_order_id AND sp.source = 'statement' AND sp.bank_ref <> ''
+          HAVING COUNT(*) = 1
+        )
+      ) AS "originCreditAmount"
     FROM order_payments p
     LEFT JOIN staff st ON st.id = p.recorded_by
     LEFT JOIN staff rv ON rv.id = p.reviewed_by
