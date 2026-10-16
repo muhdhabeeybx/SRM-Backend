@@ -3,6 +3,7 @@ const { db } = require("../config/db");
 const { deliverySales, deliveryCustomers, bankStatementLines } = require("../db/schema");
 const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 const { readBookSql } = require("../lib/deliveryBook");
+const { assertNotBankEntries } = require("../lib/bankEntries");
 
 const findById = async (id) => {
   const [row] = await db
@@ -249,6 +250,8 @@ const createFromStatementLines = async ({ lineIds, bankAccountId, staffId = null
   }
 
   return db.transaction(async (tx) => {
+    // Interest, a charge, a reversal: the bank's own entry is never a payment.
+    await assertNotBankEntries(tx, ids);
     const claimed = await tx
       .update(bankStatementLines)
       .set({

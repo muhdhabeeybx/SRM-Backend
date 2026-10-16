@@ -41,19 +41,21 @@ const { sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { auditLogRepo } = require("../repositories");
 const bankStatementRepo = require("../repositories/bankStatement.repository");
+const { PG_PATTERN } = require("../lib/bankEntries");
 
 const APPLY = process.argv.includes("--apply");
 const naira = (n) => `₦${Number(n).toLocaleString("en-NG", { minimumFractionDigits: 2 })}`;
 const host = (u) => String(u || "").replace(/^.*@/, "").replace(/\?.*$/, "");
 
-// Candidates: the SQL narrows cheaply, the upload's rule decides.
+// Candidates: the SQL narrows cheaply (lib/bankEntries' words, raw cells
+// included), the upload's rule decides — and leaves interest, which is money in.
 const CANDIDATES = sql`
   SELECT l.*,
          (SELECT COUNT(*) FROM order_payments op WHERE op.statement_line_id = l.id)::int AS payment_refs,
          (SELECT COUNT(*) FROM delivery_sales ds WHERE ds.statement_line_id = l.id)::int AS sale_refs
     FROM bank_statement_lines l
-   WHERE (l.depositor || ' ' || l.narration || ' ' || l.bank_ref)
-         ~* '(rsvl|rvsl|revers|charge|chrg|commission|levy|stamp duty|sms alert|maintenance)'
+   WHERE (l.depositor || ' ' || l.narration || ' ' || l.bank_ref || ' ' || COALESCE(l.raw_row::text, ''))
+         ~* ${PG_PATTERN}
    ORDER BY l.amount DESC`;
 
 const untouched = (l) =>
@@ -64,7 +66,7 @@ const untouched = (l) =>
   Number(l.payment_refs) === 0 &&
   Number(l.sale_refs) === 0;
 
-const toRow = (l) => ({ depositor: l.depositor, narration: l.narration, bankRef: l.bank_ref });
+const toRow = (l) => ({ depositor: l.depositor, narration: l.narration, bankRef: l.bank_ref, rawRow: l.raw_row });
 
 async function main() {
   console.log(`Target database: ${host(process.env.DATABASE_URL)}`);

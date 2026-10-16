@@ -4,6 +4,7 @@ const { db, client } = require("../../config/db");
 const auditLogRepo = require("../../repositories/auditLog.repository");
 const { bankAccountRepo } = require("../../repositories");
 const pfiBankScope = require("../../lib/pfiBankScope");
+const { bankEntryClient } = require("../../lib/bankEntries");
 const { ensureBankAccounts } = require("../../lib/accounting/chart");
 
 const getBankAccounts = asyncHandler(async (req, res) => {
@@ -52,9 +53,9 @@ const getBankAccountActivity = asyncHandler(async (req, res) => {
            (SELECT count(*)::int FROM bank_statements s WHERE s.bank_account_id = b.id) AS uploads,
            (SELECT max(l.txn_date) FROM bank_statement_lines l WHERE l.bank_account_id = b.id) AS last_credit,
            (SELECT count(*)::int FROM bank_statement_lines l
-             WHERE l.bank_account_id = b.id AND l.status = 'UNMATCHED') AS unmatched,
+             WHERE l.bank_account_id = b.id AND l.status = 'UNMATCHED' AND NOT ${bankEntryClient(client, "l")}) AS unmatched,
            (SELECT coalesce(sum(l.amount), 0)::numeric FROM bank_statement_lines l
-             WHERE l.bank_account_id = b.id AND l.status = 'UNMATCHED') AS unmatched_value,
+             WHERE l.bank_account_id = b.id AND l.status = 'UNMATCHED' AND NOT ${bankEntryClient(client, "l")}) AS unmatched_value,
            (SELECT coalesce(sum(op.amount), 0)::numeric FROM order_payments op
              WHERE op.bank_account_id = b.id) AS orders_taken,
            (SELECT count(*)::int FROM order_payments op WHERE op.bank_account_id = b.id) AS order_payments,

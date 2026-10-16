@@ -8,6 +8,7 @@ const auditLogRepo = require("../repositories/auditLog.repository");
 // the customer statement and the books read. The CFO report's narrower rule
 // offered ₦53.1m of order 9437's duplicate for refund (2026-10-14).
 const { DUPLICATE_PAYMENT_IDS_SQL } = require("../lib/duplicatePayments");
+const { unrecordedMoveSql } = require("../lib/walletMoves");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { generateOrderReference } = require("../utils/helpers");
 
@@ -86,6 +87,7 @@ const RESURRECTED_PAYMENT_IDS_SQL = `
 `;
 const RESURRECTED_PAYMENT_IDS = client.unsafe(RESURRECTED_PAYMENT_IDS_SQL);
 const DUPLICATE_IDS = client.unsafe(DUPLICATE_PAYMENT_IDS_SQL);
+const UNRECORDED_MOVE = client.unsafe(unrecordedMoveSql("dp"));
 
 /**
  * Overpayment goes back to the customer.
@@ -145,7 +147,8 @@ const actorFor = (staffId) => (staffId ? { type: "staff", staffId } : { type: "s
  * exactly on its value: for a refund, money that left is money not to send.
  */
 const WALLET_MOVED_OUT_SQL = (orderIdExpr) => `COALESCE((
-  SELECT SUM(dp.amount::numeric) FROM deposits dp
+  -- Only the part no recorded transfer already took off (lib/walletMoves).
+  SELECT SUM(${unrecordedMoveSql("dp")}) FROM deposits dp
    WHERE dp.description ~ 'from order #[0-9]+'
      AND (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int = ${orderIdExpr}
      AND EXISTS (SELECT 1 FROM order_deposit_allocations a WHERE a.deposit_id = dp.id)
@@ -224,11 +227,12 @@ const listRefundable = async ({ search = "", limit = 500, scopeUser = null } = {
       list took 31 seconds; the page timed out and showed no orders at all.
     */
     , moved_deposits AS (
-      SELECT dp.id, dp.amount::numeric AS amount,
+      SELECT dp.id, ${UNRECORDED_MOVE} AS amount,
              (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int AS from_order_id
         FROM deposits dp
        WHERE dp.description ~ 'from order #[0-9]+'
          AND EXISTS (SELECT 1 FROM order_deposit_allocations a WHERE a.deposit_id = dp.id)
+         AND ${UNRECORDED_MOVE} > 0
     )
     , mv AS (
       SELECT from_order_id AS order_id, SUM(amount) AS moved_out

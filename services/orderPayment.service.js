@@ -1,4 +1,5 @@
 const pfiBankScope = require("../lib/pfiBankScope");
+const { assertNotBankEntries } = require("../lib/bankEntries");
 const { eq, and, sql, inArray, asc } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
@@ -277,6 +278,8 @@ const recordFromStatementLines = async (
     await pfiBankScope.assertAccountServesOrder(order, bankAccountId);
 
     const bankAccount = await bankAccountRepo.findById(bankAccountId);
+    // Interest, a charge, a reversal: the bank's own entry is never a payment.
+    await assertNotBankEntries(trx, lineIds);
 
     const claimed = await trx
       .update(bankStatementLines)

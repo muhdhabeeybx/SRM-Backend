@@ -87,6 +87,19 @@ const pay = async (id) => {
   });
 };
 
+/** A statement line on the PFI's account, for `amount`, not yet matched. */
+const lineOf = async (id, amount, tag) => {
+  const [statement] = await db.insert(bankStatements)
+    .values({ bankAccountId: account.id, filename: `gantry-${RUN}-${id}-${tag}.csv` }).returning();
+  const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos" }).format(new Date());
+  const [line] = await db.insert(bankStatementLines).values({
+    statementId: statement.id, bankAccountId: account.id, txnDate: day, amount: String(amount),
+    depositor: "GANTRY TEST", narration: `order ${id} ${tag}`, bankRef: `GT-${RUN}-${id}-${tag}`,
+    dedupKey: `GT-${RUN}-${id}-${tag}`, status: "UNMATCHED",
+  }).returning();
+  return line;
+};
+
 const statusOf = async (id) => (await client`SELECT status FROM orders WHERE id = ${id}`)[0].status;
 const releasedLitres = async (id) =>
   Number((await client`SELECT COALESCE(SUM(qty_litres), 0) AS q FROM pfi_movements WHERE order_id = ${id} AND action = 'RELEASE'`)[0].q);
@@ -310,6 +323,91 @@ describe("Gantry tickets", () => {
     await client`INSERT INTO staff_page_overrides (staff_id, route_path, allowed) VALUES (${stockOff.id}, '/gantry-tickets', false)`;
     assert.equal((await as(stockOff.token).get(DESK)).status, 403);
     await client`DELETE FROM staff_page_overrides WHERE route_path = '/gantry-tickets' AND staff_id IN (${finance.id}, ${stockOff.id})`;
+  });
+
+  test("tickets picked with the payment: finance matches the money and the tickets, and the order completes", async () => {
+    const more = await as(stockOn.token).post(`${API}/${gantryId}/gantry-tickets`, {
+      tickets: [
+        { ticketNumber: "GT-101", qtyLitres: 20000 },
+        { ticketNumber: "GT-102", qtyLitres: 10000 },
+        { ticketNumber: "GT-103", qtyLitres: 5000 },
+      ],
+    });
+    assert.equal(more.status, 201, JSON.stringify(more.body));
+    for (const t of (await as(admin).get(`${API}/${gantryId}/gantry-tickets`)).body.data.tickets) tickets[t.ticketNumber] = t;
+
+    const { order } = await place(30000);
+    const id = Number(order.id);
+    orderIds.push(id);
+    const [{ total_amount: total }] = await client`SELECT total_amount FROM orders WHERE id = ${id}`;
+    const line = await lineOf(id, total, "full");
+    const url = `/api/orders/${id}/payments`;
+
+    // A pick that does not come to the order refuses the whole confirmation:
+    // no money is recorded, the line stays in the pool, the order stays put.
+    const short = await as(finance.token).post(url, {
+      bankAccountId: account.id, lineIds: [line.id], ticketIds: [tickets["GT-101"].id],
+    });
+    assert.equal(short.status, 409, JSON.stringify(short.body));
+    assert.match(short.body.message, /20,000 L.*30,000 L.*match exactly/);
+    assert.equal(await statusOf(id), "Pending");
+    assert.equal((await client`SELECT status FROM bank_statement_lines WHERE id = ${line.id}`)[0].status, "UNMATCHED");
+    assert.equal((await client`SELECT COUNT(*)::int AS n FROM order_payments WHERE order_id = ${id}`)[0].n, 0);
+
+    // A sold ticket is refused the same way.
+    const sold = await as(finance.token).post(url, {
+      bankAccountId: account.id, lineIds: [line.id], ticketIds: [tickets["GT-002"].id, tickets["GT-101"].id],
+    });
+    assert.equal(sold.status, 409);
+    assert.match(sold.body.message, /GT-002 is already sold/);
+
+    // Finance is not the stock officer, and picks them with the payment.
+    const ok = await as(finance.token).post(url, {
+      bankAccountId: account.id, lineIds: [line.id], ticketIds: [tickets["GT-101"].id, tickets["GT-102"].id],
+    });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.match(ok.body.message, /Completed on gantry tickets GT-101, GT-102/);
+    assert.equal(await statusOf(id), "Completed");
+    assert.equal(await releasedLitres(id), 30000);
+    const list = (await as(admin).get(`${API}/${gantryId}/gantry-tickets`)).body.data;
+    const by = Object.fromEntries(list.tickets.map((t) => [t.ticketNumber, t]));
+    assert.equal(by["GT-101"].orderId, id);
+    assert.equal(by["GT-102"].orderId, id);
+    assert.equal(by["GT-103"].status, "left");
+
+    const [audit] = await client`
+      SELECT metadata FROM audit_logs WHERE entity_type = 'order' AND entity_id = ${String(id)}
+         AND action = 'order.gantry_tickets_issued'`;
+    assert.equal(audit.metadata.via, "payment");
+  });
+
+  test("a part payment cannot take tickets; without them it is recorded as before", async () => {
+    const { order } = await place(5000);
+    const id = Number(order.id);
+    orderIds.push(id);
+    const [{ total_amount: total }] = await client`SELECT total_amount FROM orders WHERE id = ${id}`;
+    const half = await lineOf(id, Number(total) / 2, "half");
+    const url = `/api/orders/${id}/payments`;
+
+    const refused = await as(finance.token).post(url, {
+      bankAccountId: account.id, lineIds: [half.id], ticketIds: [tickets["GT-103"].id],
+    });
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.match(refused.body.message, /owing, so the order is not released/);
+    assert.equal((await client`SELECT COUNT(*)::int AS n FROM order_payments WHERE order_id = ${id}`)[0].n, 0);
+
+    const plain = await as(finance.token).post(url, { bankAccountId: account.id, lineIds: [half.id] });
+    assert.equal(plain.status, 200, JSON.stringify(plain.body));
+    assert.equal(await statusOf(id), "Pending");
+
+    // The rest of the money, with the tickets: released and completed at once.
+    const rest = await lineOf(id, Number(total) / 2, "rest");
+    const done = await as(finance.token).post(url, {
+      bankAccountId: account.id, lineIds: [rest.id], ticketIds: [tickets["GT-103"].id],
+    });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.equal(await statusOf(id), "Completed");
+    assert.equal(await releasedLitres(id), 5000);
   });
 
   test("a gantry PFI from before the rule still completes on payment", async () => {

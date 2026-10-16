@@ -272,6 +272,12 @@ const confirmOrderPayment = z.object({
     .min(1, "Select at least one bank statement line")
     .max(50, "Too many statement lines in one confirmation"),
   note: z.string().max(500).optional(),
+  // A gantry order's tickets, picked as its money is matched. Optional: left
+  // out, the order waits at Released for the stock desk as before.
+  ticketIds: z
+    .array(z.coerce.number().int().positive())
+    .max(500, "Too many tickets in one confirmation")
+    .optional(),
 });
 
 /** Move surplus from the order holding it to the order that needs it. */

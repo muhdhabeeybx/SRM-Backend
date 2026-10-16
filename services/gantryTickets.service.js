@@ -338,16 +338,98 @@ const ticketsForOrder = async (orderId) => {
  */
 const forOrder = async (orderId, user = null) => {
   if (!(await register.tablesReady())) return { register: false, tickets: [], canWork: false, stage: null };
-  const [o] = rowsOf(await db.execute(sql`SELECT pfi_id, status FROM orders WHERE id = ${Number(orderId)}`));
+  const [o] = rowsOf(await db.execute(sql`SELECT pfi_id, status, quantity FROM orders WHERE id = ${Number(orderId)}`));
   if (!o?.pfi_id || !(await register.isOn(o.pfi_id))) return { register: false, tickets: [], canWork: false, stage: null };
   const tickets = await ticketsForOrder(orderId);
   return {
     register: true,
     pfiId: Number(o.pfi_id),
+    quantity: Number(o.quantity),
     tickets,
     stage: stageOf(o.status, tickets.length),
     canWork: user ? await canWork(user, o.pfi_id) : false,
   };
+};
+
+const requireRegister = async (tx, order) => {
+  if (!order.pfi_id || !(await register.isOn(order.pfi_id, tx))) {
+    throw httpError(409, "This order's PFI is not sold ticket by ticket.");
+  }
+};
+
+const refuseIfIssued = async (tx, order, ref) => {
+  const already = rowsOf(await tx.execute(sql`SELECT 1 FROM gantry_tickets WHERE order_id = ${Number(order.id)} LIMIT 1`));
+  if (already.length) throw httpError(409, `${ref} already has its tickets. Use Change tickets to correct them.`);
+};
+
+/** Lock the picked tickets and refuse unless their litres are the order's. */
+const pickExact = async (tx, order, ref, ticketIds) => {
+  const picked = await lockPicked(tx, { pfiId: order.pfi_id, ticketIds });
+  const total = picked.reduce((s, t) => s + Number(t.qty_litres), 0);
+  if (total !== Number(order.quantity)) {
+    throw httpError(
+      409,
+      `The tickets picked come to ${litres(total)}; ${ref} is for ${litres(order.quantity)}. They must match exactly.`,
+    );
+  }
+  return { picked, total };
+};
+
+/**
+ * Issue a released order's tickets inside the caller's transaction, and
+ * complete it.
+ *
+ * Two desks reach this. The stock desk (issue, below) is the stock officer on
+ * the PFI or an admin. The payment desk picks the tickets as it matches the
+ * money — the owner's instruction of 16 Oct 2026 — and is whoever may confirm
+ * a payment, which the payments route gates itself; `withPayment` says so.
+ */
+const issueWithin = async (tx, { orderId, ticketIds, user, actorName = "", withPayment = false }) => {
+  const order = await lockOrder(tx, orderId);
+  await requireRegister(tx, order);
+  if (!withPayment) await requireWork(user, order.pfi_id);
+  const ref = refOf(order);
+
+  await refuseIfIssued(tx, order, ref);
+  if (order.status !== "Released") {
+    const why = order.status === "Pending"
+      ? "its payment has not been confirmed yet"
+      : `it is ${order.status}`;
+    throw httpError(409, `${ref} cannot be given tickets — ${why}.`);
+  }
+
+  const { picked, total } = await pickExact(tx, order, ref, ticketIds);
+
+  const staffId = user?.id == null ? null : Number(user.id);
+  const ids = picked.map((t) => Number(t.id));
+  await tx.execute(sql`
+    UPDATE gantry_tickets
+       SET order_id = ${Number(order.id)}, issued_at = now(), issued_by = ${staffId}, issued_by_name = ${actorName}
+     WHERE id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+  `);
+
+  const numbers = picked.map((t) => t.ticket_number);
+  const actor = { type: "staff", staffId };
+  const via = withPayment ? "payment" : "stock_desk";
+  await auditLogRepo.record({
+    entityType: "order",
+    entityId: Number(order.id),
+    action: "order.gantry_tickets_issued",
+    actor,
+    metadata: { pfiId: Number(order.pfi_id), tickets: numbers, ticketIds: ids, litres: total, via },
+  }, tx);
+
+  await stepToCompleted(
+    { id: Number(order.id), pfiId: Number(order.pfi_id), quantity: Number(order.quantity) },
+    {
+      tx,
+      actor,
+      note: `Gantry tickets ${numbers.join(", ")}`,
+      metadata: { trigger: "gantry_tickets", tickets: numbers, via },
+    },
+  );
+
+  return { ref, numbers, litres: total };
 };
 
 /**
@@ -356,65 +438,24 @@ const forOrder = async (orderId, user = null) => {
  */
 const issue = async ({ orderId, ticketIds, user, actorName = "" }) => {
   if (!(await register.tablesReady())) throw unavailable();
-
-  const result = await db.transaction(async (tx) => {
-    const order = await lockOrder(tx, orderId);
-    if (!order.pfi_id || !(await register.isOn(order.pfi_id, tx))) {
-      throw httpError(409, "This order's PFI is not sold ticket by ticket.");
-    }
-    await requireWork(user, order.pfi_id);
-    const ref = refOf(order);
-
-    const already = rowsOf(await tx.execute(sql`SELECT 1 FROM gantry_tickets WHERE order_id = ${Number(order.id)} LIMIT 1`));
-    if (already.length) throw httpError(409, `${ref} already has its tickets. Use Change tickets to correct them.`);
-    if (order.status !== "Released") {
-      const why = order.status === "Pending"
-        ? "its payment has not been confirmed yet"
-        : `it is ${order.status}`;
-      throw httpError(409, `${ref} cannot be given tickets — ${why}.`);
-    }
-
-    const picked = await lockPicked(tx, { pfiId: order.pfi_id, ticketIds });
-    const total = picked.reduce((s, t) => s + Number(t.qty_litres), 0);
-    if (total !== Number(order.quantity)) {
-      throw httpError(
-        409,
-        `The tickets picked come to ${litres(total)}; ${ref} is for ${litres(order.quantity)}. They must match exactly.`,
-      );
-    }
-
-    const staffId = user?.id == null ? null : Number(user.id);
-    const ids = picked.map((t) => Number(t.id));
-    await tx.execute(sql`
-      UPDATE gantry_tickets
-         SET order_id = ${Number(order.id)}, issued_at = now(), issued_by = ${staffId}, issued_by_name = ${actorName}
-       WHERE id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
-    `);
-
-    const numbers = picked.map((t) => t.ticket_number);
-    const actor = { type: "staff", staffId };
-    await auditLogRepo.record({
-      entityType: "order",
-      entityId: Number(order.id),
-      action: "order.gantry_tickets_issued",
-      actor,
-      metadata: { pfiId: Number(order.pfi_id), tickets: numbers, ticketIds: ids, litres: total },
-    }, tx);
-
-    await stepToCompleted(
-      { id: Number(order.id), pfiId: Number(order.pfi_id), quantity: Number(order.quantity) },
-      {
-        tx,
-        actor,
-        note: `Gantry tickets ${numbers.join(", ")}`,
-        metadata: { trigger: "gantry_tickets", tickets: numbers },
-      },
-    );
-
-    return { ref, numbers, litres: total };
-  });
-
+  const result = await db.transaction((tx) => issueWithin(tx, { orderId, ticketIds, user, actorName }));
   return { ...result, tickets: await ticketsForOrder(orderId) };
+};
+
+/**
+ * Tickets picked with a payment, checked before the money is written: every
+ * check issuing makes except the order's status, which the payment is about
+ * to move. A wrong pick then refuses the whole confirmation before any desk is
+ * told the order was released.
+ */
+const checkWithPayment = async (tx, { orderId, ticketIds }) => {
+  if (!(await register.tablesReady(tx))) throw unavailable();
+  const order = await lockOrder(tx, orderId);
+  await requireRegister(tx, order);
+  const ref = refOf(order);
+  await refuseIfIssued(tx, order, ref);
+  await pickExact(tx, order, ref, ticketIds);
+  return { ref };
 };
 
 /**
@@ -584,6 +625,8 @@ module.exports = {
   addTickets,
   voidTicket,
   issue,
+  issueWithin,
+  checkWithPayment,
   change,
   ticketsForOrder,
   forOrder,

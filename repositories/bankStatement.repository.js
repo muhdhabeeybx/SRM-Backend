@@ -1,6 +1,21 @@
 const crypto = require("crypto");
 const { client } = require("../db");
 const { parseOrderReference } = require("../utils/helpers");
+const { leftOutOnUpload, bankEntryClient, bankEntryKindClient } = require("../lib/bankEntries");
+
+/** An unmatched line that is the bank's own entry, not a payment (lib/bankEntries). */
+const BANK = bankEntryClient(client, "l");
+
+/**
+ * Which lines a Status filter shows. Every view of payments leaves the bank's
+ * own entries out; "BANK" shows only them.
+ */
+const inStatus = (status) => {
+  if (!status) return client`NOT ${BANK}`;
+  if (status === "BANK") return BANK;
+  if (status === "UNMATCHED") return client`(l.status = 'UNMATCHED' AND NOT ${BANK})`;
+  return client`l.status::text = ${String(status)}::text`;
+};
 
 /**
  * Stable fingerprint for a statement row.
@@ -101,49 +116,12 @@ const paymentReference = (ref) => {
  * means the file repeats itself, which is worth seeing on its own.
  */
 /**
- * The bank's own bookkeeping, which is not a payment.
- *
- * A statement carries rows that are the bank talking to itself: a reversal it
- * posted against its own earlier entry, and the fees it charges for moving
- * money. They arrive in the credit column like anything else, so the parser
- * takes them, and then they sit in the pool looking exactly like money a
- * customer sent. Matching one to an order invents a payment.
- *
- * ── Whole words, and a narrow list, for one very concrete reason ───────────
- *
- * The obvious rule — does the text contain "vat" — silently drops
- * 3LCINOVATE ENERGY LIMITED, because their name has VAT inside it
- * (3LCINO·VAT·E). That is ten real payments and over ₦2.2bn already on the
- * book. So every term is matched as a WHOLE WORD, and the list stays short:
- * a term earns its place by appearing in a bank's own fee wording, not by
- * sounding financial.
- *
- * Bare "vat" is deliberately NOT here even as a whole word. "STERNOM CONSULT/
- * Refund of VAT" is a genuine ₦1,376,250 credit; VAT only means a fee when it
- * arrives attached to a charge, and the charge terms below already catch that
- * ("***RSVL NIP CHARGE + VAT").
- *
- * `RSVL` is how the bank usually writes a reversal — not `RVSL`, which is the
- * transposition everyone reaches for first — and a maintenance-fee reversal on
- * 5 Aug 2026 came through as `REVSL:`. All three are matched, and so is the
- * spelt-out word, because the marker is worth being generous about.
+ * The bank's own bookkeeping, which is not a payment: a reversal, a charge, a
+ * fee taken back, interest charged. Left out on upload, with its reason.
+ * Interest the bank PAID is money in and is imported, but is never offered or
+ * claimed as a payment. The rule and its reasons: lib/bankEntries.js.
  */
-const REVERSAL = /\b(rsvl|rvsl|revsl|reversal|reversed)\b/i;
-const BANK_FEE = /\b(charge|charges|chrg|commission|levy)\b|\bstamp duty\b|\bsms alert\b|\bmaintenance fee\b|\baccount maintenance\b/i;
-
-/**
- * Why this row is the bank's own entry rather than a payment, or null.
- *
- * Reads the three text fields the bank fills in. bankRef is included because
- * at least one account maps its reference column onto the same column it reads
- * narration from, so the wording can land there instead.
- */
-const bankOwnEntry = (r) => {
-  const text = `${r.depositor || ""} ${r.narration || ""} ${r.bankRef || ""}`;
-  if (REVERSAL.test(text)) return "reversal";
-  if (BANK_FEE.test(text)) return "bank charge";
-  return null;
-};
+const bankOwnEntry = leftOutOnUpload;
 
 /**
  * The running balance a statement prints beside a row, read off its raw cells.
@@ -620,7 +598,9 @@ const bankStatementRepo = {
                min(txn_date)::text AS first_txn_date,
                max(txn_date)::text AS last_txn_date,
                count(DISTINCT txn_date)::int AS day_count
-          FROM bank_statement_lines
+          FROM bank_statement_lines l
+         -- Payments only: the bank's own entries are not money a customer sent.
+         WHERE NOT ${BANK}
          GROUP BY bank_account_id
       )
       SELECT b.id AS bank_account_id,
@@ -671,6 +651,7 @@ const bankStatementRepo = {
         FROM bank_statement_lines l
         ${LINE_PFI}
        WHERE l.bank_account_id = ${bankAccountId}
+         AND NOT ${BANK}
          AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
          AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
          ${pfiWhere(pfi)}
@@ -696,6 +677,7 @@ const bankStatementRepo = {
         ${LINE_PFI}
         LEFT JOIN pfis p ON p.id = lp.pfi_id
        WHERE l.bank_account_id = ${bankAccountId}
+         AND NOT ${BANK}
          AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
          AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
        GROUP BY lp.pfi_id, p.pfi_number, p.status
@@ -815,6 +797,7 @@ const bankStatementRepo = {
       WITH ${CODE_PFI}
       SELECT l.id, l.txn_date::text AS txn_date, l.amount, l.depositor, l.narration,
              l.bank_ref, l.status, l.created_at AS imported_at,
+             ${bankEntryKindClient(client, "l")} AS bank_entry,
              lp.pfi_id, pfl.pfi_number,
              l.matched_deposit_id, l.matched_order_id, l.matched_at,
              st.id AS statement_id, st.filename, st.created_at AS uploaded_at,
@@ -846,7 +829,7 @@ const bankStatementRepo = {
          AND (${day}::date IS NULL OR l.txn_date = ${day}::date)
          AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
          AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
-         AND (${status}::text IS NULL OR l.status::text = ${status}::text)
+         AND ${inStatus(status)}
          AND (
            ${like}::text IS NULL
            OR l.depositor ILIKE ${like}::text
@@ -878,12 +861,16 @@ const bankStatementRepo = {
 
     const [totals] = await client`
       WITH ${CODE_PFI}
-      SELECT count(*)::int AS total,
-             count(*) FILTER (WHERE l.status = 'MATCHED')::int AS matched,
-             count(*) FILTER (WHERE l.status <> 'MATCHED')::int AS unmatched,
-             COALESCE(sum(l.amount), 0)::numeric AS total_amount,
-             COALESCE(sum(l.amount) FILTER (WHERE l.status = 'MATCHED'), 0)::numeric AS matched_amount,
-             COALESCE(sum(l.amount) FILTER (WHERE l.status <> 'MATCHED'), 0)::numeric AS unmatched_amount
+      SELECT count(*) FILTER (WHERE ${inStatus(status)})::int AS total,
+             count(*) FILTER (WHERE ${inStatus(status)} AND l.status = 'MATCHED')::int AS matched,
+             count(*) FILTER (WHERE ${inStatus(status)} AND l.status <> 'MATCHED' AND NOT ${BANK})::int AS unmatched,
+             COALESCE(sum(l.amount) FILTER (WHERE ${inStatus(status)}), 0)::numeric AS total_amount,
+             COALESCE(sum(l.amount) FILTER (WHERE ${inStatus(status)} AND l.status = 'MATCHED'), 0)::numeric AS matched_amount,
+             COALESCE(sum(l.amount) FILTER (WHERE ${inStatus(status)} AND l.status <> 'MATCHED' AND NOT ${BANK}), 0)::numeric AS unmatched_amount,
+             -- The bank's own entries in the same selection, whatever the
+             -- Status filter, so the page can say they are there.
+             count(*) FILTER (WHERE ${BANK})::int AS bank_count,
+             COALESCE(sum(l.amount) FILTER (WHERE ${BANK}), 0)::numeric AS bank_amount
         FROM bank_statement_lines l
         JOIN bank_statements st ON st.id = l.statement_id
         ${LINE_PFI}
@@ -892,7 +879,6 @@ const bankStatementRepo = {
          AND (${day}::date IS NULL OR l.txn_date = ${day}::date)
          AND (${from}::date IS NULL OR l.txn_date >= ${from}::date)
          AND (${to}::date IS NULL OR l.txn_date <= ${to}::date)
-         AND (${status}::text IS NULL OR l.status::text = ${status}::text)
          AND (
            ${like}::text IS NULL
            OR l.depositor ILIKE ${like}::text
@@ -1107,9 +1093,11 @@ const bankStatementRepo = {
     const cap = limit === "all" ? null : Math.min(Number(limit) || 50, 200);
 
     return client`
-      SELECT * FROM bank_statement_lines
+      SELECT * FROM bank_statement_lines l
       WHERE bank_account_id = ${bankAccountId}
         AND status = 'UNMATCHED'
+        -- Interest, a charge, a reversal: never offered as a payment.
+        AND NOT ${BANK}
         AND (${notBefore}::date IS NULL OR txn_date >= ${notBefore}::date)
         AND (
           ${like}::text IS NULL
@@ -1127,9 +1115,10 @@ const bankStatementRepo = {
   async countUnmatchedBefore({ bankAccountId, notBefore }) {
     if (!notBefore) return 0;
     const [row] = await client`
-      SELECT COUNT(*)::int AS n FROM bank_statement_lines
+      SELECT COUNT(*)::int AS n FROM bank_statement_lines l
        WHERE bank_account_id = ${bankAccountId}
          AND status = 'UNMATCHED'
+         AND NOT ${BANK}
          AND txn_date < ${notBefore}::date
     `;
     return Number(row?.n || 0);

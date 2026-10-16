@@ -2,6 +2,8 @@ const repo = require("../../repositories/bankStatement.repository");
 const { generateOrderReference } = require("../../utils/helpers");
 const { client } = require("../../config/db");
 const pfiBankScope = require("../../lib/pfiBankScope");
+const { db } = require("../../config/db");
+const { assertNotBankEntries } = require("../../lib/bankEntries");
 
 /*
   ── Scope, on every route in this file ────────────────────────────────────
@@ -573,6 +575,9 @@ async function matchLines(req, res) {
       await pfiBankScope.assertAccountServesOrder(target, account);
     }
   }
+
+  // Interest, a charge, a reversal: the bank's own entry is never a payment.
+  await assertNotBankEntries(db, ids);
 
   const result = await repo.markMatched({
     lineIds,

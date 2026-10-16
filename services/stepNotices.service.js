@@ -134,7 +134,7 @@ const orderPlaced = (orderId) =>
  * Loading is not here: the move into it is the ticketing call, which knows
  * the trucks and says so itself (ticketsWritten).
  */
-const orderArrived = (orderId, status, { reason } = {}) =>
+const orderArrived = (orderId, status, { reason, ticketsWithPayment = false } = {}) =>
   later(`orderArrived:${status}`, async () => {
     if (!["Released", "Completed", "Cancelled"].includes(status)) return;
     const ctx = await orderContext(orderId);
@@ -143,7 +143,8 @@ const orderArrived = (orderId, status, { reason } = {}) =>
     if (status === "Released" && hasDesks(ctx)) {
       await toDesk("desk.order_to_ticket", ctx, DESK_ROLES.tickets);
     }
-    if (status === "Released" && ctx.pfiType === "gantry" && (await gantryRegister.isOn(ctx.pfiId))) {
+    // Not when its tickets were picked with the payment: it is already done.
+    if (status === "Released" && !ticketsWithPayment && ctx.pfiType === "gantry" && (await gantryRegister.isOn(ctx.pfiId))) {
       await toDesk("desk.order_to_stock", ctx, DESK_ROLES.stock);
     }
     if (status === "Completed" && hasDesks(ctx)) {

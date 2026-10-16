@@ -253,11 +253,16 @@ WHERE NOT EXISTS (
   Keyed on audit_logs rather than orders.merged_into_order_id because this
   file runs before 0056 on a fresh database, where that column does not exist
   yet — the same reason the removed-payment guard above uses audit_logs.
+
+  An order whose payments a person corrected by hand ('order.payment_corrected',
+  e.g. PFI 41 on 16 Oct 2026) is finished with it for the same reason: the
+  correction re-points or removes rows this backfill would read as gaps and
+  put back.
 */
   AND NOT EXISTS (
     SELECT 1 FROM audit_logs al
      WHERE al.entity_type = 'order'
-       AND al.action IN ('order.merged', 'order.merged_away')
+       AND al.action IN ('order.merged', 'order.merged_away', 'order.payment_corrected')
        AND al.entity_id = chosen.order_id
   )
 -- Idempotent: the unique index on statement_line_id is what makes re-running
@@ -300,11 +305,13 @@ WHERE draw.order_id <> owner.order_id
     WHERE t.from_order_id = owner.order_id AND t.to_order_id = draw.order_id
       AND t.amount = draw.applied_amount::numeric
   )
-  -- Neither side may have been merged. See the note at the end of section 3.
+  -- Neither side may have been merged or corrected by hand. See the note at
+  -- the end of section 3: PFI 41's transfer 3 was re-pointed to the order the
+  -- money really reached, and without this a re-run writes the old one again.
   AND NOT EXISTS (
     SELECT 1 FROM audit_logs al
      WHERE al.entity_type = 'order'
-       AND al.action IN ('order.merged', 'order.merged_away')
+       AND al.action IN ('order.merged', 'order.merged_away', 'order.payment_corrected')
        AND al.entity_id IN (owner.order_id, draw.order_id)
   );
 
@@ -369,11 +376,15 @@ WHERE a.amount::numeric > 0
   AND NOT EXISTS (
     SELECT 1 FROM deposits r WHERE r.type = 'debit' AND r.reference = 'REV-' || a.deposit_id
   )
-  -- Idempotent: one legacy row per (order, deposit), the same grain the
-  -- allocation table's own unique index enforces.
+  -- Idempotent: one row per (order, deposit), the same grain the allocation
+  -- table's own unique index enforces — whatever that row has since become.
+  -- This used to look for a 'legacy' row only, so when
+  -- scripts/restore-transfer-out-legs.js re-labelled 31 of them 'transfer_in',
+  -- the next run (4 Sep 2026) wrote each one back as 'legacy' beside its own
+  -- transfer: the same money twice, ₦267,701,000 of surplus nobody held.
   AND NOT EXISTS (
     SELECT 1 FROM order_payments p
-    WHERE p.order_id = a.order_id AND p.deposit_id = a.deposit_id AND p.source = 'legacy'
+    WHERE p.order_id = a.order_id AND p.deposit_id = a.deposit_id
   )
   -- And stays gone once a person has removed it. See the note in section 3.
   AND NOT EXISTS (
@@ -383,11 +394,12 @@ WHERE a.amount::numeric > 0
        AND al.entity_id = a.order_id
        AND (al.metadata->>'amount')::numeric = a.amount::numeric
   )
-  -- Nor may the order have been merged. See the note at the end of section 3.
+  -- Nor may the order have been merged or corrected by hand. See the note at
+  -- the end of section 3.
   AND NOT EXISTS (
     SELECT 1 FROM audit_logs al
      WHERE al.entity_type = 'order'
-       AND al.action IN ('order.merged', 'order.merged_away')
+       AND al.action IN ('order.merged', 'order.merged_away', 'order.payment_corrected')
        AND al.entity_id = a.order_id
   );
 

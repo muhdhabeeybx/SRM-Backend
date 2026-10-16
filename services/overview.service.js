@@ -1,6 +1,7 @@
 const { sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { transferSql } = require("../lib/allocationOrders");
+const { unrecordedMoveSql } = require("../lib/walletMoves");
 
 /**
  * The panels on the company overview that had to be rebuilt, and why.
@@ -62,7 +63,8 @@ const financeSummary = async ({ from, to }) => {
         -- described "from order #N" that another order drew on, with no
         -- transfer_out row on N to net it off. Read once, not per order.
         SELECT (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int AS order_id,
-               SUM(dp.amount::numeric) AS amount
+               -- Only the part no recorded transfer already took off (lib/walletMoves).
+               SUM(${sql.raw(unrecordedMoveSql("dp"))}) AS amount
           FROM deposits dp
          WHERE dp.description ~ 'from order #[0-9]+'
            AND EXISTS (SELECT 1 FROM order_deposit_allocations a WHERE a.deposit_id = dp.id)

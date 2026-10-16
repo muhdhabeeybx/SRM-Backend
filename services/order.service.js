@@ -41,6 +41,8 @@ const { sendOrderSummarySMS, sendOrderExpiredSMS } = require("./sms.service");
 const { notify } = require("../notifications");
 const { findPfiForOrder } = require("./pfi.service");
 const gantryRegister = require("../lib/gantryTicketRegister");
+// Late: gantryTickets.service needs this file's stepToCompleted at load.
+const gantryTickets = () => require("./gantryTickets.service");
 const { deliveryFeeFor, chargedFee, parseRate } = require("../lib/orderDelivery");
 const { generateTicketForOrder } = require("./ticket.service");
 const orderStatus = require("./orderStatus.service");
@@ -2066,7 +2068,17 @@ async function confirmOrderPayment({
   notifyWhatsApp = true,
   /** Who is asking — carries their PFI scope. See lib/pfiBankScope.js. */
   scopeUser = null,
+  /**
+   * The gantry tickets the order is sold on, picked as the money is matched
+   * (a gantry PFI on a ticket register only). Issuing them completes the
+   * order in this same transaction; see the end of it.
+   */
+  ticketIds = null,
+  /** The name the tickets are issued under. */
+  actorName = "",
 }) {
+  const withTickets = Array.isArray(ticketIds) && ticketIds.length > 0;
+
   // Lapsed orders are expired-and-refused, never paid at a stale price. The
   // guard commits the Expired flag first; the transaction below then sees it.
   await expireIfStale({ orderId });
@@ -2165,10 +2177,28 @@ async function confirmOrderPayment({
       }
     }
 
+    /**
+     * Tickets picked with the payment are checked before the money is
+     * written. A ticket gone since the dialog opened, or a pick that does not
+     * come to the order's litres, refuses the whole confirmation — the lines
+     * stay in the pool and the desk picks again.
+     */
+    if (withTickets) await gantryTickets().checkWithPayment(tx, { orderId: order.id, ticketIds });
+
     const { payments, summary } = await orderPaymentService.recordFromStatementLines(
       { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note: paymentNote, scopeUser },
       tx,
     );
+
+    const releases = shouldTransition && orderPaymentService.releasesOnPayment(summary);
+    if (withTickets && !releases && order.status !== "Released") {
+      throw httpError(
+        409,
+        order.status === "Pending"
+          ? `This payment leaves ₦${Number(summary.shortfall).toLocaleString("en-NG")} owing, so the order is not released and cannot take its tickets yet. Confirm it without tickets, or match the rest of the money too.`
+          : `Tickets cannot be picked on an order that is ${order.status}.`,
+      );
+    }
 
     /**
      * Release only when the money COVERS the order.
@@ -2184,7 +2214,7 @@ async function confirmOrderPayment({
      * is the path that must keep working: the gate is "is it covered NOW",
      * never "is this the first payment".
      */
-    if (shouldTransition && orderPaymentService.releasesOnPayment(summary)) {
+    if (releases) {
       await orderStatus.transition(order.id, "Paid", {
         tx,
         actor,
@@ -2211,7 +2241,9 @@ async function confirmOrderPayment({
       await orderStatus.releaseOnPayment(order.id, {
         tx,
         actor,
-        metadata: { via: "bank_statement" },
+        // Tickets picked with the payment: the stock officer is not told
+        // there is an order waiting for them (stepNotices.orderArrived).
+        metadata: { via: "bank_statement", ...(withTickets ? { ticketsWithPayment: true } : {}) },
       });
 
       /**
@@ -2240,6 +2272,18 @@ async function confirmOrderPayment({
     // an order already past Pending. recordFromStatementLines has written its
     // own 'order.payment_recorded' audit row, carrying the amount, the lines
     // and the resulting status.
+
+    // The order is Released now — by this payment, or by an earlier one — and
+    // its tickets complete it, as the stock desk's would have.
+    if (withTickets) {
+      await gantryTickets().issueWithin(tx, {
+        orderId: order.id,
+        ticketIds,
+        user: { id: actor?.staffId ?? null },
+        actorName,
+        withPayment: true,
+      });
+    }
 
     return { orderId: order.id, summary };
   });

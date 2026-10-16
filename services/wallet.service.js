@@ -1,5 +1,6 @@
 const { eq, and, sql, asc, gt, inArray } = require("drizzle-orm");
 const { db } = require("../config/db");
+const { assertNotBankEntries } = require("../lib/bankEntries");
 const {
   customers, deposits, walletHolds, orderDepositAllocations, bankStatementLines, orders,
 } = require("../db/schema");
@@ -189,6 +190,8 @@ const creditFromStatementLines = async ({ customerId, bankAccountId, lineIds, st
   const bankAccount = await bankAccountRepo.findById(bankAccountId);
 
   return db.transaction(async (tx) => {
+    // Interest, a charge, a reversal: the bank's own entry is never a payment.
+    await assertNotBankEntries(tx, lineIds);
     const claimed = await tx
       .update(bankStatementLines)
       .set({

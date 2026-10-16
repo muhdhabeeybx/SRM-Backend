@@ -15,6 +15,7 @@ const { generateOrderReference, parseOrderReference } = require("../utils/helper
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
+const { unrecordedMoveSql, moveReachedAnOrderSql } = require("../lib/walletMoves");
 
 /** The two payment sources that are a movement between orders, not money in. */
 const TRANSFER_SOURCES = new Set(["transfer_in", "transfer_out"]);
@@ -681,13 +682,13 @@ const findCustomerDifferentials = async (customerIds, scopeUser) => {
         THEN g.gave ELSE 0
       END AS gave
       FROM (
-        SELECT COALESCE(SUM(dp2.amount::numeric), 0) AS gave
+        -- The part of each move no recorded transfer accounts for, where the
+        -- move reached an order (lib/walletMoves) — the rows' own rule.
+        SELECT COALESCE(SUM(${sql.raw(unrecordedMoveSql("dp2"))}), 0) AS gave
         FROM deposits dp2
-        JOIN order_deposit_allocations a2 ON a2.deposit_id = dp2.id
-        JOIN order_payments op2
-          ON op2.deposit_id = dp2.id AND op2.order_id = a2.order_id AND op2.source = 'legacy'
         WHERE dp2.description ~ 'from order #[0-9]+'
           AND (regexp_match(dp2.description, 'from order #([0-9]+)'))[1]::int = ${orders.id}
+          AND ${sql.raw(moveReachedAnOrderSql("dp2"))}
       ) g
     ) wallet
     CROSS JOIN LATERAL (
@@ -1275,7 +1276,8 @@ const findFinanceReport = async ({
         (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int AS "fromOrderId",
         a.order_id AS "toOrderId",
         o_dst.order_number AS "toOrderRef",
-        dp.amount::numeric AS amount,
+        -- Only the part no recorded transfer already accounts for (lib/walletMoves).
+        ${sql.raw(unrecordedMoveSql("dp"))} AS amount,
         dp.created_at AS "movedAt"
       FROM deposits dp
       JOIN order_deposit_allocations a ON a.deposit_id = dp.id
@@ -1283,6 +1285,7 @@ const findFinanceReport = async ({
       WHERE dp.description ~ 'from order #[0-9]+'
         AND (regexp_match(dp.description, 'from order #([0-9]+)'))[1]::int
             IN (${sql.join(orderIds.map((id) => sql`${id}`), sql`, `)})
+        AND ${sql.raw(unrecordedMoveSql("dp"))} > 0
     `);
     for (const m of moved.rows ?? moved) {
       const list = movedOutByOrder.get(m.fromOrderId) || [];

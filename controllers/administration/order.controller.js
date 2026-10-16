@@ -24,6 +24,8 @@ const truckProgress = require("../../services/truckProgress.service");
 const orderService = require("../../services/order.service");
 const orderPaymentService = require("../../services/orderPayment.service");
 const orderMergeService = require("../../services/orderMerge.service");
+const gantryTickets = require("../../services/gantryTickets.service");
+const { actorFor } = require("./expense.controller");
 const { sendOrderInvoiceEmail } = require("../../services/email.service");
 const { sendOrderSummarySMS } = require("../../services/sms.service");
 const { placeOrder, withExpiresAt } = orderService;
@@ -952,6 +954,7 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
     );
   }
 
+  const ticketIds = (req.body.ticketIds || []).map(Number);
   const order = await orderService.confirmOrderPayment({
     orderId: Number(req.params.id),
     bankAccountId: Number(req.body.bankAccountId),
@@ -959,7 +962,13 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
     note: req.body.note || "",
     actor: { type: "staff", staffId: req.user.id },
     scopeUser: req.user,
+    ticketIds,
+    actorName: ticketIds.length ? (await actorFor(req)).actorName : "",
   });
+  const tickets = ticketIds.length ? await gantryTickets.ticketsForOrder(order.id) : [];
+  const ticketNote = tickets.length
+    ? ` Completed on gantry ticket${tickets.length === 1 ? "" : "s"} ${tickets.map((t) => t.ticketNumber).join(", ")}.`
+    : "";
 
   const summary = await orderPaymentService.summarizeOrder(order.id);
   const partPaid = order.paymentStatus === "Part Paid";
@@ -971,11 +980,12 @@ const confirmOrderPayment = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    message: partPaid
+    message: (partPaid
       ? `Part payment recorded for ${order.orderNumber}: ₦${summary.received.toLocaleString()} received, ₦${summary.shortfall.toLocaleString()} still outstanding. It stays Pending and cannot be loaded until it is paid in full, or finance authorises credit on it.`
       : summary.surplus > 0
         ? `${order.orderNumber} paid. ₦${summary.surplus.toLocaleString()} was received beyond the order value and is held against this order — transfer it to another order if it was meant for one.`
-        : `${order.orderNumber} paid — ₦${summary.received.toLocaleString()} matched to the bank statement.`,
+        : `${order.orderNumber} paid — ₦${summary.received.toLocaleString()} matched to the bank statement.`)
+      + ticketNote,
     data: {
       order: await withExpiresAt(order),
       // What the desk needs next, without a second round trip to work it out.

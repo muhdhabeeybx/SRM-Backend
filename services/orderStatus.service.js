@@ -106,7 +106,12 @@ const ARRIVAL_NOTIFICATIONS = Object.freeze({
 async function announce(order, toStatus, opts) {
   // The next desk hears too — ticketing on a release, finance and ticketing
   // on completion or cancellation. Its own module; it never throws.
-  if (order?.id) stepNotices().orderArrived(order.id, toStatus, { reason: opts.metadata?.reason });
+  if (order?.id) {
+    stepNotices().orderArrived(order.id, toStatus, {
+      reason: opts.metadata?.reason,
+      ticketsWithPayment: Boolean(opts.metadata?.ticketsWithPayment),
+    });
+  }
 
   const type = ARRIVAL_NOTIFICATIONS[toStatus];
   if (!type || !order?.customerId) return;
