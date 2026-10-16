@@ -252,7 +252,7 @@ const depotRow = (p) => {
   // without being a sale, so it is named under the day's sales — the row still
   // reads straight across.
   const truckedToday = p.stock.truckedToday > 0
-    ? `<br><span style="font-size:11px">+ ${qty(p.stock.truckedToday, p.unit)} trucked out</span>`
+    ? `<br><span style="font-size:11px">+ ${qty(p.stock.truckedToday, p.unit)} trucking</span>`
     : "";
   return (
     `<tr>` +
@@ -266,7 +266,7 @@ const depotRow = (p) => {
       qty(p.stock.starting, p.unit) +
         (p.stock.surplus > 0 ? `<br><span style="font-size:11px">+ ${qty(p.stock.surplus, p.unit)} surplus</span>` : "") +
         (p.stock.loss > 0 ? `<br><span style="font-size:11px">− ${qty(p.stock.loss, p.unit)} operational loss</span>` : "") +
-        (p.stock.truckedOut > 0 ? `<br><span style="font-size:11px">− ${qty(p.stock.truckedOut, p.unit)} trucked out</span>` : "")
+        (p.stock.truckedOut > 0 ? `<br><span style="font-size:11px">− ${qty(p.stock.truckedOut, p.unit)} trucking</span>` : "")
     ) +
     stockCell(qty(p.stock.openingToday, p.unit)) +
     cell(sold + truckedToday, credit(sold)) +

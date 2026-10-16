@@ -3,6 +3,7 @@ const { db } = require("../config/db");
 const { pfiTruckAllocations, pfis, fleetTrucks, drivers, customers, deliveryCustomers } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { STATION_TYPES } = require("../lib/customerTypes");
+const { orderReferenceSql } = require("../lib/orderReferenceSql");
 
 /**
  * Reads and writes for pfi_truck_allocations. The rules — who may raise,
@@ -21,6 +22,13 @@ const WITH_NAMES = {
   subPfiStatus: sql`sub.status`,
   orderStatus: sql`o.status`,
   orderPaymentStatus: sql`o.payment_status`,
+  /**
+   * The order's money, so the cargo can see what its trucking PFI has paid
+   * for those litres and what is still on credit (lib/allocationOrders).
+   */
+  orderReference: sql`CASE WHEN o.id IS NULL THEN NULL ELSE ${orderReferenceSql("o", "oc")} END`,
+  orderTotal: sql`o.total_amount`,
+  orderPaid: sql`o.amount_paid`,
 };
 
 const shape = (row) =>
@@ -35,6 +43,12 @@ const shape = (row) =>
     subPfiStatus: row.subPfiStatus || null,
     orderStatus: row.orderStatus || null,
     orderPaymentStatus: row.orderPaymentStatus || null,
+    orderReference: row.orderReference || null,
+    orderTotal: row.orderTotal == null ? null : Number(row.orderTotal),
+    orderPaid: row.orderPaid == null ? null : Number(row.orderPaid),
+    /** What is still unpaid on the order: owed by the trucking PFI, by no customer. */
+    orderOnCredit:
+      row.orderTotal == null ? null : Math.max(0, Math.round((Number(row.orderTotal) - Number(row.orderPaid || 0)) * 100) / 100),
   };
 
 const baseQuery = (tx = db) =>
@@ -45,7 +59,8 @@ const baseQuery = (tx = db) =>
     .leftJoin(sql`depots d`, sql`d.id = parent.location_id`)
     .leftJoin(sql`products pr`, sql`pr.id = parent.product_id`)
     .leftJoin(sql`pfis sub`, sql`sub.id = ${pfiTruckAllocations.subPfiId}`)
-    .leftJoin(sql`orders o`, sql`o.id = ${pfiTruckAllocations.orderId}`);
+    .leftJoin(sql`orders o`, sql`o.id = ${pfiTruckAllocations.orderId}`)
+    .leftJoin(sql`customers oc`, sql`oc.id = o.customer_id`);
 
 const findById = async (id, tx = db) => {
   const [row] = await baseQuery(tx).where(eq(pfiTruckAllocations.id, Number(id))).limit(1);

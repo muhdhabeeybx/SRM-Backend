@@ -809,18 +809,18 @@ const findFinanceReport = async ({
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
   /**
-   * A transfer to a trucking PFI (lib/allocationOrders): stock the company
-   * moved to itself, on credit. On THIS report it is a sale on credit (the
-   * owner's choice, 15 Oct 2026) — listed in the default view beside the paid
-   * orders, marked ON CREDIT, and kept out of what is owed, which it is not.
-   * Everywhere else it stays "Trucked out". It is none of Paid, Part Paid or
-   * Unpaid, so those filters leave it out; 'on_credit' lists only these. A
-   * PAID allocation order (PFI/47C's) is not one, and stays the sale its bank
-   * line made it. The first was placed 2 Oct 2026, after the audit, so no
-   * audited figure moves.
+   * A truck allocation's order (lib/allocationOrders): stock the company moved
+   * from a cargo to its own trucking PFI, placed on credit and paid like any
+   * order when the company settles it. On this report it is Trucking — listed
+   * in the default view beside the depot sales, paid or not. What is still
+   * unpaid on it reads ON CREDIT and is kept out of what customers owe, which
+   * it is not; what has been paid shows as on any order. It is none of Paid,
+   * Part Paid or Unpaid, so those filters leave it out; 'trucking' (or its
+   * older name 'on_credit') lists only these. The first was placed 2 Oct
+   * 2026, after the audit, so no audited figure moves.
    */
   const onCredit = sql.raw(transferSql('"orders"'));
-  if (paymentStatus === "on_credit") {
+  if (paymentStatus === "on_credit" || paymentStatus === "trucking") {
     conditions.push(onCredit);
   } else if (paymentStatus && paymentStatus !== "all") {
     conditions.push(eq(orders.paymentStatus, paymentStatus), sql`NOT ${onCredit}`);
@@ -922,7 +922,9 @@ const findFinanceReport = async ({
   const columns = {
     ...FULL_ORDER_COLUMNS,
     pfiLocationName: pfis.locationName,
-    /** A transfer to a trucking PFI: marked ON CREDIT, and owed by nobody. */
+    /** A truck allocation's order: Trucking, its unpaid part ON CREDIT, owed by no customer. */
+    trucking: sql`${onCredit}`.mapWith(Boolean),
+    /** The same flag under its first name, for a page built before payments were allowed. */
     onCredit: sql`${onCredit}`.mapWith(Boolean),
     /** Set on the company's own account, whose position is not a customer's. */
     customerHouseAccount: customers.houseAccount,
@@ -1551,7 +1553,10 @@ const findFinanceReport = async ({
       /** Summed per order, never netted — see the SQL above. */
       totalSurplus: Number(totalsRow.totalSurplus),
       totalShortfall: Number(totalsRow.totalShortfall),
-      /** Value and litres on orders on credit (transfers to trucking PFIs) — sold, not owed. */
+      /**
+       * On the trucking orders: what is still unpaid (on credit, owed by no
+       * customer), and their litres and count, paid or not.
+       */
       totalOnCredit: Number(totalsRow.totalOnCredit),
       onCreditQuantity: Number(totalsRow.onCreditQuantity),
       onCreditCount: Number(totalsRow.onCreditCount),
@@ -1682,7 +1687,9 @@ const findPayableOrders = async (scopeUser) => {
      * list until it is priced, and arrives here the moment it is.
      */
     ne(orders.pricingStatus, "pending"),
-    // Not a transfer to a trucking PFI: nobody pays it (lib/allocationOrders).
+    // Not a truck allocation's order (lib/allocationOrders): no customer owes
+    // it, so it is no work for this desk. The company's payment for those
+    // litres is recorded from the finance report or the cargo's allocations.
     sql`NOT ${sql.raw(transferSql('"orders"'))}`,
   ];
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });

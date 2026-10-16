@@ -2,9 +2,9 @@ const { client, db } = require("../db");
 const { cfoReportEntries } = require("../db/schema");
 const { and, eq, gte, lte, inArray } = require("drizzle-orm");
 const { transferSql } = require("../lib/allocationOrders");
-const { saleSql } = require("../lib/orderSale");
+const { depotSaleSql } = require("../lib/orderSale");
 
-/** Stock moved to a trucking PFI: neither a sale nor awaiting payment. */
+/** Stock moved to a trucking PFI, paid or not: trucking, never a depot sale or awaiting payment. */
 const TRANSFER = client.unsafe(transferSql("o"));
 
 /**
@@ -26,15 +26,17 @@ const TRANSFER = client.unsafe(transferSql("o"));
  */
 
 /**
- * A sale is an order money has landed on — paid in full or part paid
- * (lib/orderSale). Nothing else.
+ * A sale is a depot sale: an order money has landed on — paid in full or part
+ * paid — that is not a truck allocation's (lib/orderSale). Trucking is its own
+ * line (truckedByDay), and its money is not this report's inflow: it is the
+ * company paying itself for stock it moved, not a customer's money arriving.
  *
  * The same rule that the PFI page uses for its Total Sold and Sales Value and
  * that the finance report's default view uses for its Total Quantity. Sharing
  * it by construction is what makes the CFO report's cumulative column
  * reconcile against the PFI page to the litre instead of approximately.
  */
-const SALE = client.unsafe(saleSql("o"));
+const SALE = client.unsafe(depotSaleSql("o"));
 
 /**
  * The day a sale counts towards: the day the ORDER WAS PLACED.
@@ -238,6 +240,7 @@ const partPaidByDay = async ({ tz, from, to, pfiIds }) => {
      WHERE o.pfi_id IS NOT NULL
        AND o.payment_status = 'Part Paid'
        AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
+       AND NOT ${TRANSFER}
        ${from ? client`AND ${day} >= ${from}::date` : client``}
        AND ${day} <= ${to}::date
        ${pfiFilter(pfiIds)}
@@ -250,9 +253,9 @@ const partPaidByDay = async ({ tz, from, to, pfiIds }) => {
  * contract as salesByDay, dated the same way: the day the allocation's order
  * was placed, which is the day it was approved.
  *
- * Neither a sale nor awaiting payment (lib/allocationOrders), so it is in
- * neither query above. It comes off the stock balance on its own line, the way
- * an operational loss does.
+ * Trucking, paid or not — neither a depot sale nor awaiting payment
+ * (lib/allocationOrders), so it is in neither query above. It comes off the
+ * stock balance on its own line, the way an operational loss does.
  */
 const truckedByDay = async ({ tz, from, to, pfiIds }) => {
   const day = SALE_DAY(tz);

@@ -170,6 +170,9 @@ const buildPfiDailyReportData = async (date = new Date()) => {
       JOIN orders o ON o.id = op.order_id
      WHERE o.pfi_id IS NOT NULL
        AND o.status NOT IN ('Cancelled', 'Expired')
+       -- Customers' money: a payment on a trucking order is the company
+       -- settling stock it moved to itself (lib/allocationOrders).
+       AND NOT ${TRANSFER}
        AND COALESCE(op.txn_date, op.created_at) >= ${startIso}
        AND COALESCE(op.txn_date, op.created_at) <  ${endIso}
      GROUP BY o.pfi_id`;

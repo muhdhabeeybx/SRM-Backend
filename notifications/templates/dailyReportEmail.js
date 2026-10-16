@@ -140,7 +140,7 @@ function stockTable(pfiStock) {
         // counted in it, so Opening − Ordered − trucked out is still Closing.
         cell(
           (r.orderedQty ? `${n0(r.orderedQty)} ${u}` : "—") +
-            (r.truckedQty > 0 ? `<br><span style="font-size:11px">+ ${n0(r.truckedQty)} ${u} trucked out</span>` : ""),
+            (r.truckedQty > 0 ? `<br><span style="font-size:11px">+ ${n0(r.truckedQty)} ${u} trucking</span>` : ""),
           { r: true, s: CREDIT_S }
         ) +
         cell(m(r.orderedValue), { r: true, s: CREDIT_S }) +

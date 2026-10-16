@@ -1,7 +1,7 @@
 const { client } = require("../config/db");
 const { pfiRepo, pfiExpenseRepo, pfiFileRepo } = require("../repositories");
 const { computeFinancials } = require("../lib/pfiFinance");
-const { saleSql } = require("../lib/orderSale");
+const { depotSaleSql } = require("../lib/orderSale");
 const { DESKLESS_PFI_TYPES } = require("./order.service");
 
 /**
@@ -85,12 +85,12 @@ const trucksFor = async (ids) => {
   return new Map(rows.map((r) => [Number(r.pfiId), r]));
 };
 
-/** Distinct customers with a paid order on each PFI. */
+/** Distinct customers with a paid order on each PFI — depot sales, not trucking. */
 const customersFor = async (ids) => {
   const rows = await client`
     SELECT pfi_id AS "pfiId", COUNT(DISTINCT customer_id)::int AS customers
       FROM orders
-     WHERE pfi_id = ANY(${ids}) AND ${client.unsafe(saleSql("orders"))}
+     WHERE pfi_id = ANY(${ids}) AND ${client.unsafe(depotSaleSql("orders"))}
      GROUP BY pfi_id`;
   return new Map(rows.map((r) => [Number(r.pfiId), r.customers]));
 };

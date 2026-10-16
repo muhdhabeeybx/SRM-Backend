@@ -9,8 +9,8 @@ const { eq, inArray, sql } = require("drizzle-orm");
 const app = require("../app");
 const { db } = require("../config/db");
 const {
-  pfis, depots, products, bankAccounts, fleetTrucks, drivers, orders, orderTrucks, customers,
-  pfiTruckAllocations, deliveryInventory, deliverySales, deliveryCustomers,
+  pfis, depots, products, bankAccounts, bankStatements, bankStatementLines, fleetTrucks, drivers, orders,
+  orderTrucks, customers, pfiTruckAllocations, deliveryInventory, deliverySales, deliveryCustomers,
 } = require("../db/schema");
 const { closeDb, staffToken, staffTokenWithRoles } = require("./helpers");
 const orderService = require("../services/order.service");
@@ -112,12 +112,20 @@ describe("truck allocations — off a cargo, approved into an order and a letter
       }
       if (orderIds.length) {
         await db.delete(orderTrucks).where(inArray(orderTrucks.orderId, orderIds));
-        await db.execute(sql`DELETE FROM order_pfi_allocations WHERE order_id IN ${sql`(${sql.join(orderIds.map((i) => sql`${i}`), sql`, `)})`}`);
+        const idList = sql`(${sql.join(orderIds.map((i) => sql`${i}`), sql`, `)})`;
+        await db.execute(sql`DELETE FROM order_pfi_allocations WHERE order_id IN ${idList}`);
+        await db.execute(sql`DELETE FROM order_payments WHERE order_id IN ${idList}`);
+        await db.execute(sql`DELETE FROM pfi_movements WHERE order_id IN ${idList}`).catch(() => {});
+        await db.execute(sql`DELETE FROM commissions WHERE order_id IN ${idList}`).catch(() => {});
+        await db.execute(sql`DELETE FROM tickets WHERE order_id IN ${idList}`).catch(() => {});
+        await db.execute(sql`DELETE FROM audit_logs WHERE entity_type = 'order' AND entity_id IN ${idList}`).catch(() => {});
         await db.delete(orders).where(inArray(orders.id, orderIds));
       }
       const pfiIds = [...subIds, ...extraPfiIds, parent.id, deliveryParent.id];
       await db.execute(sql`DELETE FROM expense_categories WHERE pfi_id IN ${sql`(${sql.join(pfiIds.map((i) => sql`${i}`), sql`, `)})`}`).catch(() => {});
       await db.delete(pfis).where(inArray(pfis.id, pfiIds));
+      await db.delete(bankStatementLines).where(eq(bankStatementLines.bankAccountId, account.id));
+      await db.delete(bankStatements).where(eq(bankStatements.bankAccountId, account.id));
       await db.delete(bankAccounts).where(eq(bankAccounts.id, account.id));
       await db.delete(fleetTrucks).where(inArray(fleetTrucks.id, [truckA.id, truckB.id]));
       await db.delete(drivers).where(eq(drivers.id, driver.id));
@@ -273,28 +281,32 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(orderService.computeExpiresAt(aged), null);
   });
 
-  test("the cargo reads it as trucked out — not sold, not awaiting payment", async () => {
+  test("the cargo reads it as trucking — not a depot sale, not awaiting payment", async () => {
     const res = await as(admin).get(`${API}/${parent.id}`);
     assert.equal(res.status, 200, JSON.stringify(res.body));
     const f = res.body.data.pfi.financials;
     assert.equal(f.truckedOut, 78000);
     assert.equal(f.truckedOutValue, 78000 * 925);
     assert.equal(f.truckedOutCount, 1);
-    assert.equal(f.sold, 0, "a transfer is not a sale");
-    assert.equal(f.revenue, 0, "nor sales value");
+    assert.equal(f.sold, 0, "trucking is not a depot sale");
+    assert.equal(f.revenue, 0, "nor depot sales value");
+    assert.equal(f.totalSold, 78000, "depot sales + trucking");
+    assert.equal(f.truckedOutReceived, 0);
+    assert.equal(f.truckedOutOnCredit, 78000 * 925, "all of it on credit until paid");
     assert.equal(f.awaitingPayment, 0, "and nobody is waiting to be paid for it");
-    assert.equal(f.remaining, 100000 - 78000, "initial − trucked out");
+    assert.equal(f.remaining, 100000 - 78000, "initial − total sold");
     assert.equal(f.trulyUnsold, 100000 - 78000);
     assert.equal(f.sellThrough, 0.78);
   });
 
-  test("the finance report lists it on credit — sold, not owed", async () => {
-    for (const status of ["", "&paymentStatus=all", "&paymentStatus=on_credit"]) {
+  test("the finance report lists it as trucking, on credit — not owed", async () => {
+    for (const status of ["", "&paymentStatus=all", "&paymentStatus=on_credit", "&paymentStatus=trucking"]) {
       const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}${status}`);
       assert.equal(res.status, 200, JSON.stringify(res.body));
       const { orders: listed, totals, customerDifferentials } = res.body.data;
       const row = listed.find((o) => o.id === order.id);
       assert.ok(row, `listed under '${status}'`);
+      assert.equal(row.trucking, true);
       assert.equal(row.onCredit, true);
       assert.equal(totals.onCreditCount, 1);
       assert.equal(totals.onCreditQuantity, 78000);
@@ -310,16 +322,76 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     }
   });
 
-  test("the payable desk does not offer it, and no payment can land on it", async () => {
+  /** One credit on the cargo's own account, claimed for the allocation's order. */
+  const pay = async (amount, tag) => {
+    const [statement] = await db.insert(bankStatements)
+      .values({ bankAccountId: account.id, filename: `alloc-${RUN}-${tag}.csv` }).returning();
+    const [line] = await db.insert(bankStatementLines).values({
+      statementId: statement.id, bankAccountId: account.id, txnDate: today, amount: amount.toFixed(2),
+      depositor: "TRF FROM SOROMAN PROJ. ACC.", narration: `trucking ${tag}`, bankRef: `AL-${RUN}-${tag}`,
+      dedupKey: `AL-${RUN}-${tag}`, status: "UNMATCHED",
+    }).returning();
+    return orderService.confirmOrderPayment({
+      orderId: order.id, bankAccountId: account.id, lineIds: [line.id],
+      actor: { type: "staff", staffId: deskStaff.id }, notifyWhatsApp: false,
+    });
+  };
+
+  test("the payable desk does not offer it — no customer owes it", async () => {
     const res = await as(admin).get("/api/orders/payable");
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.ok(!res.body.data.orders.some((o) => o.id === order.id));
+  });
 
-    const paymentService = require("../services/orderPayment.service");
-    await assert.rejects(
-      paymentService.recordFromStatementLines({ orderId: order.id, bankAccountId: account.id, lineIds: [1] }),
-      (err) => err.status === 409 && /trucking PFI/.test(err.message),
-    );
+  test("a payment lands on it, and moves the money only — the litres stay trucking", async () => {
+    const value = 78000 * 925;
+    await pay(value / 2, "half");
+    const [half] = await db.select().from(orders).where(eq(orders.id, order.id));
+    assert.equal(half.paymentStatus, "Part Paid");
+
+    let f = (await as(admin).get(`${API}/${parent.id}`)).body.data.pfi.financials;
+    assert.equal(f.truckedOut, 78000, "still trucking");
+    assert.equal(f.sold, 0, "not a depot sale because money landed");
+    assert.equal(f.partPaid, 0, "nor a part-paid depot sale");
+    assert.equal(f.totalSold, 78000);
+    assert.equal(f.revenue, 0);
+    assert.equal(f.truckedOutReceived, value / 2);
+    assert.equal(f.truckedOutOnCredit, value / 2);
+    assert.equal(f.remaining, 100000 - 78000, "the cargo's balance does not move");
+
+    let report = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}`)).body.data;
+    assert.ok(report.orders.find((o) => o.id === order.id)?.trucking);
+    assert.equal(report.totals.totalOnCredit, value / 2, "what is left is on credit");
+    assert.equal(report.totals.totalShortfall, 0, "and owed by no customer");
+    assert.equal(report.totals.totalBalance, 0);
+    assert.equal(report.totals.totalDifferential, 0);
+    for (const status of ["Paid", "Part Paid", "Unpaid"]) {
+      const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=${status}`);
+      assert.ok(!res.body.data.orders.some((o) => o.id === order.id), `not under '${status}'`);
+    }
+
+    await pay(value / 2, "rest");
+    const [paid] = await db.select().from(orders).where(eq(orders.id, order.id));
+    assert.equal(paid.paymentStatus, "Paid");
+    f = (await as(admin).get(`${API}/${parent.id}`)).body.data.pfi.financials;
+    assert.equal(f.truckedOut, 78000, "paid in full, still trucking");
+    assert.equal(f.sold, 0);
+    assert.equal(f.totalSold, 78000);
+    assert.equal(f.truckedOutReceived, value);
+    assert.equal(f.truckedOutOnCredit, 0);
+
+    report = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=trucking`)).body.data;
+    assert.ok(report.orders.some((o) => o.id === order.id), "listed under trucking once paid");
+    assert.equal(report.totals.totalOnCredit, 0);
+    const byPaid = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=Paid`)).body.data;
+    assert.ok(!byPaid.orders.some((o) => o.id === order.id), "never a depot sale under Paid");
+
+    const view = (await as(admin).get(`${API}/${parent.id}/allocations`)).body.data;
+    const a = view.allocations.find((x) => x.orderId === order.id);
+    assert.equal(a.orderTotal, value);
+    assert.equal(a.orderPaid, value);
+    assert.equal(a.orderOnCredit, 0);
+    assert.ok(a.orderReference);
   });
 
   test("the order cannot be cancelled while the trucking PFI holds its litres", async () => {

@@ -2,13 +2,13 @@ const { client } = require("../db");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { OPEN_STATES } = require("../lib/expenseChain");
 const { transferSql } = require("../lib/allocationOrders");
-const { saleSql } = require("../lib/orderSale");
+const { depotSaleSql } = require("../lib/orderSale");
 
-/** An unpaid allocation order: stock moved to a trucking PFI, not sold. */
+/** A truck allocation's order: stock moved to a trucking PFI, paid or not. */
 const TRANSFER = client.unsafe(transferSql("o"));
 
-/** Paid in full or part paid (lib/orderSale). */
-const SALE = client.unsafe(saleSql("o"));
+/** A depot sale: paid in full or part paid, and not trucking (lib/orderSale). */
+const SALE = client.unsafe(depotSaleSql("o"));
 
 /**
  * The figure a total should use.
@@ -73,6 +73,8 @@ const aggregatesFor = async (ids) => {
     truckedQty: 0,
     truckedValue: 0,
     truckedOrderCount: 0,
+    truckedReceived: 0,
+    truckedOnCredit: 0,
     partPaidQty: 0,
     partPaidValue: 0,
     partPaidReceived: 0,
@@ -218,15 +220,19 @@ const aggregatesFor = async (ids) => {
     /**
      * Stock moved off this cargo to its trucking PFIs (lib/allocationOrders).
      *
-     * Neither sold nor awaiting payment: the litres are the trucking PFI's to
-     * sell now, so the parent counts them gone and never waits on them. The
-     * value is the agreed allocation price, which is the trucking PFI's cost
-     * and the parent's return on those litres — see computeFinancials.
+     * Trucking, beside the depot sales: the litres are the trucking PFI's to
+     * sell now, so the parent counts them gone and never waits on them, paid
+     * or not. The value is the agreed allocation price, which is the trucking
+     * PFI's cost and the parent's return on those litres — see
+     * computeFinancials. `received` is what has been paid in on those orders;
+     * `on_credit` is the rest, owed by the trucking PFIs and by no customer.
      */
     client`
       SELECT o.pfi_id,
              COALESCE(SUM(o.quantity), 0)::bigint AS qty,
              COALESCE(SUM(o.total_amount - o.delivery_fee), 0)::text AS value,
+             COALESCE(SUM(o.amount_paid), 0)::text AS received,
+             COALESCE(SUM(GREATEST(o.total_amount - o.amount_paid, 0)), 0)::text AS on_credit,
              COUNT(*)::int AS orders
       FROM orders o
       WHERE o.pfi_id = ANY(${list}) AND ${TRANSFER}
@@ -247,6 +253,8 @@ const aggregatesFor = async (ids) => {
       WHERE o.pfi_id = ANY(${list})
         AND o.payment_status = 'Part Paid'
         AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')
+        -- Of the depot sales only: a part-paid trucking order is trucking.
+        AND NOT ${TRANSFER}
       GROUP BY o.pfi_id
     `,
   ]);
@@ -301,6 +309,8 @@ const aggregatesFor = async (ids) => {
       row.truckedQty = Number(r.qty);
       row.truckedValue = Number(r.value);
       row.truckedOrderCount = r.orders;
+      row.truckedReceived = Number(r.received);
+      row.truckedOnCredit = Number(r.on_credit);
     }
   }
 
@@ -1020,8 +1030,8 @@ const listMovements = async (pfiId) => {
  * single movement row, because nothing has been ticketed out yet — so a panel
  * headed "Orders" read as empty while the batch had made half a billion naira.
  *
- * Same rule as `sold` and as the finance report: every order money has landed
- * on (SALE — paid in full or part paid).
+ * Same rule as `sold`: every depot sale (SALE — paid in full or part paid,
+ * not a truck allocation's order, which is on the allocations panel).
  * Loading progress rides along per order rather than deciding what is listed,
  * so "paid but not yet loaded" is visible instead of invisible.
  */

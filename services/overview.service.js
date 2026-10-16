@@ -78,9 +78,11 @@ const financeSummary = async ({ from, to }) => {
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p
           WHERE p.order_id = o.id AND p.source NOT IN ('transfer_in', 'transfer_out', 'refund')
         )), 0) AS received,
+        -- Owed by customers. What is unpaid on a truck allocation's order is on
+        -- credit to the company's own trucking PFI (lib/allocationOrders).
         COALESCE(SUM(GREATEST(0, o.total_amount::numeric - (
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p WHERE p.order_id = o.id
-        ))), 0) AS shortfall,
+        ))) FILTER (WHERE NOT ${sql.raw(transferSql("o"))}), 0) AS shortfall,
         -- What the order still holds beyond its value: the same reading as
         -- the refund desk (services/orderRefund.service.js realSurplus).
         -- Transfers already net out through their transfer_out rows; what
@@ -123,7 +125,7 @@ const financeSummary = async ({ from, to }) => {
       WHERE o.created_at >= ${from} AND o.created_at <= ${to}
         AND o.payment_status IN ('Unpaid', 'Part Paid')
         AND o.status NOT IN ('Cancelled', 'Expired')
-        -- A transfer to a trucking PFI is owed by nobody.
+        -- A truck allocation's order is owed by no customer.
         AND NOT ${sql.raw(transferSql("o"))}
     `),
   );

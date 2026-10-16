@@ -257,6 +257,10 @@ const doersFor = async (pfiIds) => {
  * `received` is orders.amount_paid, which the payment service keeps equal to
  * the sum of the order's payments, i.e. the finance report's figure.
  *
+ * Depot sales only: a truck allocation's order is trucking, paid or not, and
+ * its money is the PFI's truckedOutReceived / truckedOutOnCredit
+ * (pfiExpense.repository), never a customer's received or owed.
+ *
  * Merged-away orders are Cancelled and empty, and fall out with the rest.
  *
  * @returns {Promise<Map<number, object>>}
@@ -270,6 +274,10 @@ const UNPRICED = client.unsafe(
  * transfer to a trucking PFI: that is on credit too, but nobody owes it — it
  * is trucked out (lib/allocationOrders).
  */
+/** A depot sale's money has landed: Paid or Part Paid, and not trucking. */
+const LANDED = client.unsafe(
+  `o.payment_status IN ('Paid', 'Part Paid') AND NOT ${transferSql("o")}`,
+);
 const CREDIT_UNPAID = client.unsafe(
   "o.credit_qty > 0 AND o.pricing_status = 'priced' AND o.payment_status::text <> 'Paid' "
   + "AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired') "
@@ -285,17 +293,17 @@ const activityFor = async (pfiIds) => {
     client`
       SELECT o.pfi_id AS "pfiId",
              COUNT(*) FILTER (WHERE COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired'))::int AS "liveOrders",
-             COUNT(*) FILTER (WHERE o.payment_status = 'Paid')::int AS "paidOrders",
-             COUNT(*) FILTER (WHERE o.payment_status = 'Part Paid')::int AS "partPaidOrders",
-             COUNT(DISTINCT o.customer_id) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid'))::int AS customers,
+             COUNT(*) FILTER (WHERE o.payment_status = 'Paid' AND ${LANDED})::int AS "paidOrders",
+             COUNT(*) FILTER (WHERE o.payment_status = 'Part Paid' AND ${LANDED})::int AS "partPaidOrders",
+             COUNT(DISTINCT o.customer_id) FILTER (WHERE ${LANDED})::int AS customers,
              -- The product alone: delivery (migration 0078) is not the PFI's sales.
-             COALESCE(SUM(o.total_amount - o.delivery_fee) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS "salesValue",
-             COALESCE(SUM(o.delivery_fee) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS "deliveryValue",
-             COALESCE(SUM(o.amount_paid) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS received,
+             COALESCE(SUM(o.total_amount - o.delivery_fee) FILTER (WHERE ${LANDED}), 0)::text AS "salesValue",
+             COALESCE(SUM(o.delivery_fee) FILTER (WHERE ${LANDED}), 0)::text AS "deliveryValue",
+             COALESCE(SUM(o.amount_paid) FILTER (WHERE ${LANDED}), 0)::text AS received,
              COALESCE(SUM(GREATEST(o.total_amount - o.amount_paid, 0))
-                        FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')), 0)::text AS outstanding,
-             MIN(o.created_at) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')) AS "firstOrderAt",
-             MAX(o.created_at) FILTER (WHERE o.payment_status IN ('Paid', 'Part Paid')) AS "lastOrderAt",
+                        FILTER (WHERE ${LANDED}), 0)::text AS outstanding,
+             MIN(o.created_at) FILTER (WHERE ${LANDED}) AS "firstOrderAt",
+             MAX(o.created_at) FILTER (WHERE ${LANDED}) AS "lastOrderAt",
              MIN(o.payment_confirmed_at) AS "firstConfirmedAt",
              MAX(o.payment_confirmed_at) AS "lastConfirmedAt",
              -- Out before payment, and so in none of the money-landed figures

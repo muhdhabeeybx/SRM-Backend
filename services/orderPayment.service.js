@@ -2,7 +2,6 @@ const pfiBankScope = require("../lib/pfiBankScope");
 const { eq, and, sql, inArray, asc } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
-const { isTransferOrder } = require("../lib/allocationOrders");
 const {
   orders,
   orderPayments,
@@ -161,20 +160,15 @@ function assertPriced(order) {
   }
 }
 
-/**
- * Nor on a transfer to a trucking PFI (lib/allocationOrders). It is the
- * company moving stock to itself: nothing is owed on it, and a bank line
- * matched to it would turn a transfer back into a sale and count the same
- * litres as sold on the cargo and again on the trucking PFI.
+/*
+ * A truck allocation's order (lib/allocationOrders) takes payment like any
+ * other since 16 October 2026: it is placed on credit, and the company pays
+ * the cargo for those litres when it settles — a transfer into the cargo's
+ * account, as PFI/47C's was. Its litres stay under Trucking on the cargo
+ * whatever is paid, so a payment here moves money only. Until then it was
+ * refused, because a paid allocation order read as a depot sale and the same
+ * litres would have counted twice.
  */
-function assertNotTransfer(order) {
-  if (isTransferOrder(order)) {
-    throw httpError(
-      409,
-      `${order.orderNumber || "This order"} moves stock to a trucking PFI. Nothing is owed on it, so no payment can be matched to it.`,
-    );
-  }
-}
 
 const recomputeOrder = async (orderId, tx) => {
   const [order] = await tx
@@ -267,7 +261,6 @@ const recordFromStatementLines = async (
       .limit(1);
     if (!order) throw httpError(404, "Order not found");
     assertPriced(order);
-    assertNotTransfer(order);
 
     /*
       Every statement line that becomes an order payment passes through here,
@@ -534,7 +527,6 @@ const transferSurplus = async (
     // Only the RECEIVING side needs a price. Moving surplus off an unpriced
     // order is impossible anyway — it has taken no money to have a surplus of.
     assertPriced(to);
-    assertNotTransfer(to);
 
     const fromRows = await trx
       .select({ amount: orderPayments.amount, source: orderPayments.source })

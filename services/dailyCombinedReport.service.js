@@ -2,7 +2,7 @@ const { client } = require("../db");
 const { stockQty } = require("../lib/pfiStock");
 const { orderReferenceClient } = require("../lib/orderReferenceSql");
 const { transferSql } = require("../lib/allocationOrders");
-const { saleSql } = require("../lib/orderSale");
+const { depotSaleSql } = require("../lib/orderSale");
 
 /** Stock moved to a trucking PFI: not an order anybody placed (lib/allocationOrders). */
 const TRANSFER = client.unsafe(transferSql("o"));
@@ -208,9 +208,9 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
         ORDER BY 1 DESC
       `,
       client`
-        -- Every sale, paid in full or part paid (lib/orderSale): the PFI's sales value.
+        -- Every depot sale, paid in full or part paid (lib/orderSale): the PFI's sales value.
         SELECT o.pfi_id, COALESCE(SUM(o.total_amount - o.delivery_fee), 0)::text AS total
-        FROM orders o WHERE ${client.unsafe(saleSql("o"))} AND o.pfi_id IS NOT NULL
+        FROM orders o WHERE ${client.unsafe(depotSaleSql("o"))} AND o.pfi_id IS NOT NULL
         GROUP BY o.pfi_id
       `,
       /**
@@ -264,11 +264,13 @@ const buildCombinedDailyReportData = async (date = new Date()) => {
                  AS trucked_qty,
                COALESCE(SUM(qty) FILTER (WHERE created_at >= ${start.toISOString()}
                                            AND created_at <  ${end.toISOString()}
-                                           AND payment_status IN ('Paid', 'Part Paid')), 0)::bigint
+                                           AND payment_status IN ('Paid', 'Part Paid')
+                                           AND NOT is_transfer), 0)::bigint
                  AS confirmed_qty,
                COALESCE(SUM(value) FILTER (WHERE created_at >= ${start.toISOString()}
                                              AND created_at <  ${end.toISOString()}
-                                             AND payment_status IN ('Paid', 'Part Paid')), 0)::text
+                                             AND payment_status IN ('Paid', 'Part Paid')
+                                             AND NOT is_transfer), 0)::text
                  AS confirmed_value,
                COALESCE(SUM(qty) FILTER (WHERE created_at >= ${end.toISOString()}), 0)::bigint
                  AS qty_after_day

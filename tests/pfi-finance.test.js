@@ -295,9 +295,9 @@ describe("a batch with no shipping papers is billed on what it holds", () => {
   });
 });
 
-describe("stock trucked out to a trucking PFI", () => {
-  // PFI/47's shape: customers' sales, one allocation paid before the on-credit
-  // rule (a sale), and one on credit (a transfer — trucked out).
+describe("stock moved to a trucking PFI (trucking)", () => {
+  // PFI/47's shape: customers' depot sales, and its allocations as trucking —
+  // part of their value paid in, the rest on credit.
   const pfi = coastal({ startingQtyLitres: 1_000_000, blQtyLitres: 1_000_000, unitPrice: "1000" });
   const f = computeFinancials(pfi, {
     expenses: 0,
@@ -308,13 +308,16 @@ describe("stock trucked out to a trucking PFI", () => {
     truckedQty: 300_000,
     truckedValue: 330_000_000,
     truckedOrderCount: 1,
+    truckedReceived: 130_000_000,
+    truckedOnCredit: 200_000_000,
   });
 
-  test("is gone from the balance, and neither sold nor awaiting payment", () => {
+  test("is gone from the balance, and neither a depot sale nor awaiting payment", () => {
     assert.equal(f.sold, 500_000);
     assert.equal(f.truckedOut, 300_000);
     assert.equal(f.awaitingPayment, 100_000, "customers' unpaid orders only");
-    assert.equal(f.remaining, 200_000, "initial − sold − trucked out");
+    assert.equal(f.totalSold, 800_000, "depot sales + trucking");
+    assert.equal(f.remaining, 200_000, "initial − total sold");
     assert.equal(f.trulyUnsold, 100_000);
     assert.equal(f.sold + f.truckedOut + f.awaitingPayment + f.trulyUnsold, f.tankQtyLitres);
   });
@@ -322,6 +325,8 @@ describe("stock trucked out to a trucking PFI", () => {
   test("keeps sales value to customers, and counts its agreed value in the profit", () => {
     assert.equal(f.revenue, 600_000_000, "sales value is customers' alone");
     assert.equal(f.truckedOutValue, 330_000_000);
+    assert.equal(f.truckedOutReceived, 130_000_000, "paid in on the trucking orders");
+    assert.equal(f.truckedOutOnCredit, 200_000_000, "and still on credit");
     assert.equal(f.earned, 930_000_000);
     assert.equal(f.profitLoss, 930_000_000 - 1_000_000_000);
     assert.equal(f.sellThrough, 0.8, "sold and trucked out are both gone");
@@ -337,9 +342,15 @@ describe("stock trucked out to a trucking PFI", () => {
   test("the workings name it", () => {
     const lines = explainFinancials(pfi, f);
     const trucked = lines.find((e) => e.key === "truckedOut");
-    assert.match(trucked.workings, /300,000 Litres worth ₦330,000,000\.00/);
-    assert.match(lines.find((e) => e.key === "remaining").formula, /− Total Sold − Trucked Out$/);
-    assert.match(lines.find((e) => e.key === "profitLoss").formula, /Revenue \+ Trucked Out Value − Total Cost/);
+    assert.equal(trucked.label, "Trucking (Litres)");
+    assert.match(trucked.workings, /300,000 Litres worth ₦330,000,000\.00: ₦130,000,000\.00 paid, ₦200,000,000\.00 on credit/);
+    assert.equal(lines.find((e) => e.key === "sold").label, "Depot Sales (Litres)");
+    const total = lines.find((e) => e.key === "totalSold");
+    assert.equal(total.formula, "Depot Sales + Trucking");
+    assert.match(total.workings, /500,000 Litres \+ 300,000 Litres = 800,000 Litres/);
+    assert.equal(lines.find((e) => e.key === "remaining").formula, "Initial Quantity − Total Sold");
+    assert.match(lines.find((e) => e.key === "remaining").workings, /− 800,000 Litres = 200,000 Litres$/);
+    assert.match(lines.find((e) => e.key === "profitLoss").formula, /Depot Sales Value \+ Trucking Value − Total Cost/);
   });
 
   test("a cargo that trucked nothing out reads exactly as before", () => {
@@ -347,7 +358,9 @@ describe("stock trucked out to a trucking PFI", () => {
     assert.equal(plain.truckedOut, 0);
     assert.equal(plain.remaining, 500_000);
     assert.equal(plain.earned, plain.revenue);
-    assert.ok(!explainFinancials(pfi, plain).some((e) => e.key === "truckedOut"));
+    assert.ok(!explainFinancials(pfi, plain).some((e) => e.key === "truckedOut" || e.key === "totalSold"));
+    assert.equal(explainFinancials(pfi, plain).find((e) => e.key === "sold").label, "Total Sold (Litres)");
+    assert.equal(plain.totalSold, plain.sold);
     assert.equal(explainFinancials(pfi, plain).find((e) => e.key === "remaining").formula, "Initial Quantity − Total Sold");
   });
 });

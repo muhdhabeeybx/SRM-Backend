@@ -142,7 +142,7 @@ const QUEUES = [
           where(
             inArray(orders.paymentStatus, ["Unpaid", "Part Paid"]),
             inArray(orders.status, PAYABLE_STATUSES),
-            // Not a transfer to a trucking PFI: nobody pays it.
+            // Not a truck allocation's order: no customer owes it.
             sql`NOT ${sql.raw(transferSql('"orders"'))}`,
             notOnClosedPfi(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
