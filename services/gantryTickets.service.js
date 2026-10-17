@@ -30,7 +30,20 @@ const { stepToCompleted } = require("./order.service");
 const rowsOf = (r) => (Array.isArray(r) ? r : r?.rows ?? []);
 const httpError = (status, message, details) =>
   Object.assign(new Error(message), { status, statusCode: status, ...(details ? { details } : {}) });
-const litres = (n) => `${Number(n || 0).toLocaleString("en-NG")} L`;
+/**
+ * A quantity in its PFI's own unit. A ticket on a cooking-gas PFI is
+ * kilograms, and "25,000 L" on one is a wrong figure, not a wording.
+ * Matched as the dashboard matches it (unitNames), so the two read alike.
+ */
+const shortUnit = (unit) => {
+  const u = String(unit || "");
+  if (/metric|(^|[^a-z])mt([^a-z]|$)|ton/i.test(u)) return "MT";
+  if (/kilogram|(^|[^a-z])kgs?([^a-z]|$)/i.test(u)) return "kg";
+  if (/barrel|(^|[^a-z])bbls?([^a-z]|$)/i.test(u)) return "bbl";
+  if (/gallon/i.test(u)) return "Gal";
+  return "L";
+};
+const qtyText = (n, unit) => `${Number(n || 0).toLocaleString("en-NG")} ${shortUnit(unit)}`;
 const MAX_LITRES_PER_TICKET = 100000;
 const MAX_TICKETS_PER_ENTRY = 2000;
 
@@ -189,8 +202,8 @@ const cleanEntries = (entries) => {
     const line = `Line ${i + 1}`;
     if (!ticketNumber) problems.push(`${line}: no ticket number`);
     else if (ticketNumber.length > 100) problems.push(`${line}: the ticket number is too long`);
-    if (!Number.isInteger(qty) || qty <= 0) problems.push(`${line} (${ticketNumber || "?"}): litres must be a whole number above 0`);
-    else if (qty > MAX_LITRES_PER_TICKET) problems.push(`${line} (${ticketNumber}): ${litres(qty)} is more than one ticket can hold`);
+    if (!Number.isInteger(qty) || qty <= 0) problems.push(`${line} (${ticketNumber || "?"}): the quantity must be a whole number above 0`);
+    else if (qty > MAX_LITRES_PER_TICKET) problems.push(`${line} (${ticketNumber}): ${qty.toLocaleString("en-NG")} is more than one ticket can hold`);
     const key = ticketNumber.toUpperCase();
     if (ticketNumber && seen.has(key)) problems.push(`${ticketNumber} is entered twice (lines ${seen.get(key)} and ${i + 1})`);
     else seen.set(key, i + 1);
@@ -309,7 +322,7 @@ const lockPicked = async (tx, { pfiId, ticketIds, orderId = null }) => {
 const lockOrder = async (tx, orderId) => {
   const [o] = rowsOf(await tx.execute(sql`
     SELECT o.id, o.status, o.quantity, o.pfi_id, o.company_name, o.customer_id,
-           p.pfi_number, c.company_name AS customer_company
+           p.pfi_number, p.product_unit, c.company_name AS customer_company
       FROM orders o
       LEFT JOIN pfis p ON p.id = o.pfi_id
       LEFT JOIN customers c ON c.id = o.customer_id
@@ -338,13 +351,19 @@ const ticketsForOrder = async (orderId) => {
  */
 const forOrder = async (orderId, user = null) => {
   if (!(await register.tablesReady())) return { register: false, tickets: [], canWork: false, stage: null };
-  const [o] = rowsOf(await db.execute(sql`SELECT pfi_id, status, quantity FROM orders WHERE id = ${Number(orderId)}`));
+  const [o] = rowsOf(await db.execute(sql`
+    SELECT o.pfi_id, o.status, o.quantity, p.product_unit
+      FROM orders o LEFT JOIN pfis p ON p.id = o.pfi_id
+     WHERE o.id = ${Number(orderId)}
+  `));
   if (!o?.pfi_id || !(await register.isOn(o.pfi_id))) return { register: false, tickets: [], canWork: false, stage: null };
   const tickets = await ticketsForOrder(orderId);
   return {
     register: true,
     pfiId: Number(o.pfi_id),
     quantity: Number(o.quantity),
+    // The unit the order and its tickets are in: litres, or kg for cooking gas.
+    productUnit: o.product_unit || "Litres",
     tickets,
     stage: stageOf(o.status, tickets.length),
     canWork: user ? await canWork(user, o.pfi_id) : false,
@@ -369,7 +388,7 @@ const pickExact = async (tx, order, ref, ticketIds) => {
   if (total !== Number(order.quantity)) {
     throw httpError(
       409,
-      `The tickets picked come to ${litres(total)}; ${ref} is for ${litres(order.quantity)}. They must match exactly.`,
+      `The tickets picked come to ${qtyText(total, order.product_unit)}; ${ref} is for ${qtyText(order.quantity, order.product_unit)}. They must match exactly.`,
     );
   }
   return { picked, total };
@@ -484,7 +503,7 @@ const change = async ({ orderId, ticketIds, reason, user, actorName = "" }) => {
     if (total !== Number(order.quantity)) {
       throw httpError(
         409,
-        `The tickets picked come to ${litres(total)}; ${ref} is for ${litres(order.quantity)}. They must match exactly.`,
+        `The tickets picked come to ${qtyText(total, order.product_unit)}; ${ref} is for ${qtyText(order.quantity, order.product_unit)}. They must match exactly.`,
       );
     }
 
@@ -546,7 +565,7 @@ const deskOrders = async (user) => {
   const rows = rowsOf(await db.execute(sql`
     SELECT o.id, o.created_at, o.status, o.payment_status, o.quantity, o.total_amount,
            o.payment_confirmed_at, o.released_at, o.completed_at,
-           o.pfi_id, p.pfi_number, d.name AS depot_name, pr.name AS product_name,
+           o.pfi_id, p.pfi_number, p.product_unit, d.name AS depot_name, pr.name AS product_name,
            COALESCE(NULLIF(o.company_name, ''), c.company_name) AS company_name,
            COALESCE(NULLIF(o.company_name, ''), NULLIF(c.company_name, ''), NULLIF(c.name, ''), '') AS customer_name,
            COALESCE(tk.tickets, '[]'::json) AS tickets
@@ -585,6 +604,7 @@ const deskOrders = async (user) => {
       pfiNumber: r.pfi_number,
       depotName: r.depot_name || "",
       productName: r.product_name || "",
+      productUnit: r.product_unit || "Litres",
       customerName: r.customer_name || "",
       stage: stageOf(r.status, tickets.length),
       tickets: tickets.map((t) => ({ ...t, id: Number(t.id), qtyLitres: Number(t.qtyLitres) })),
@@ -595,7 +615,7 @@ const deskOrders = async (user) => {
 
   // The PFIs on the desk, with their tickets left, for the filter and the strip.
   const pfiRows = rowsOf(await db.execute(sql`
-    SELECT p.id, p.pfi_number, p.status,
+    SELECT p.id, p.pfi_number, p.status, p.product_unit,
            COUNT(t.id) FILTER (WHERE t.voided_at IS NULL AND t.order_id IS NULL)::int AS left_count,
            COALESCE(SUM(t.qty_litres) FILTER (WHERE t.voided_at IS NULL AND t.order_id IS NULL), 0)::bigint AS left_litres
       FROM gantry_ticket_registers r
@@ -610,6 +630,7 @@ const deskOrders = async (user) => {
     id: Number(p.id),
     pfiNumber: p.pfi_number,
     status: p.status,
+    productUnit: p.product_unit || "Litres",
     ticketsLeft: Number(p.left_count) || 0,
     litresLeft: Number(p.left_litres) || 0,
     // Whether this person may issue tickets on it — the server checks again.
