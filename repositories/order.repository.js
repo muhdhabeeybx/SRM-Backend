@@ -306,6 +306,89 @@ const findByIdFull = async (id, tx = db) => {
 };
 
 /**
+ * Why an order cannot be hard-deleted, as sentences the desk can act on.
+ * Empty when nothing stands in the way.
+ *
+ * These are the ON DELETE RESTRICT relations deleteOrder does not clear, and
+ * they are kept on purpose. A merged-away order is the record of its merge
+ * (migration 0056): its reference may be on a bank narration or a paper
+ * ticket, and order_merges holds the before/after figures the audited finance
+ * report's merge was allowed on. Transfers, refunds and transfer requests are
+ * money that moved through this order to or from another one. Deleting any of
+ * them would take another order's history with it, so the delete refuses and
+ * names them rather than reaching the constraint.
+ */
+const findDeleteBlockers = async (orderId, tx = db) => {
+  const id = Number(orderId);
+  const result = await tx.execute(sql`
+    SELECT 'merged_into' AS kind, t.id AS other_id, ${orderReferenceSql("t", "tc")} AS other_ref, NULL::int AS row_id
+      FROM orders o
+      JOIN order_merges m ON m.source_order_id = o.id
+      JOIN orders t ON t.id = m.target_order_id
+      LEFT JOIN customers tc ON tc.id = t.customer_id
+     WHERE o.id = ${id}
+    UNION
+    SELECT 'merged_into', t.id, ${orderReferenceSql("t", "tc")}, NULL
+      FROM orders o
+      JOIN orders t ON t.id = o.merged_into_order_id
+      LEFT JOIN customers tc ON tc.id = t.customer_id
+     WHERE o.id = ${id}
+    UNION
+    SELECT 'merged_from', s.id, ${orderReferenceSql("s", "sc")}, NULL
+      FROM order_merges m
+      JOIN orders s ON s.id = m.source_order_id
+      LEFT JOIN customers sc ON sc.id = s.customer_id
+     WHERE m.target_order_id = ${id}
+    UNION
+    SELECT 'merged_from', s.id, ${orderReferenceSql("s", "sc")}, NULL
+      FROM orders s
+      LEFT JOIN customers sc ON sc.id = s.customer_id
+     WHERE s.merged_into_order_id = ${id}
+    UNION
+    SELECT 'transfer', x.id, ${orderReferenceSql("x", "xc")}, t.id
+      FROM order_payment_transfers t
+      JOIN orders x ON x.id = CASE WHEN t.from_order_id = ${id} THEN t.to_order_id ELSE t.from_order_id END
+      LEFT JOIN customers xc ON xc.id = x.customer_id
+     WHERE t.from_order_id = ${id} OR t.to_order_id = ${id}
+    UNION
+    SELECT 'transfer_request', x.id, ${orderReferenceSql("x", "xc")}, r.id
+      FROM order_transfer_requests r
+      JOIN orders x ON x.id = CASE WHEN r.from_order_id = ${id} THEN r.to_order_id ELSE r.from_order_id END
+      LEFT JOIN customers xc ON xc.id = x.customer_id
+     WHERE r.from_order_id = ${id} OR r.to_order_id = ${id}
+    UNION
+    SELECT 'refund', NULL, NULL, f.id
+      FROM order_refunds f
+     WHERE f.order_id = ${id}
+  `);
+  const rows = result.rows ?? result;
+  const of = (kind) => rows.filter((r) => r.kind === kind);
+  const refs = (list) => [...new Set(list.map((r) => r.other_ref))].join(", ");
+  const n = (list, word) => `${list.length} ${word}${list.length === 1 ? "" : "s"}`;
+
+  const out = [];
+  const into = of("merged_into");
+  if (into.length) {
+    const ref = refs(into);
+    out.push(
+      `This order was merged into ${ref} and is kept as the record of that merge. ` +
+        `Its payments, trucks and stock are on ${ref}, so it can't be deleted.`
+    );
+  }
+  const from = of("merged_from");
+  if (from.length) {
+    out.push(`${refs(from)} ${from.length === 1 ? "was" : "were"} merged into this order. Deleting it would destroy the record of that merge.`);
+  }
+  const transfers = of("transfer");
+  if (transfers.length) out.push(`It has ${n(transfers, "surplus transfer")} with ${refs(transfers)}. Reverse them first.`);
+  const requests = of("transfer_request");
+  if (requests.length) out.push(`It has ${n(requests, "surplus transfer request")} with ${refs(requests)}.`);
+  const refunds = of("refund");
+  if (refunds.length) out.push(`It has ${n(refunds, "refund")} on record, which can't be deleted with it.`);
+  return out;
+};
+
+/**
  * The same full detail keyed by order number rather than numeric id. Serves
  * the customer portal's by-reference lookup: the reference (order number) is
  * the id every screen and SMS shows, so the customer can open an order by the
@@ -1979,6 +2062,7 @@ module.exports = {
   findByIdempotencyKey,
   findRecentDuplicate,
   findByIdFull,
+  findDeleteBlockers,
   findByNumberFull,
   findTrucksByOrderId,
   findAll,

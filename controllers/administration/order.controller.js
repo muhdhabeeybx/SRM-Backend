@@ -813,6 +813,16 @@ const gateOutTruck = asyncHandler(async (req, res) => {
  */
 const deleteOrder = asyncHandler(async (req, res) => {
   const orderId = Number(req.params.id);
+
+  // Merges, transfers and refunds tie this order to others and are kept on
+  // purpose (see findDeleteBlockers). Refuse by name before anything else
+  // runs. Otherwise the delete reaches the RESTRICT constraint and the desk
+  // only sees a failure.
+  const blockers = await orderRepo.findDeleteBlockers(orderId);
+  if (blockers.length) {
+    throw Object.assign(httpErr(409, blockers.join(" ")), { details: { code: "ORDER_DELETE_BLOCKED", reasons: blockers } });
+  }
+
   const order = await orderRepo.findByIdFull(orderId);
   if (!order) throw httpErr(404, "Order not found");
 
