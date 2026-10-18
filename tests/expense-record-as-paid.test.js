@@ -121,6 +121,59 @@ describe("recording an expense as already paid", () => {
     assert.equal(rows[0].n, 0);
   });
 
+  test("a foreign invoice recorded as paid keeps its rate, and the rate it cleared at", async (t) => {
+    if (!categoryId) return t.skip("no seeded general expense account");
+
+    // The dashboard sends the request's rate and, as the payment rate, the
+    // same figure unless the desk typed another. The rate was refused as
+    // missing — the check read it off a row that did not exist yet.
+    const res = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        category_id: categoryId,
+        amount: 1200,
+        currency: "USD",
+        exchange_rate: 1550,
+        paid_exchange_rate: 1560,
+        description: `Dollar invoice ${RUN}`,
+        record_as_paid: true,
+        bank_paid_from: "Zenith Bank · 1013456789",
+        payment_date: "2026-10-17",
+        payment_method: "Bank Transfer",
+        payment_reference: `USD-${RUN}`,
+      });
+
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    const expense = res.body.data.expense;
+    created.push(expense.id);
+    assert.equal(expense.status, "paid");
+    assert.equal(expense.currency, "USD");
+    assert.equal(Number(expense.exchange_rate), 1550);
+    assert.equal(Number(expense.paid_exchange_rate), 1560);
+  });
+
+  test("a payment rate on a foreign invoice raised with no rate is still refused", async (t) => {
+    if (!categoryId) return t.skip("no seeded general expense account");
+
+    const res = await request(app)
+      .post(EXPENSES)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        category_id: categoryId,
+        amount: 1200,
+        currency: "USD",
+        paid_exchange_rate: 1560,
+        description: `Dollar invoice, no rate ${RUN}`,
+        record_as_paid: true,
+        bank_paid_from: "Zenith Bank · 1013456789",
+        payment_reference: `USD-NR-${RUN}`,
+      });
+
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /no rate on it/i);
+  });
+
   test("it is refused without saying which account the money left", async (t) => {
     if (!categoryId) return t.skip("no seeded general expense account");
 

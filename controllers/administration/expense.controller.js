@@ -687,8 +687,11 @@ const createExpense = asyncHandler(async (req, res) => {
             : undefined,
           untaxedItems: undefined,
         });
+    // The row does not exist yet, so the check reads the request off what is
+    // about to be written — its rate included, or a payment rate on a foreign
+    // invoice is refused as having "no rate on it" when the rate is right here.
     const payment = directToPaid
-      ? paymentFor(req.body, { amount: String(share), currency: money_.currency })
+      ? paymentFor(req.body, { amount: String(share), currency: money_.currency, exchange_rate: money_.exchange_rate })
       : null;
 
   const expense = await pfiExpenseRepo.createExpense({
