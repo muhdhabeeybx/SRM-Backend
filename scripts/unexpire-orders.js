@@ -27,11 +27,25 @@
  * released and its money returned; taking it again here would be paying for
  * an order nobody has confirmed. The order goes back to Pending unpaid, and
  * payment is confirmed the normal way.
+ *
+ * ── Why created_at moves to this morning ──────────────────────────────────
+ *
+ * An unpaid order lapses at 23:59 Lagos on the day it was created
+ * (config/orderExpiry.js). Restored with yesterday's created_at, it is past its
+ * deadline already, and the first page that loads it expires it again. So an
+ * order whose day has ended is re-dated to 06:00 Lagos today — a minute apart
+ * per order, in id order, so the book keeps their sequence — and gets until
+ * tonight's 23:59. An order whose day has not ended keeps its created_at.
+ *
+ * Each restore writes an order.restored audit row carrying the old created_at
+ * and expired_at, since the order's own columns no longer show them.
  */
 require("dotenv").config();
 const { db } = require("./../config/db");
-const { orders, pfis, orderPfiAllocations } = require("../db/schema");
+const { orders, pfis, orderPfiAllocations, auditLogs } = require("../db/schema");
 const { eq, and, sql } = require("drizzle-orm");
+const { hasLapsed, EXPIRY_TZ } = require("../config/orderExpiry");
+const { zonedTimeOnDay } = require("../lib/zonedDay");
 
 const APPLY = process.argv.includes("--apply");
 const ids = process.argv.slice(2).filter((a) => /^\d+$/.test(a)).map(Number);
@@ -51,6 +65,8 @@ async function main() {
       status: orders.status,
       paymentStatus: orders.paymentStatus,
       quantity: orders.quantity,
+      createdAt: orders.createdAt,
+      expiredAt: orders.expiredAt,
       pfiId: orders.pfiId,
       pfiNumber: pfis.pfiNumber,
       pfiStatus: pfis.status,
@@ -87,11 +103,23 @@ async function main() {
     plan.push({ ...o, reserve: true });
   }
 
+  // 06:00 Lagos today, or earlier still if this runs before six — a created_at
+  // in the future would read as an order nobody has placed yet.
+  plan.sort((a, b) => a.id - b.id);
+  const now = Date.now();
+  const morning = Math.min(zonedTimeOnDay(new Date(now), 6, 0, 0, 0, EXPIRY_TZ()).getTime(), now - plan.length * 60_000);
+  plan.forEach((o, i) => {
+    o.newCreatedAt = hasLapsed(o.createdAt, now) ? new Date(morning + i * 60_000) : null;
+  });
+
   console.log(`\nOrders to restore: ${plan.length}`);
   for (const o of plan) {
     console.log(
       `  ${o.orderNumber} (#${o.id}) · ${litres(o.quantity)} · ${o.paymentStatus}` +
-        (o.reserve ? ` · re-reserving from ${o.pfiNumber}` : " · no PFI to reserve")
+        (o.reserve ? ` · re-reserving from ${o.pfiNumber}` : " · no PFI to reserve") +
+        (o.newCreatedAt
+          ? `\n      created_at ${new Date(o.createdAt).toISOString()} → ${o.newCreatedAt.toISOString()}`
+          : "\n      created_at unchanged — its day has not ended")
     );
   }
 
@@ -127,10 +155,36 @@ async function main() {
         });
       }
 
-      await tx
+      const [restored] = await tx
         .update(orders)
-        .set({ status: "Pending", expiredAt: null, updatedAt: new Date() })
-        .where(and(eq(orders.id, o.id), eq(orders.status, "Expired")));
+        .set({
+          status: "Pending",
+          expiredAt: null,
+          ...(o.newCreatedAt ? { createdAt: o.newCreatedAt } : {}),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(orders.id, o.id), eq(orders.status, "Expired")))
+        .returning({ id: orders.id });
+      if (!restored) throw new Error(`${o.orderNumber}: no longer Expired — changed while this ran`);
+
+      await tx.insert(auditLogs).values({
+        entityType: "order",
+        entityId: o.id,
+        action: "order.restored",
+        prevState: "Expired",
+        newState: "Pending",
+        actorType: "system",
+        metadata: {
+          reason: o.newCreatedAt
+            ? "Restored from Expired on staff request; created_at moved to this morning"
+            : "Restored from Expired on staff request",
+          pfiId: o.pfiId,
+          quantity: o.quantity,
+          expiredAtBefore: o.expiredAt,
+          ...(o.newCreatedAt ? { createdAtBefore: o.createdAt, createdAtAfter: o.newCreatedAt } : {}),
+          via: "scripts/unexpire-orders.js",
+        },
+      });
 
       done.push(o.orderNumber);
     }
