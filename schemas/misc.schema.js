@@ -180,6 +180,8 @@ const bulkCostInventory = z.object({
   agoPrice: money("AGO price").nullish(),
   feedingAllowance: money("Feeding allowance").nullish(),
   productPrice: money("Product price").nullish(),
+  /** Feeding already paid through Expenses — kept, but not added again. Absent leaves it. */
+  feedingInExpenses: z.boolean().optional(),
   /** Without this, a blank field means "leave alone" rather than "clear". */
   clearBlank: z.boolean().optional(),
 });

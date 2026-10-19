@@ -57,6 +57,12 @@ const deliveryInventory = pgTable(
     agoLitres: decimal("ago_litres", { precision: 12, scale: 2 }),
     agoPrice: decimal("ago_price", { precision: 12, scale: 2 }),
     feedingAllowance: decimal("feeding_allowance", { precision: 14, scale: 2 }),
+    /**
+     * Feeding already paid as an expense on a PFI (0091). The figure stays on
+     * the truck for the record but is not added to its trip expenses — the
+     * paid expense carries it, and adding both counted it twice.
+     */
+    feedingInExpenses: boolean("feeding_in_expenses").default(false).notNull(),
     /** What the product cost US per litre — not the selling rate above. */
     productPrice: decimal("product_price", { precision: 14, scale: 2 }),
     costedAt: timestamp("costed_at", { withTimezone: true }),

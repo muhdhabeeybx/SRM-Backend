@@ -153,6 +153,11 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
     }
     patch[key] = String(v);
   }
+  // Paid through Expenses or not. Absent leaves it alone, like a blank figure;
+  // the dialog sends it only when somebody chose.
+  if (typeof values.feedingInExpenses === "boolean") {
+    patch.feedingInExpenses = values.feedingInExpenses;
+  }
   if (!Object.keys(patch).length) return [];
 
   patch.costedAt = new Date();

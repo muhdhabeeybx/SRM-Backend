@@ -23,7 +23,7 @@ const staffActor = (req) => ({ type: "staff", staffId: req.user?.id ?? null });
  */
 const COST_FIELDS = [
   "agoLitres", "agoPrice", "agoValue",
-  "feedingAllowance", "totalExpenses", "costPerLitre",
+  "feedingAllowance", "feedingInExpenses", "totalExpenses", "costPerLitre",
   "productPrice", "landingCost",
   "margin", "marginValue",
   "costed", "missing", "costedAt", "costedBy",
