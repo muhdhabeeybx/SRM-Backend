@@ -25,7 +25,7 @@ const getAuthContext = async (staffId) => {
     db.select({ depotId: depotStaff.depotId }).from(depotStaff).where(eq(depotStaff.staffId, staffId)),
     db.select({ lpgStationId: lpgStationStaff.lpgStationId }).from(lpgStationStaff).where(eq(lpgStationStaff.staffId, staffId)),
     db.select({ pfiId: pfiStaff.pfiId }).from(pfiStaff).where(eq(pfiStaff.staffId, staffId)),
-    db.select({ routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed })
+    db.select({ routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed, viewOnly: staffPageOverrides.viewOnly })
       .from(staffPageOverrides)
       .where(eq(staffPageOverrides.staffId, staffId)),
     db.select({ id: fillingStationStaff.deliveryCustomerId }).from(fillingStationStaff).where(eq(fillingStationStaff.staffId, staffId)),
@@ -139,7 +139,7 @@ const getScopeWithNamesForStaffIds = async (staffIds) => {
 
 const getPageOverrides = async (staffId) => {
   const rows = await db
-    .select({ routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed })
+    .select({ routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed, viewOnly: staffPageOverrides.viewOnly })
     .from(staffPageOverrides)
     .where(eq(staffPageOverrides.staffId, staffId));
   return rows;
@@ -158,12 +158,12 @@ const getPageOverridesForStaffIds = async (staffIds) => {
   if (!staffIds.length) return byStaff;
 
   const rows = await db
-    .select({ staffId: staffPageOverrides.staffId, routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed })
+    .select({ staffId: staffPageOverrides.staffId, routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed, viewOnly: staffPageOverrides.viewOnly })
     .from(staffPageOverrides)
     .where(inArray(staffPageOverrides.staffId, staffIds));
 
   for (const r of rows) {
-    byStaff.get(r.staffId)?.push({ routePath: r.routePath, allowed: r.allowed });
+    byStaff.get(r.staffId)?.push({ routePath: r.routePath, allowed: r.allowed, viewOnly: r.viewOnly });
   }
   return byStaff;
 };
@@ -220,13 +220,13 @@ const setScope = async (
   });
 };
 
-/** Replaces this staff member's page overrides. `overrides` is [{routePath, allowed}]. */
+/** Replaces this staff member's page overrides. `overrides` is [{routePath, allowed, viewOnly}]. */
 const setPageOverrides = async (staffId, overrides = []) => {
   await db.transaction(async (tx) => {
     await tx.delete(staffPageOverrides).where(eq(staffPageOverrides.staffId, staffId));
     if (overrides.length) {
       await tx.insert(staffPageOverrides).values(
-        overrides.map((o) => ({ staffId, routePath: o.routePath, allowed: !!o.allowed }))
+        overrides.map((o) => ({ staffId, routePath: o.routePath, allowed: !!o.allowed, viewOnly: !!o.allowed && !!o.viewOnly }))
       );
     }
   });

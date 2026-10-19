@@ -61,6 +61,8 @@ const corsOptions = {
     "Idempotency-Key",
     "X-Api-Key",
     "X-Auth-Transport",
+    // Which dashboard page sent the request — middleware/viewOnlyPages.js.
+    "X-Dashboard-Page",
   ],
   exposedHeaders: [
     "Content-Range",

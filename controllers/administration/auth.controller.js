@@ -30,7 +30,7 @@ const getAdminPayload = async (user) => {
     // the refusal itself is still the server's, this only spares them the
     // dead ends.
     pfiScoped: isConfined(ctx),
-    pageOverrides: pageOverrides.map((o) => ({ routePath: o.routePath, allowed: o.allowed })),
+    pageOverrides: pageOverrides.map((o) => ({ routePath: o.routePath, allowed: o.allowed, viewOnly: Boolean(o.viewOnly) })),
     profilePicture: {
       url: user.profilePictureUrl,
       publicId: user.profilePicturePublicId,

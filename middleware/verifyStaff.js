@@ -1,6 +1,7 @@
 const { verifyAccessToken } = require("../services/token.service");
 const sessionService = require("../services/session.service");
 const { staffScopeRepo } = require("../repositories");
+const { viewOnlyRefusal } = require("./viewOnlyPages");
 
 // Role VALUES, not table names — these are data, consumed by config/roleMapping.js
 // and by the frontend. They are unrelated to the `staff` table rename.
@@ -86,6 +87,11 @@ const authenticateStaff = async (req, res, next) => {
   // Deliberately not `req.session` — that name belongs to express-session, and
   // colliding with it would be a confusing trap if it is ever added.
   req.authSession = active.session;
+
+  // A page given to them to look at only: no writes from it. Here rather than
+  // in authoriseByRoute because several routers use authenticateStaff alone.
+  const viewOnly = viewOnlyRefusal(req);
+  if (viewOnly) return res.status(viewOnly.status).json(viewOnly.body);
 
   next();
 };

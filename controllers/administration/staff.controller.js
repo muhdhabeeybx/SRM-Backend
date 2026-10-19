@@ -102,7 +102,7 @@ const createAdmin = asyncHandler(async (req, res) => {
     }, contextFromRequest(req, SOURCES.MANAGE_USERS, "Assigned when the account was created"));
   }
   if (page_overrides) {
-    await staffScopeRepo.setPageOverrides(admin.id, page_overrides.map((o) => ({ routePath: o.route_path, allowed: o.allowed })));
+    await staffScopeRepo.setPageOverrides(admin.id, page_overrides.map((o) => ({ routePath: o.route_path, allowed: o.allowed, viewOnly: o.view_only === true })));
   }
   if (notification_overrides) {
     await staffChoices.setOverrides(admin.id, notification_overrides);
@@ -404,7 +404,7 @@ const updateAdmin = asyncHandler(async (req, res) => {
     }, contextFromRequest(req, SOURCES.MANAGE_USERS));
   }
   if (page_overrides !== undefined) {
-    await staffScopeRepo.setPageOverrides(admin.id, page_overrides.map((o) => ({ routePath: o.route_path, allowed: o.allowed })));
+    await staffScopeRepo.setPageOverrides(admin.id, page_overrides.map((o) => ({ routePath: o.route_path, allowed: o.allowed, viewOnly: o.view_only === true })));
   }
   if (notification_overrides !== undefined) {
     await staffChoices.setOverrides(admin.id, notification_overrides);

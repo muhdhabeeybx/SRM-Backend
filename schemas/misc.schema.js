@@ -250,6 +250,8 @@ const staffBase = {
       z.object({
         route_path: requiredString("Route path", 100),
         allowed: z.boolean({ error: "allowed must be true or false" }),
+        // Open it to look at and download from, not to change (migration 0090).
+        view_only: z.boolean({ error: "view_only must be true or false" }).optional(),
       })
     )
     .max(200, "Too many page overrides")
