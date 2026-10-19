@@ -175,9 +175,20 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
     });
   }
 
+  // Only the feeding mark changed — say that, not "costs applied".
+  const trucks = `${rows.length} truck${rows.length === 1 ? "" : "s"}`;
+  const markOnly =
+    typeof values.feedingInExpenses === "boolean" &&
+    !clearBlank &&
+    ["agoLitres", "agoPrice", "feedingAllowance", "productPrice"].every((k) => values[k] == null);
+
   res.json({
     success: true,
-    message: `Costs applied to ${rows.length} truck${rows.length === 1 ? "" : "s"}`,
+    message: markOnly
+      ? values.feedingInExpenses
+        ? `Feeding on ${trucks} marked as paid in Expenses`
+        : `Feeding on ${trucks} added back as a trip cost`
+      : `Costs applied to ${trucks}`,
     data: { inventory: rows, updated: rows.length },
   });
 });
