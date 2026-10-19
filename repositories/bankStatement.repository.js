@@ -69,10 +69,24 @@ function dedupKey({ txnDate, bankRef, amount, depositor }) {
  * A row with NO reference at all falls back to the composite fingerprint.
  * There is nothing to identify it by, and refusing every unreferenced row
  * after the first would discard real credits.
+ *
+ * ── Spaces and leading zeros are not part of a reference ──────────────────
+ *
+ * FCMB's .xlsx wraps a long reference over lines inside its cell, so one
+ * export reads "NIP/261016161 0090002467353 42" and the next reads
+ * "NIP/261016161009000246735342" — the same transfer. Compared as written they
+ * differed, and upload 841 on account 18 (19 Oct 2026) brought 80 credits in
+ * a second time beside their matched twins. Four more came back with the
+ * "00" Excel had dropped from an all-digit reference ("1202710327" against
+ * "001202710327"). ₦6,187,148,000 in all, removed the same day. So every
+ * space is taken out before comparing, and an all-digit reference loses its
+ * leading zeros. The line keeps the reference as the bank printed it; only
+ * the comparison changes.
  */
 const paymentReference = (ref) => {
-  const s = String(ref || "").trim().toLowerCase();
-  return s || null;
+  const s = String(ref || "").replace(/\s+/g, "").toLowerCase();
+  if (!s) return null;
+  return /^\d+$/.test(s) ? s.replace(/^0+(?=\d)/, "") : s;
 };
 
 /**
