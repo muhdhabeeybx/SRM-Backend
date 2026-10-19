@@ -28,17 +28,29 @@
  * 34 loads for its 33 trucks, one load split in two at the desk — and a
  * per-truck sum is the same either way.
  *
+ * ── Once the order has completed ──────────────────────────────────────────
+ *
+ * The trucks still decide. Until 19 Oct 2026 a Completed order stood aside,
+ * and PFI-47D's corrected trucks — BWR828XB and KUJ229XC off, BWR811XB's
+ * second trip and BWR850XB on, BWR836XB at 50,000 — saved on the batch and
+ * reached nothing, without a word. Now a completed order follows like an open
+ * one, its gated-out loads included:
+ *
+ *   a truck that came off gives its load — ticket, gate stamps and all — to a
+ *   truck that went on, so the paperwork that left the depot stays one load;
+ *   a truck that went on with no load to take over gets one already signed
+ *   out, with no gate times, since no gate saw it;
+ *   a load nobody takes over is deleted, its ticket with it.
+ *
  * ── What it will not do ───────────────────────────────────────────────────
  *
- * Change a load the desk has already ticketed: its ticket names the truck and
- * the litres. Only pending loads grow, shrink or go.
+ * Change a load the desk has already ticketed while the order is still open:
+ * its ticket names the truck and the litres. Only pending loads grow, shrink
+ * or go.
  *
- * Add to an order that is over — Completed, Cancelled, Expired. Its trucks
- * have all left the depot; more trucks off that cargo are a new allocation.
- * A Completed order's batch can still be put back to what the order lifted —
- * a truck removed by mistake goes back on (BWR835XB off PFI-47C, 12 Oct
- * 2026) — but never past it. Other edits on such a batch are left alone, as
- * they always were.
+ * Add to a Cancelled or Expired order. Nothing left the depot under it; more
+ * trucks off that cargo are a new allocation. Other edits on such a batch are
+ * left alone, as they always were.
  *
  * Touch a station's allocation. It has no trucks and no desk, and its order
  * completed on the day it was approved.
@@ -96,7 +108,8 @@ async function allocationPfis(pfiIds, tx = db) {
  * caller's write, so a refusal here undoes that write too.
  *
  * `adding` says the write put trucks or litres onto the batch. It is what
- * decides between refusing and standing aside when the order is already over.
+ * decides between refusing and standing aside when the order was cancelled or
+ * expired.
  *
  * Returns what changed, or null when nothing did.
  */
@@ -163,18 +176,13 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
     Number(sub.ticketCount ?? 0) === rows.length;
   if (sameShape) return null;
 
-  if (!OPEN.has(order.status)) {
+  // A completed order's loads have left; the trucks say which trucks they were.
+  const done = order.status === "Completed";
+  if (!OPEN.has(order.status) && !done) {
     if (!adding) return null;
-    // Putting back what the order lifted moves nothing on the order or the
-    // cargo: those litres left the depot under it already.
-    if (order.status === "Completed" && total <= Number(order.quantity)) return null;
     throw httpError(
       409,
-      `${sub.pfiNumber}'s order ${order.orderNumber} is ${order.status.toLowerCase()} — its trucks have all left` +
-        (order.status === "Completed"
-          ? `, and these would take ${sub.pfiNumber} past the ${fmt(order.quantity)} it lifted. `
-          : ". ") +
-        `Raise a new allocation for more trucks.`,
+      `${sub.pfiNumber}'s order ${order.orderNumber} is ${order.status.toLowerCase()}. Raise a new allocation for more trucks.`,
     );
   }
   if (total <= 0) {
@@ -187,16 +195,25 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
   const added = [];
   const removed = [];
   const resized = [];
+  const replated = [];
+  // A completed order's loads that lost their truck, kept for the trucks that
+  // replaced it; whatever is left over is deleted at the end.
+  const spare = [];
   for (const t of plan.filter((p) => p.diff < 0)) {
     let over = -t.diff;
-    // The newest pending load gives first; a ticketed load gives nothing.
+    // The newest pending load gives first; a ticketed load gives nothing
+    // until the order has completed.
     for (const l of [...t.loads].reverse()) {
       if (over <= 0) break;
-      if (l.status !== "pending") continue;
+      if (l.status !== "pending" && !done) continue;
       const qty = Number(l.quantity);
       if (qty <= over) {
-        await tx.delete(orderTrucks).where(eq(orderTrucks.id, l.id));
-        removed.push({ truckNumber: l.truckNumber, quantity: qty });
+        if (l.status === "pending") {
+          await tx.delete(orderTrucks).where(eq(orderTrucks.id, l.id));
+          removed.push({ truckNumber: l.truckNumber, quantity: qty });
+        } else {
+          spare.push(l);
+        }
         over -= qty;
       } else {
         await orderTruckRepo.update(l.id, { quantity: String(qty - over) }, tx);
@@ -221,36 +238,67 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
   );
   for (const t of growing) {
     let more = t.diff;
-    // A pending load on the same truck grows before a second one is made.
-    const pending = t.loads.find((l) => l.status === "pending" && Number(l.quantity) + more <= MAX_LOAD);
-    if (pending) {
-      const from = Number(pending.quantity);
-      await orderTruckRepo.update(pending.id, { quantity: String(from + more) }, tx);
-      resized.push({ truckNumber: pending.truckNumber, from, to: from + more });
+    // A load on the same truck grows before a second one is made — a pending
+    // one, or any one once the order has completed.
+    const same = t.loads.find((l) => (done || l.status === "pending") && Number(l.quantity) + more <= MAX_LOAD);
+    if (same) {
+      const from = Number(same.quantity);
+      await orderTruckRepo.update(same.id, { quantity: String(from + more) }, tx);
+      resized.push({ truckNumber: same.truckNumber, from, to: from + more });
       continue;
     }
     if (more > MAX_LOAD) {
       throw httpError(400, `${t.plate || "A truck"} is over one tanker (${fmt(MAX_LOAD)}).`);
     }
     const f = fleet.get(Number(t.truckId));
+    const truck = {
+      truckId: t.truckId != null ? Number(t.truckId) : null,
+      truckNumber: t.plate || f?.plateNumber || null,
+      driverName: t.driverName || f?.driverName || null,
+      driverPhone: f?.driverPhone || null,
+    };
+
+    const reuse = spare.shift();
+    if (reuse) {
+      const from = {
+        truckNumber: reuse.truckNumber, quantity: reuse.quantity,
+        driverName: reuse.driverName, driverPhone: reuse.driverPhone,
+      };
+      const to = { ...truck, quantity: String(more) };
+      await orderTruckRepo.update(reuse.id, to, tx);
+      await auditLogRepo.record({
+        entityType: "order_truck",
+        entityId: reuse.id,
+        action: "order_truck.details_corrected",
+        actor,
+        metadata: { orderId: order.id, from, to, via: "trucking-pfi" },
+      }, tx);
+      replated.push({ from: reuse.truckNumber, to: truck.truckNumber, quantity: more });
+      continue;
+    }
+
     const load = await orderTruckRepo.create({
       orderId: order.id,
       truckIndex: nextIndex++,
-      truckId: t.truckId != null ? Number(t.truckId) : null,
-      truckNumber: t.plate || f?.plateNumber || null,
+      ...truck,
       quantity: String(more),
-      driverName: t.driverName || f?.driverName || null,
-      driverPhone: f?.driverPhone || null,
-      status: "pending",
+      status: done ? "gated_out" : "pending",
     }, tx);
     await auditLogRepo.record({
       entityType: "order_truck",
       entityId: load.id,
       action: "order_truck.allocated",
       actor,
-      metadata: { orderId: order.id, truckIndex: load.truckIndex, truckNumber: load.truckNumber, quantity: String(more), via: "trucking-pfi" },
+      metadata: {
+        orderId: order.id, truckIndex: load.truckIndex, truckNumber: load.truckNumber, quantity: String(more),
+        via: "trucking-pfi", ...(done ? { orderCompleted: true } : {}),
+      },
     }, tx);
     added.push({ truckNumber: load.truckNumber, quantity: more });
+  }
+  for (const l of spare) {
+    await tx.delete(orderTrucks).where(eq(orderTrucks.id, l.id));
+    removed.push({ truckNumber: l.truckNumber, quantity: Number(l.quantity) });
   }
 
   // ── The parent's stock ───────────────────────────────────────────────
@@ -342,12 +390,12 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
     parentPfiId: order.pfiId,
     quantity: [Number(order.quantity), total],
     trucks: [Number(sub.ticketCount ?? 0), rows.length],
-    added, removed, resized,
+    added, removed, resized, replated,
   };
   await auditLogRepo.record({ entityType: "order", entityId: order.id, action: "order.updated", actor, metadata: { ...metadata, changes } }, tx);
   await auditLogRepo.record({ entityType: "pfi", entityId: sub.id, action: "pfi.allocation_trucks_changed", actor, metadata }, tx);
 
-  return { orderId: order.id, orderNumber: order.orderNumber, pfiNumber: sub.pfiNumber, changes, added, removed, resized };
+  return { orderId: order.id, orderNumber: order.orderNumber, pfiNumber: sub.pfiNumber, changes, added, removed, resized, replated };
 }
 
 /**

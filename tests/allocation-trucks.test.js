@@ -10,7 +10,7 @@ const app = require("../app");
 const { db } = require("../config/db");
 const {
   pfis, depots, products, bankAccounts, fleetTrucks, orders, orderTrucks,
-  pfiTruckAllocations, deliveryInventory, auditLogs,
+  pfiTruckAllocations, deliveryInventory, auditLogs, tickets,
 } = require("../db/schema");
 const { closeDb, staffToken } = require("./helpers");
 const { syncFromTrucks } = require("../services/allocationTrucks.service");
@@ -108,6 +108,7 @@ describe("an allocation's trucking PFI — its trucks carry through to its order
     try {
       await db.delete(deliveryInventory).where(eq(deliveryInventory.allocationCode, CODE));
       await db.delete(pfiTruckAllocations).where(eq(pfiTruckAllocations.parentPfiId, parent.id));
+      await db.delete(tickets).where(eq(tickets.orderId, order.id));
       await db.delete(orderTrucks).where(eq(orderTrucks.orderId, order.id));
       await db.execute(sql`DELETE FROM order_pfi_allocations WHERE order_id = ${order.id}`);
       await db.delete(orders).where(eq(orders.id, order.id));
@@ -271,41 +272,81 @@ describe("an allocation's trucking PFI — its trucks carry through to its order
     assert.equal(same.status, 200, JSON.stringify(same.body));
   });
 
-  test("an order that is over takes no more trucks, but other edits still work", async () => {
+  test("a completed order follows its trucks: a truck swapped for another takes over its load and ticket", async () => {
+    // As PFI-47D on 19 Oct 2026: every load signed out, then the batch corrected.
     await db.update(orders).set({ status: "Completed" }).where(eq(orders.id, order.id));
-    const res = await as(admin).post("/api/delivery-inventory", {
-      allocationCode: CODE, truckId: trucks[3].id, quantityAllocated: 20000,
-    });
-    assert.equal(res.status, 409, JSON.stringify(res.body));
-    assert.match(res.body.message, /past the 78,000 it lifted/);
-    assert.match(res.body.message, /Raise a new allocation/);
+    await db.update(orderTrucks).set({ status: "gated_out" }).where(eq(orderTrucks.orderId, order.id));
+    const bLoad = (await loadsOf()).find((l) => l.truckId === trucks[1].id);
+    const [ticket] = await db.insert(tickets).values({
+      ticketNumber: `TCK-SYNC-${RUN}`, orderId: order.id, orderTruckId: bLoad.id, qrCodeDataUrl: "x",
+    }).returning();
 
+    // It was really truck 4, and it carried 50,000.
     const [bRow] = (await inventory()).filter((r) => r.truckId === trucks[1].id);
-    const ok = await as(admin).patch(`/api/delivery-inventory/${bRow.id}`, { customerName: "Walk-in" });
-    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    const res = await as(admin).patch(`/api/delivery-inventory/${bRow.id}`, {
+      truckId: trucks[3].id, truckNumber: trucks[3].plateNumber, quantityAllocated: 50000,
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+
+    const { o, p, s, a, loads } = await state();
+    assert.equal(o.status, "Completed", "still completed");
+    assert.equal(o.quantity, 95000);
+    assert.equal(Number(o.totalAmount), 95000 * 925);
+    assert.equal(o.expectedTrucks, 2);
+    assert.equal(p.soldQtyLitres, 95000, "the extra 17,000 come off the cargo");
+    assert.equal(s.startingQtyLitres, 95000);
+    assert.equal(s.ticketCount, 2);
+    assert.equal(a.quantity, 95000);
+    assert.deepEqual(a.trucks.map((t) => t.truckId).sort(), [trucks[0].id, trucks[3].id].sort());
+
+    assert.equal(loads.length, 2);
+    const moved = loads.find((l) => l.id === bLoad.id);
+    assert.equal(moved.truckId, trucks[3].id, "the same load, now truck 4");
+    assert.equal(moved.truckNumber, trucks[3].plateNumber);
+    assert.equal(Number(moved.quantity), 50000);
+    assert.equal(moved.status, "gated_out");
+    assert.equal((await row(tickets, ticket.id)).orderTruckId, bLoad.id, "its ticket stays with it");
+
+    const [audit] = await db.select().from(auditLogs).where(sql`${auditLogs.entityType} = 'order_truck'
+      AND ${auditLogs.entityId} = ${bLoad.id} AND ${auditLogs.action} = 'order_truck.details_corrected'`);
+    assert.equal(audit?.metadata?.from?.truckNumber, trucks[1].plateNumber);
+    assert.equal(audit?.metadata?.to?.truckNumber, trucks[3].plateNumber);
   });
 
-  test("a truck removed by mistake goes back on, up to what the order lifted", async () => {
-    // As BWR835XB off PFI-47C: the order is over, the truck is taken off...
-    const [bRow] = (await inventory()).filter((r) => r.truckId === trucks[1].id);
-    const removed = await as(admin).del(`/api/delivery-inventory/${bRow.id}`);
+  test("a truck taken off a completed order comes off it, and goes back on signed out", async () => {
+    const [dRow] = (await inventory()).filter((r) => r.truckId === trucks[3].id);
+    const removed = await as(admin).del(`/api/delivery-inventory/${dRow.id}`);
     assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    let st = await state();
+    assert.equal(st.o.quantity, 45000);
+    assert.equal(st.o.expectedTrucks, 1);
+    assert.equal(st.p.soldQtyLitres, 45000, "its litres go back to the cargo");
+    assert.equal(st.loads.length, 1);
 
-    // ...and put back. The order lifted 78,000, and the batch is back to it.
     const back = await as(admin).post("/api/delivery-inventory", {
       allocationCode: CODE, truckId: trucks[1].id, quantityAllocated: 33000,
     });
     assert.equal(back.status, 201, JSON.stringify(back.body));
-    const { o, p, s } = await state();
-    assert.equal(o.quantity, 78000, "the order lifted these litres already");
-    assert.equal(p.soldQtyLitres, 78000, "nothing more leaves the cargo");
-    assert.equal(s.startingQtyLitres, 78000);
-    assert.equal((await inventory()).length, 2);
+    st = await state();
+    assert.equal(st.o.status, "Completed");
+    assert.equal(st.o.quantity, 78000);
+    assert.equal(st.p.soldQtyLitres, 78000);
+    assert.equal(st.s.startingQtyLitres, 78000);
+    const load = st.loads.find((l) => l.truckId === trucks[1].id);
+    assert.equal(load.status, "gated_out", "it left the depot already");
+    assert.equal(load.securityExitedAt, null, "no gate saw it, so no gate time");
+  });
 
-    // One litre more is not putting back.
-    const over = await as(admin).post("/api/delivery-inventory", {
-      allocationCode: CODE, truckId: trucks[2].id, quantityAllocated: 1,
+  test("a cancelled order takes no more trucks, but other edits still work", async () => {
+    await db.update(orders).set({ status: "Cancelled" }).where(eq(orders.id, order.id));
+    const res = await as(admin).post("/api/delivery-inventory", {
+      allocationCode: CODE, truckId: trucks[2].id, quantityAllocated: 20000,
     });
-    assert.equal(over.status, 409, JSON.stringify(over.body));
+    assert.equal(res.status, 409, JSON.stringify(res.body));
+    assert.match(res.body.message, /is cancelled\. Raise a new allocation/);
+
+    const [aRow] = (await inventory()).filter((r) => r.truckId === trucks[0].id);
+    const ok = await as(admin).patch(`/api/delivery-inventory/${aRow.id}`, { customerName: "Walk-in" });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
   });
 });

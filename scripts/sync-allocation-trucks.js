@@ -81,6 +81,7 @@ async function main() {
         if (result.added.length) console.log(`  loads added: ${result.added.map((a) => `${a.truckNumber} ${a.quantity.toLocaleString()}`).join(", ")}`);
         if (result.removed.length) console.log(`  loads removed: ${result.removed.map((a) => a.truckNumber).join(", ")}`);
         if (result.resized.length) console.log(`  loads resized: ${result.resized.map((a) => `${a.truckNumber} ${a.from}→${a.to}`).join(", ")}`);
+        if (result.replated.length) console.log(`  loads moved to another truck: ${result.replated.map((a) => `${a.from}→${a.to} ${a.quantity.toLocaleString()}`).join(", ")}`);
       }
       if (!APPLY) throw DRY_RUN;
     });
