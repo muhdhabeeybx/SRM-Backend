@@ -86,6 +86,17 @@ describe("report reminders", () => {
     assert.equal(data.roles.length, 5);
   });
 
+  test("a sold-out batch nobody has closed is not chased either", async () => {
+    await client`UPDATE pfis SET sold_qty_litres = starting_qty_litres WHERE id = ${ids.pfiB}`;
+    try {
+      const listed = new Set((await outstandingReports(DAY)).pfis.map((p) => p.id));
+      assert.ok(!listed.has(ids.pfiB), "nothing left to sell, nothing to report");
+      assert.ok(listed.has(ids.pfiA), "a batch still selling stays");
+    } finally {
+      await client`UPDATE pfis SET sold_qty_litres = 0 WHERE id = ${ids.pfiB}`;
+    }
+  });
+
   test("a desk is filed by any sheet of its type on the batch, however it was typed", async () => {
     const data = await outstandingReports(DAY);
     const a = deskOf(data, "sales_manager", ids.pfiA);

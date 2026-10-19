@@ -4,6 +4,7 @@ const { notifyAndWait } = require("../notifications");
 const { DESKS: ASSIGNMENT_DESKS } = require("./deskAssignments.service");
 const { cfoDeskIds } = require("./expenseNotifications.service");
 const { officerIdsFor, stationOfficerIds, generalOfficerIds } = require("../lib/expenseOfficers");
+const { isSoldOut } = require("../lib/pfiStock");
 const { shortPfi, dayLabel, FILER_ROLES, REPORT_NAMES } = require("./reportReminders.service");
 const { localDateStr, addDaysStr } = require("../lib/zonedDay");
 const { CATALOG } = require("../notifications/catalog");
@@ -188,7 +189,9 @@ const loadDirectory = async () => {
 /** The PFIs a reminder can name, with the label the desks use ("PFI 47"). */
 const loadPfis = async () => {
   const rows = await client`
-    SELECT id, pfi_number, pfi_type, status, location_name FROM pfis WHERE status <> 'finished'`;
+    SELECT id, pfi_number, pfi_type, status, location_name,
+           starting_qty_litres, evacuation_surplus_litres, operational_loss_litres, sold_qty_litres
+      FROM pfis WHERE status <> 'finished'`;
   return new Map(rows.map((p) => [Number(p.id), {
     id: Number(p.id),
     number: p.pfi_number || "",
@@ -196,6 +199,7 @@ const loadPfis = async () => {
     type: p.pfi_type || "coastal",
     status: p.status,
     location: p.location_name || "",
+    soldOut: isSoldOut(p),
   }]));
 };
 
@@ -314,7 +318,15 @@ const DESK_KINDS = [
 ];
 
 /** Active PFIs that sell from the depot — every type but trucking, whose loads are sold off the truck. */
-const depotSalesPfis = (pfis) => [...pfis.values()].filter((p) => p.status === "active" && p.type !== "trucking");
+/**
+ * The PFIs the daily report and the no-orders alert are about: active depot
+ * PFIs with something left to sell. A sold-out PFI nobody has closed yet has
+ * no sales to report and no orders to raise (the user's rule, 2026-10-19); the
+ * work still waiting on it — payments, tickets, the gate — keeps reminding
+ * until it is done or the PFI is closed.
+ */
+const depotSalesPfis = (pfis) =>
+  [...pfis.values()].filter((p) => p.status === "active" && p.type !== "trucking" && !p.soldOut);
 
 // ─── Building a round ───────────────────────────────────────────────────────
 

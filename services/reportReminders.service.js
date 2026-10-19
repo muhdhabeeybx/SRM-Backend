@@ -69,10 +69,14 @@ const dayLabel = (dateStr) => {
  */
 const outstandingReports = async (dateStr) => {
   const [pfiRows, sheetRows, staffRows, reminderRows] = await Promise.all([
+    // Sold-out PFIs owe no daily report — the scheduled reminders' rule
+    // (workReminders depotSalesPfis), so this list cannot text them by hand.
     client`
       SELECT id, pfi_number, location_id, location_name
         FROM pfis
        WHERE status = 'active' AND pfi_type::text <> 'trucking'
+         AND NOT (starting_qty_litres + evacuation_surplus_litres - operational_loss_litres > 0
+                  AND sold_qty_litres >= starting_qty_litres + evacuation_surplus_litres - operational_loss_litres)
        ORDER BY id DESC`,
     client`
       SELECT id, report_type::text AS role, pfi_number, submitted_by, submitted_by_name,

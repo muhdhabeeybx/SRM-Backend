@@ -261,6 +261,27 @@ describe("Work reminders", () => {
     assert.equal(of(await round(todayAt(16)), financeOnB, "noOrders").length, 0, "not before 18:00");
   });
 
+  test("a sold-out PFI nobody has closed owes no report and no orders; its waiting work still reminds", async () => {
+    const complianceOnB = await person(["it_compliance"], "cmp-b");
+    await client`INSERT INTO pfi_staff (pfi_id, staff_id) VALUES (${pfiB.id}, ${complianceOnB})`;
+    try {
+      // Still selling: chased for the report, asked why there are no orders.
+      assert.equal(of(await round(todayAt(20)), complianceOnB, "report").length, 1, "owes a report while it sells");
+      assert.equal(of(await round(todayAt(18)), financeOnB, "noOrders").length, 1, "asked about orders while it sells");
+
+      // Every litre on an order, still active: neither.
+      await client`UPDATE pfis SET sold_qty_litres = starting_qty_litres WHERE id IN (${pfiA.id}, ${pfiB.id})`;
+      assert.equal(of(await round(todayAt(20)), complianceOnB, "report").length, 0, "no report on a sold-out PFI");
+      assert.equal(of(await round(todayAt(18)), financeOnB, "noOrders").length, 0, "no orders to raise on it");
+      // The work still waiting on a sold-out PFI is real, and keeps reminding.
+      const [desk] = of(await round(todayAt(8)), financeOnA, "desk");
+      assert.ok(desk, "payments waiting on a sold-out PFI are still chased");
+    } finally {
+      await client`UPDATE pfis SET sold_qty_litres = 0 WHERE id IN (${pfiA.id}, ${pfiB.id})`;
+      await client`DELETE FROM pfi_staff WHERE staff_id = ${complianceOnB}`;
+    }
+  });
+
   test("one work text per person per round, sent once an hour", async () => {
     const at = new Date();
     const first = await workReminders.runRound({ trigger: "manual", at, staffIds: [financeOnA] });
