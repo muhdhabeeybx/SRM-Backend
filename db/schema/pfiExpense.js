@@ -111,6 +111,13 @@ const pfiExpenses = pgTable(
       .references(() => deliveryCustomers.id, { onDelete: "set null" }),
     lpgStationId: integer("lpg_station_id")
       .references(() => lpgStations.id, { onDelete: "set null" }),
+    /**
+     * Paid out of that station's or plant's own sales cash (migration 0092).
+     * It still walks the approval chain, but the station pages take it off
+     * what the station has to bank from the day it is raised — and put it
+     * back if it is rejected. Needs exactly one station or plant.
+     */
+    paidFromTakings: boolean("paid_from_takings").default(false).notNull(),
     categoryId: integer("category_id")
       .references(() => expenseCategories.id, { onDelete: "restrict" })
       .notNull(),

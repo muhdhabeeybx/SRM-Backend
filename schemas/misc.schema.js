@@ -594,6 +594,9 @@ const expenseBase = {
   plantIds: z.array(id("Plant")).optional().nullable(),
   lpg_station_ids: z.array(id("Plant")).optional().nullable(),
   lpgStationIds: z.array(id("Plant")).optional().nullable(),
+  /** Paid out of that one station's or plant's own sales cash (migration 0092). */
+  paid_from_takings: z.boolean().optional(),
+  paidFromTakings: z.boolean().optional(),
   vendor: optionalString("Vendor", 255),
   // Set when the requester picked (or saved) an entry from the vendor list;
   // `vendor` above still carries the name — see expense.controller.js.

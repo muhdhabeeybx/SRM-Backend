@@ -2,6 +2,7 @@ const asyncHandler = require("express-async-handler");
 const { pfiExpenseRepo, pfiRepo, staffRepo, notificationRepo, vendorRepo } = require("../../repositories");
 const { client } = require("../../db");
 const chain = require("../../lib/expenseChain");
+const stationEntry = require("../../lib/stationEntry");
 const gl = require("../../lib/glAccounts");
 const {
   notifyExpenseStage, notifyExpenseComment,
@@ -643,6 +644,22 @@ const createExpense = asyncHandler(async (req, res) => {
   const subjects = await resolveSubject(req.body);
 
   /*
+   * Paid out of a station's or plant's own sales cash (0092). It is that
+   * station's money, so it is for one station or plant, never split, and it
+   * is raised by the people who enter that station's sales and expenses
+   * (lib/stationEntry) — or an admin, to correct.
+   */
+  const fromTakings = req.body.paid_from_takings === true || req.body.paidFromTakings === true;
+  if (fromTakings) {
+    const [only] = subjects;
+    if (subjects.length !== 1 || (only.deliveryCustomerId == null && only.lpgStationId == null)) {
+      throw httpErr(400, "An expense paid from takings is for one station or plant");
+    }
+    const why = await stationEntry.takingsExpenseRefusal(req.user, { ...only, pfiId });
+    if (why) throw httpErr(403, why);
+  }
+
+  /*
    * One bill, one share each.
    *
    * The invoice covers all of them, so it is entered once and divided rather
@@ -698,6 +715,7 @@ const createExpense = asyncHandler(async (req, res) => {
     pfi_id: pfiId,
     delivery_customer_id: subject.deliveryCustomerId,
     lpg_station_id: subject.lpgStationId,
+    paid_from_takings: fromTakings,
     category_id: Number(categoryId),
     expense_date: parseDate(req.body.expense_date ?? req.body.expenseDate) || new Date().toISOString(),
     vendor: vendorName,
@@ -869,6 +887,33 @@ const updateExpense = asyncHandler(async (req, res) => {
     data.delivery_customer_id = subject.deliveryCustomerId;
     data.lpg_station_id = subject.lpgStationId;
   }
+
+  /*
+   * Paid from the station's takings (0092), as the row will stand after the
+   * edit: it needs a station or plant, and turning it on is the station's
+   * sales people's to do (lib/stationEntry). Unhooking the station from a
+   * takings expense is refused rather than left pointing at nobody's cash.
+   */
+  const takingsSent = sent(req.body, "paid_from_takings", "paidFromTakings");
+  const fromTakings = takingsSent
+    ? (req.body.paid_from_takings ?? req.body.paidFromTakings) === true
+    : !!existing.paid_from_takings;
+  if (fromTakings) {
+    const station = data.delivery_customer_id !== undefined ? data.delivery_customer_id : existing.delivery_customer_id;
+    const plant = data.lpg_station_id !== undefined ? data.lpg_station_id : existing.lpg_station_id;
+    if (station == null && plant == null) {
+      throw httpErr(400, "An expense paid from takings is for one station or plant");
+    }
+    if (!existing.paid_from_takings) {
+      const why = await stationEntry.takingsExpenseRefusal(req.user, {
+        deliveryCustomerId: station,
+        lpgStationId: plant,
+        pfiId: data.pfi_id !== undefined ? data.pfi_id : existing.pfi_id,
+      });
+      if (why) throw httpErr(403, why);
+    }
+  }
+  if (takingsSent) data.paid_from_takings = fromTakings;
 
   if (req.body.amount !== undefined) {
     const amount = Number(req.body.amount);
