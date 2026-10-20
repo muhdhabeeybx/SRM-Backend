@@ -126,6 +126,38 @@ describe("PFI review gate — raised, then reviewed, then trading", () => {
     assert.ok(acct.pfiIds.map(Number).includes(Number(row.id)), "the account collects for it");
   });
 
+  test("the account assigned at approval covers the depot the PFI is sold from, so its orders quote it", async () => {
+    // PFI 53 at Dangote Refinery: FCMB was assigned at approval but not linked
+    // to the depot, so every order on it quoted another of the depot's accounts.
+    const [{ id: depotId }] = (await db.execute(sql`SELECT id FROM depots ORDER BY id LIMIT 1`)).rows
+      ?? await db.execute(sql`SELECT id FROM depots ORDER BY id LIMIT 1`);
+    const [own] = await db
+      .insert(bankAccounts)
+      .values({ bankName: "FCMB", accountName: `GATE DEPOT ${RUN}`, accountNumber: `9${RUN}`.slice(-10), pfiIds: [] })
+      .returning();
+    try {
+      const raised = await raise({ pfiNumber: `PFI/GATE/D/${RUN}`, pfiType: "coastal", startingQtyLitres: 1000, locationId: depotId });
+      assert.equal(raised.status, 201);
+      const [row] = await db.select().from(pfis).where(eq(pfis.pfiNumber, `PFI/GATE/D/${RUN}`));
+      const res = await request(app)
+        .post(`${API}/${row.id}/activate`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ bankAccountIds: [own.id], officers: { auditOfficerId: audit.id, salesManagerId: finance.id } });
+      assert.equal(res.status, 200);
+
+      const [acct] = await db.select().from(bankAccounts).where(eq(bankAccounts.id, own.id));
+      assert.ok(acct.pfiIds.map(Number).includes(Number(row.id)), "the account collects for it");
+      assert.ok(acct.depotIds.map(Number).includes(Number(depotId)), "and covers the depot it is sold from");
+      assert.ok(acct.pfiAssignedAt[String(row.id)], "stamped with the day it was attached");
+
+      const bankAccountRepo = require("../repositories/bankAccount.repository");
+      const atDepot = await bankAccountRepo.findAll({ depotId, status: "Active" });
+      assert.ok(atDepot.some((a) => Number(a.id) === Number(own.id)), "an order at the depot finds it");
+    } finally {
+      await db.delete(bankAccounts).where(eq(bankAccounts.id, own.id));
+    }
+  });
+
   test("a trucking batch's trucks reach the inventory only when it is approved", async () => {
     const code = `TRK-${RUN}`;
     const res = await raise({

@@ -258,20 +258,48 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
       await tx.insert(pfiStaff).values({ pfiId, staffId }).onConflictDoNothing();
     }
 
-    // Which accounts collect for this batch. Appended, never replaced: an
-    // account already collecting for other PFIs must keep them.
+    /*
+     * Which accounts collect for this batch. Appended, never replaced: an
+     * account already collecting for other PFIs must keep them.
+     *
+     * With the PFI come the depots it is sold from — its own and any it is
+     * lent to — the same reach the Bank Accounts page derives on every save
+     * (depotsForPfis in bankAccount.controller). An order finds the account
+     * it quotes among its depot's accounts (order.service), so an account
+     * given a PFI here and not its depot was never quoted: PFI 53's orders at
+     * Dangote Refinery told customers to pay Keystone while every naira of
+     * theirs arrived in FCMB, the account assigned at activation. And the day
+     * it was attached, as that page stamps it.
+     */
+    const reachRows = await tx.execute(sql`
+      SELECT location_id AS "depotId" FROM pfis WHERE id = ${pfiId} AND location_id IS NOT NULL
+      UNION
+      SELECT depot_id FROM pfi_allowed_locations WHERE pfi_id = ${pfiId}
+    `);
+    const reach = (reachRows.rows ?? reachRows).map((r) => Number(r.depotId)).filter((n) => Number.isInteger(n) && n > 0);
     for (const accountId of bankAccountIds) {
       const [account] = await tx
-        .select({ id: bankAccounts.id, pfiIds: bankAccounts.pfiIds })
+        .select({ id: bankAccounts.id, pfiIds: bankAccounts.pfiIds, depotIds: bankAccounts.depotIds, pfiAssignedAt: bankAccounts.pfiAssignedAt })
         .from(bankAccounts)
         .where(eq(bankAccounts.id, accountId))
         .limit(1);
       if (!account) continue;
       const existing = Array.isArray(account.pfiIds) ? account.pfiIds.map(Number) : [];
-      if (existing.includes(Number(pfiId))) continue;
+      const depotsBefore = Array.isArray(account.depotIds) ? account.depotIds.map(Number).filter((n) => !Number.isNaN(n)) : [];
+      const depotIds = [...new Set([...depotsBefore, ...reach])];
+      const onIt = existing.includes(Number(pfiId));
+      if (onIt && depotIds.length === depotsBefore.length) continue;
+      const stamps = account.pfiAssignedAt && typeof account.pfiAssignedAt === "object" && !Array.isArray(account.pfiAssignedAt)
+        ? account.pfiAssignedAt
+        : {};
       await tx
         .update(bankAccounts)
-        .set({ pfiIds: [...existing, Number(pfiId)], updatedAt: new Date() })
+        .set({
+          pfiIds: onIt ? existing : [...existing, Number(pfiId)],
+          depotIds,
+          pfiAssignedAt: stamps[String(pfiId)] ? stamps : { ...stamps, [String(pfiId)]: new Date().toISOString() },
+          updatedAt: new Date(),
+        })
         .where(eq(bankAccounts.id, accountId));
     }
 
