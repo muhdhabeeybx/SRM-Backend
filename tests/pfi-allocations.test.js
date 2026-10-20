@@ -241,7 +241,11 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(order.expectedTrucks, 2);
 
     const [house] = await db.select().from(customers).where(eq(customers.id, order.customerId));
-    assert.equal(house.houseAccount, "trucking");
+    assert.equal(house.houseAccount, "soroman_trucking");
+    assert.equal(house.name, "SOROMAN TRUCKING");
+    assert.equal(house.companyName, "SOROMAN NIGERIA LIMITED");
+    assert.equal(house.phone, "SOROMAN TRUCKING");
+    assert.equal(order.companyName, `SOROMAN NIGERIA LIMITED (PFI ${SERIAL}B)`);
 
     const loads = await db.select().from(orderTrucks).where(eq(orderTrucks.orderId, order.id));
     assert.equal(loads.length, 2, "the trucks are on the order from the start");

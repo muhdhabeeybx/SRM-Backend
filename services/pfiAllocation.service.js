@@ -82,8 +82,19 @@ const stationOf = (trucks) => (Array.isArray(trucks) ? trucks : []).find((t) => 
 const APPROVER_ROLES = ["admin", "super_admin"];
 const isApprover = (user) => (user?.roles || []).some((r) => APPROVER_ROLES.includes(r));
 
-const HOUSE_PURPOSE = "trucking";
-const HOUSE_CUSTOMER = { name: "Soroman Trucking (internal)", companyName: "Soroman Trucking" };
+/**
+ * The account allocation orders are placed on. Orders approved from 20 Oct
+ * 2026 read SOROMAN TRUCKING; the ones before stay on the first house account
+ * ('trucking', "Soroman Trucking (internal)") exactly as they were placed.
+ */
+const HOUSE_PURPOSE = "soroman_trucking";
+const HOUSE_CUSTOMER = { name: "SOROMAN TRUCKING", companyName: "SOROMAN NIGERIA LIMITED", phone: "SOROMAN TRUCKING" };
+
+/** A truck allocation order's company: "SOROMAN NIGERIA LIMITED (PFI 47D)". */
+const allocationCompany = (pfiNumber) => {
+  const fam = familyOf(pfiNumber);
+  return `${HOUSE_CUSTOMER.companyName} (${fam ? `PFI ${fam.serial}${fam.letter}` : pfiNumber})`;
+};
 
 const isDay = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) && !Number.isNaN(new Date(v).getTime());
 
@@ -372,7 +383,7 @@ async function approve({ allocationId, user, note = "" }) {
       quantity: locked.quantity,
       deliveryType: "delivery",
       deliveryAddress: station ? `${station.customerName} — ${locked.pfiNumber}` : `Trucks for ${locked.pfiNumber}`,
-      companyName: station ? STATION_LOAD.name : locked.pfiNumber,
+      companyName: station ? STATION_LOAD.name : allocationCompany(locked.pfiNumber),
       // A station's litres name no truck. The parent has no loading desk, so
       // the order completes on payment and never waits for one.
       expectedTrucks: station ? null : trucks.length,

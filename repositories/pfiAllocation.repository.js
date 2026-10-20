@@ -212,7 +212,7 @@ const stationById = async (id) => {
  * the company is never texted an invoice for selling to itself. It is unique
  * like any other phone, which is what the unique index on it requires.
  */
-const ensureHouseCustomer = async (purpose, { name, companyName }) => {
+const ensureHouseCustomer = async (purpose, { name, companyName, phone = `HOUSE-${String(purpose).toUpperCase()}` }) => {
   const [existing] = await db.select().from(customers).where(eq(customers.houseAccount, purpose)).limit(1);
   if (existing) return existing;
   await db
@@ -220,7 +220,7 @@ const ensureHouseCustomer = async (purpose, { name, companyName }) => {
     .values({
       name,
       companyName,
-      phone: `HOUSE-${String(purpose).toUpperCase()}`,
+      phone,
       email: "",
       houseAccount: purpose,
       status: "Active",
