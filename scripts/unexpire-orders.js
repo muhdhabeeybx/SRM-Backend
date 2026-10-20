@@ -107,7 +107,10 @@ async function main() {
   // in the future would read as an order nobody has placed yet.
   plan.sort((a, b) => a.id - b.id);
   const now = Date.now();
-  const morning = Math.min(zonedTimeOnDay(new Date(now), 6, 0, 0, 0, EXPIRY_TZ()).getTime(), now - plan.length * 60_000);
+  const morning = Math.min(
+    zonedTimeOnDay(new Date(now), 6, 0, 0, 0, EXPIRY_TZ()).getTime(),
+    Math.floor((now - plan.length * 60_000) / 60_000) * 60_000
+  );
   plan.forEach((o, i) => {
     o.newCreatedAt = hasLapsed(o.createdAt, now) ? new Date(morning + i * 60_000) : null;
   });
