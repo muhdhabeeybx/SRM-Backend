@@ -490,63 +490,53 @@ async function deleteStatement(req, res) {
 }
 
 /**
- * The credits an order's payment may be matched to.
+ * The credits a payment may be matched to.
  *
- * GET /api/bank-statements/lines?bankAccountId=&q=&limit=&orderId=&includeEarlier=
+ * GET /api/bank-statements/lines?bankAccountId=&q=&limit=&orderId=&pfiId=
  *
  * `limit=all` returns every unmatched credit; omitted, the newest 50.
  *
- * With an `orderId`, the search is narrowed to that order's PFI collections
- * window: credits dated before the day the cargo started taking money are
- * held back. One account collects for as many as twenty-six PFIs, so naming
+ * With an `orderId` (the order's PFI) or a `pfiId` (a truck's or a station
+ * load's cargo), only credits from that PFI's collections open date onwards
+ * are offered. One account collects for as many as twenty-six PFIs, so naming
  * the account does not narrow a credit to one cargo, and the pool reaches
- * months back — a credit that paid for a cargo finished in July sits beside
- * today's.
+ * months back — a credit that paid for a cargo finished in July sat beside
+ * today's, and the desk could claim it for the wrong one.
  *
- * It is a default, not a rule. `includeEarlier=true` lifts it, because money
- * does legitimately arrive before a PFI is raised: 275 payments worth ₦10.9bn
- * on PFI/32 were matched to credits dated in the month before its own date.
- * The window is returned either way so the caller can say what it is doing.
+ * It is a rule, not a default: there is no way past it here. Money that truly
+ * arrived before a PFI opened is taken by moving the PFI's Collections open
+ * date back on the PFI itself. On prod, 20 Oct 2026, not one order payment or
+ * truck-sale payment had ever been matched to a credit from before its PFI's
+ * date, so nothing the desk has done relies on seeing them.
  */
 async function searchLines(req, res) {
-  const { bankAccountId, q, limit, orderId, includeEarlier } = req.query;
+  const { bankAccountId, q, limit, orderId, pfiId } = req.query;
   if (!bankAccountId) return fail(res, 400, "bankAccountId is required");
   await guard(req, bankAccountId);
 
-  let window = null;
+  // ::text, because the raw client reads a date column as a JS Date and
+  // String() of that is "Thu Oct 01 …", not a day.
+  let row = null;
   if (orderId) {
-    const [row] = await client`
-      SELECT p.id, p.pfi_number, p.collections_open_from
+    [row] = await client`
+      SELECT p.pfi_number, p.collections_open_from::text AS opens
         FROM orders o JOIN pfis p ON p.id = o.pfi_id
        WHERE o.id = ${Number(orderId)}`;
-    if (row?.collections_open_from) {
-      window = {
-        pfiNumber: row.pfi_number,
-        opensFrom: String(row.collections_open_from).slice(0, 10),
-      };
-    }
+  } else if (pfiId) {
+    [row] = await client`
+      SELECT p.pfi_number, p.collections_open_from::text AS opens
+        FROM pfis p WHERE p.id = ${Number(pfiId)}`;
   }
-
-  const lifted = String(includeEarlier || "") === "true";
-  const notBefore = window && !lifted ? window.opensFrom : null;
+  const window = row?.opens ? { pfiNumber: row.pfi_number, opensFrom: row.opens } : null;
 
   const lines = await repo.searchUnmatched({
     bankAccountId: Number(bankAccountId),
     q,
     limit,
-    notBefore,
+    notBefore: window?.opensFrom ?? null,
   });
 
-  // Counted against the window itself, not against `notBefore`, so the caller
-  // can still say how many it is choosing to show once the window is lifted.
-  const hiddenBefore = window
-    ? await repo.countUnmatchedBefore({
-        bankAccountId: Number(bankAccountId),
-        notBefore: window.opensFrom,
-      })
-    : 0;
-
-  return ok(res, { lines, window: window ? { ...window, hiddenBefore, lifted } : null });
+  return ok(res, { lines, window });
 }
 
 /** POST /api/bank-statements/match */

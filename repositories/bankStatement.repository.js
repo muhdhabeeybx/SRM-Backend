@@ -1090,8 +1090,8 @@ const bankStatementRepo = {
    * `notBefore` is the PFI's collections window: credits older than the day
    * the cargo started taking money are left out, because one account collects
    * for as many as twenty-six PFIs and the account alone does not say which
-   * cargo a credit answers to. Omitted, nothing is filtered — every other
-   * caller of this search is unchanged.
+   * cargo a credit answers to. Omitted (no PFI named, or a PFI with no date),
+   * nothing is filtered.
    *
    * `limit: "all"` returns every unmatched credit on the account. It is what
    * the payment pickers ask for: capped at the newest 50, a busy account such
@@ -1123,19 +1123,6 @@ const bankStatementRepo = {
       ORDER BY txn_date DESC, id DESC
       ${cap == null ? client`` : client`LIMIT ${cap}`}
     `;
-  },
-
-  /** How many unmatched credits the window is holding back, so it can say so. */
-  async countUnmatchedBefore({ bankAccountId, notBefore }) {
-    if (!notBefore) return 0;
-    const [row] = await client`
-      SELECT COUNT(*)::int AS n FROM bank_statement_lines l
-       WHERE bank_account_id = ${bankAccountId}
-         AND status = 'UNMATCHED'
-         AND NOT ${BANK}
-         AND txn_date < ${notBefore}::date
-    `;
-    return Number(row?.n || 0);
   },
 
   /**

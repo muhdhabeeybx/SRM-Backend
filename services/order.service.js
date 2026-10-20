@@ -2148,21 +2148,23 @@ async function confirmOrderPayment({
     const shouldTransition = orderStatus.isLegal(order.status, "Paid");
 
     /**
-     * A credit from before this PFI opened is allowed, and said so on the row.
+     * A credit from before this PFI's collections open date is refused.
      *
-     * The picker hides those by default (see the lines endpoint) and lifting
-     * the window is a deliberate act, so the fact that it was lifted belongs
-     * with the payment rather than only in somebody's memory. Money genuinely
-     * does arrive before a cargo is raised — 275 payments worth ₦10.9bn on
-     * PFI/32 did — which is why this records rather than refuses.
+     * One account collects for many PFIs, so an older credit on it most likely
+     * paid for an earlier cargo; the picker no longer offers one (see the
+     * lines endpoint), and this shuts the same door for anything that skips
+     * the picker. Money that truly came in before the PFI opened is taken by
+     * moving the PFI's Collections open date back first, on the PFI itself.
+     * This used to accept such a credit and note it on the payment; on prod,
+     * 20 Oct 2026, no payment had ever needed that.
      */
-    let paymentNote = note;
     if (order.pfiId && Array.isArray(lineIds) && lineIds.length) {
       // One placeholder per id. Drizzle's sql expands an array into a list of
       // placeholders, so ANY(<array>::int[]) became a record cast to int[] and
       // failed every confirmation on an order with a PFI.
+      // ::text, because a date column comes back as a JS Date otherwise.
       const early = await tx.execute(sql`
-        SELECT l.txn_date, p.collections_open_from, p.pfi_number
+        SELECT l.txn_date::text AS txn_date, p.collections_open_from::text AS opens, p.pfi_number
           FROM bank_statement_lines l
           JOIN pfis p ON p.id = ${order.pfiId}
          WHERE l.id IN (${sql.join(lineIds.map((id) => sql`${Number(id)}`), sql`, `)})
@@ -2170,10 +2172,11 @@ async function confirmOrderPayment({
            AND l.txn_date < p.collections_open_from`);
       const rows = early?.rows ?? early ?? [];
       if (rows.length > 0) {
-        const opened = String(rows[0].collections_open_from).slice(0, 10);
-        const dates = rows.map((r) => String(r.txn_date).slice(0, 10)).join(", ");
-        const flag = `Matched outside the PFI window (${rows[0].pfi_number} opened ${opened}): ${rows.length} credit${rows.length === 1 ? "" : "s"} dated ${dates}`;
-        paymentNote = paymentNote ? `${paymentNote} — ${flag}` : flag;
+        const dates = rows.map((r) => r.txn_date).join(", ");
+        throw httpError(
+          409,
+          `${rows.length === 1 ? "That credit is" : "Those credits are"} dated ${dates}, before ${rows[0].pfi_number}'s collections opened on ${rows[0].opens}. If the money is really for this PFI, move its Collections open date back first.`,
+        );
       }
     }
 
@@ -2186,7 +2189,7 @@ async function confirmOrderPayment({
     if (withTickets) await gantryTickets().checkWithPayment(tx, { orderId: order.id, ticketIds });
 
     const { payments, summary } = await orderPaymentService.recordFromStatementLines(
-      { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note: paymentNote, scopeUser },
+      { orderId, bankAccountId, lineIds, staffId: actor?.staffId ?? null, note, scopeUser },
       tx,
     );
 
