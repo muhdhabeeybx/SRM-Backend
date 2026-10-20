@@ -111,8 +111,9 @@ const orderContext = async (orderId) => {
 };
 
 /** Tell one desk on the order's PFI. */
-const toDesk = async (type, ctx, roles, extra = {}) => {
-  const to = await officersFor({ pfiId: ctx.pfiId, depotId: ctx.depotId, roles });
+const toDesk = async (type, ctx, roles, extra = {}, { adminsLast = true } = {}) => {
+  const to = await officersFor({ pfiId: ctx.pfiId, depotId: ctx.depotId, roles, adminsLast });
+  if (!to.length) return;
   await notify(type, { to, data: { ...ctx.data, ...extra } });
 };
 
@@ -144,8 +145,9 @@ const orderArrived = (orderId, status, { reason, ticketsWithPayment = false } = 
       await toDesk("desk.order_to_ticket", ctx, DESK_ROLES.tickets);
     }
     // Not when its tickets were picked with the payment: it is already done.
+    // Stock officers only, never the admins (owner, 20 Oct 2026).
     if (status === "Released" && !ticketsWithPayment && ctx.pfiType === "gantry" && (await gantryRegister.isOn(ctx.pfiId))) {
-      await toDesk("desk.order_to_stock", ctx, DESK_ROLES.stock);
+      await toDesk("desk.order_to_stock", ctx, DESK_ROLES.stock, {}, { adminsLast: false });
     }
     if (status === "Completed" && hasDesks(ctx)) {
       const [{ n = 0 } = {}] = rowsOf(

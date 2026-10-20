@@ -19,16 +19,22 @@ const { staff, pfiStaff, depotStaff } = require("../db/schema");
  *      scope uses, lib/scopeFilter.js);
  *   2. the admins, so somebody notices the PFI has nobody on that desk.
  *
+ * A desk with `adminsLast: false` never reaches the admins: its last resort is
+ * every holder of the role, wherever they sit, and when nobody holds the role
+ * nobody is told (an empty list). The stock desk is one — the owner's rule of
+ * 20 Oct 2026, "only to stock officer".
+ *
  * Suspended and deactivated accounts never count, at any tier.
  *
  * @param {object} opts
  * @param {number|null} opts.pfiId
  * @param {number|null} [opts.depotId]
  * @param {string[]} opts.roles     the desk — any one of these roles holds it
+ * @param {boolean} [opts.adminsLast=true] whether the admins stand in for an empty desk
  * @returns {Promise<Array<object>>} recipient specs for notify()'s `to`
  */
-const officersFor = async ({ pfiId, depotId = null, roles }) => {
-  const admins = [{ roles: ["admin", "super_admin"] }];
+const officersFor = async ({ pfiId, depotId = null, roles, adminsLast = true }) => {
+  const admins = adminsLast ? [{ roles: ["admin", "super_admin"] }] : [];
   if (!roles?.length) return admins;
 
   const holders = await db
@@ -63,7 +69,7 @@ const officersFor = async ({ pfiId, depotId = null, roles }) => {
   });
   if (companyWide.length) return companyWide.map((staffId) => ({ staffId }));
 
-  return admins;
+  return adminsLast ? admins : ids.map((staffId) => ({ staffId }));
 };
 
 /** The desks, by the roles that hold them. One list, so a desk is named once. */

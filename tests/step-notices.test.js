@@ -132,6 +132,18 @@ describe("Step notices", () => {
     ]);
   });
 
+  test("a desk kept from the admins falls to every holder of the role, or to nobody", async () => {
+    assert.deepEqual(await officersFor({ pfiId: pfiA.id, roles: [`nobody-${RUN}`], adminsLast: false }), []);
+    await client`UPDATE staff SET suspended = true WHERE id = ${companyWide}`;
+    try {
+      // Nobody on the gantry PFI and nobody company-wide: the officers on other PFIs, not the admins.
+      assert.deepEqual(await officersFor({ pfiId: gantry.id, roles: [ROLE] }), [{ roles: ["admin", "super_admin"] }]);
+      assert.deepEqual(ids(await officersFor({ pfiId: gantry.id, roles: [ROLE], adminsLast: false })), [onA, onB].sort());
+    } finally {
+      await client`UPDATE staff SET suspended = false WHERE id = ${companyWide}`;
+    }
+  });
+
   test("a suspended officer is not the desk", async () => {
     await client`UPDATE staff SET suspended = true WHERE id = ${onA}`;
     try {
