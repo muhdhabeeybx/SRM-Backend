@@ -4,6 +4,7 @@ const { deliveryInventoryRepo, pfiRepo, truckRepo } = require("../../repositorie
 const { lagosToday, localDateStr } = require("../../lib/zonedDay");
 const { pfiIdForCode, codeOf } = require("../../lib/batchPfi");
 const allocationTrucks = require("../../services/allocationTrucks.service");
+const { tripAgoFor } = require("../../lib/tripAgo");
 
 const staffActor = (req) => ({ type: "staff", staffId: req.user?.id ?? null });
 
@@ -22,7 +23,7 @@ const staffActor = (req) => ({ type: "staff", staffId: req.user?.id ?? null });
  * the client's canAccessRoute — "only these people" has to mean these people.
  */
 const COST_FIELDS = [
-  "agoLitres", "agoPrice", "agoValue",
+  "agoLitres", "agoPrice", "agoValue", "agoFromLedger",
   "feedingAllowance", "feedingInExpenses", "totalExpenses", "costPerLitre",
   "productPrice", "landingCost",
   "margin", "marginValue",
@@ -166,8 +167,15 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
   const { ids, clearBlank, ...values } = req.body;
 
   const actor = req.user?.name || req.user?.email || null;
-  const rows = await deliveryInventoryRepo.setCosts(ids, values, { clearBlank, actor });
+  const { rows, agoKept } = await deliveryInventoryRepo.setCosts(ids, values, { clearBlank, actor });
 
+  // Only AGO litres were sent, and every truck has its AGO on the ledger.
+  if (!rows.length && agoKept) {
+    return res.status(409).json({
+      success: false,
+      message: `AGO litres on ${agoKept === 1 ? "this truck come" : `these ${agoKept} trucks come`} from the AGO Stock Ledger. Record a top-up or retrieval there.`,
+    });
+  }
   if (!rows.length) {
     return res.status(400).json({
       success: false,
@@ -182,14 +190,17 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
     !clearBlank &&
     ["agoLitres", "agoPrice", "feedingAllowance", "productPrice"].every((k) => values[k] == null);
 
+  const said = markOnly
+    ? values.feedingInExpenses
+      ? `Feeding on ${trucks} marked as paid in Expenses`
+      : `Feeding on ${trucks} added back as a trip cost`
+    : `Costs applied to ${trucks}`;
   res.json({
     success: true,
-    message: markOnly
-      ? values.feedingInExpenses
-        ? `Feeding on ${trucks} marked as paid in Expenses`
-        : `Feeding on ${trucks} added back as a trip cost`
-      : `Costs applied to ${trucks}`,
-    data: { inventory: rows, updated: rows.length },
+    message: agoKept
+      ? `${said}. AGO litres on ${agoKept} of them come from the AGO Stock Ledger and were left as they are.`
+      : said,
+    data: { inventory: rows, updated: rows.length, agoKept },
   });
 });
 
@@ -205,6 +216,26 @@ const updateDeliveryInventory = asyncHandler(async (req, res) => {
    * edit form sends back whatever PFI the row had — it has no control for it).
    */
   const data = { ...req.body };
+
+  /*
+   * A trip on the AGO stock ledger takes its AGO litres from there. The same
+   * figure sent back (a form returning the row as it read it) is dropped
+   * rather than written over the typed one; a different figure is refused.
+   */
+  if (data.agoLitres !== undefined) {
+    const ledger = (await tripAgoFor([record.id])).get(Number(record.id));
+    if (ledger !== undefined) {
+      if (data.agoLitres !== null && Math.abs(Number(data.agoLitres) - ledger) < 0.005) {
+        delete data.agoLitres;
+      } else {
+        return res.status(409).json({
+          success: false,
+          message: `AGO litres on this truck come from the AGO Stock Ledger (${ledger.toLocaleString("en-NG")} L). Record a top-up or retrieval there.`,
+        });
+      }
+    }
+  }
+
   const nextCode = data.allocationCode !== undefined ? data.allocationCode : record.allocationCode;
   const codeChanged = data.allocationCode !== undefined && codeOf(data.allocationCode) !== codeOf(record.allocationCode);
   const pfiAfter = data.pfiId !== undefined ? data.pfiId : record.pfiId;

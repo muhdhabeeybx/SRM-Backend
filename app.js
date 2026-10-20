@@ -125,6 +125,8 @@ app.use("/api/order-expiry", require("./routes/administration/orderExpiry.route"
 
 // ERP modules
 app.use("/api/fleet", require("./routes/administration/fleet.route"));
+// The AGO (diesel) stock ledger — 0093.
+app.use("/api/ago-stock", require("./routes/administration/agoStock.route"));
 app.use("/api/daily-reports", require("./routes/administration/dailyReport.route"));
 app.use("/api/incidents", require("./routes/administration/incident.route"));
 app.use("/api/offline-sales", require("./routes/administration/offlineSale.route"));

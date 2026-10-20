@@ -8,6 +8,7 @@ const {
 } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { tripCosts } = require("../lib/tripCosts");
+const { tripAgoFor } = require("../lib/tripAgo");
 
 const findById = async (id) => {
   const [row] = await db
@@ -27,6 +28,27 @@ const findById = async (id) => {
  * object would mean each of them reaching in for it differently.
  */
 const withCosts = (row) => (row ? { ...row, ...tripCosts(row) } : row);
+
+/**
+ * A trip given its AGO on the AGO stock ledger reads the ledger's figure —
+ * given + top-ups − retrieved — in place of the litres typed on it, and says
+ * so (`agoFromLedger`), so Delivery Costing can lock the box. The typed figure
+ * stays in its column untouched; a trip whose ledger entries are all deleted
+ * reads it again. Done before the costs, so the AGO value, cost per litre and
+ * margin are all worked from the ledger's litres. See migration 0093.
+ */
+const withLedgerAgo = async (rows) => {
+  const nets = await tripAgoFor(rows.filter(Boolean).map((r) => r.id));
+  return rows.map((r) => {
+    if (!r) return r;
+    const net = nets.get(Number(r.id));
+    return net === undefined
+      ? { ...r, agoFromLedger: false }
+      : { ...r, agoLitres: net.toFixed(2), agoFromLedger: true };
+  });
+};
+
+const costedRows = async (rows) => (await withLedgerAgo(rows)).map(withCosts);
 
 const findAll = async ({
   search,
@@ -91,7 +113,7 @@ const findAll = async ({
       .where(whereClause),
   ]);
 
-  const costed = rows.map(withCosts);
+  const costed = await costedRows(rows);
   return {
     loadings: costed,
     inventory: costed,
@@ -116,7 +138,10 @@ const update = async (id, data, tx = db) => {
     .set({ ...data, updatedAt: new Date() })
     .where(eq(deliveryInventory.id, id))
     .returning();
-  return withCosts(row) || null;
+  if (!row) return null;
+  // Inside an allocation's transaction the ledger is read by the caller's
+  // next list instead: a second connection mid-transaction is not worth it.
+  return tx === db ? (await costedRows([row]))[0] : withCosts(row);
 };
 
 const deleteById = async (id, tx = db) => {
@@ -141,7 +166,7 @@ const deleteById = async (id, tx = db) => {
  */
 const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) => {
   const list = [...new Set((ids || []).map(Number).filter(Boolean))];
-  if (!list.length) return [];
+  if (!list.length) return { rows: [], agoKept: 0 };
 
   const patch = {};
   for (const key of ["agoLitres", "agoPrice", "feedingAllowance", "productPrice"]) {
@@ -158,18 +183,29 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
   if (typeof values.feedingInExpenses === "boolean") {
     patch.feedingInExpenses = values.feedingInExpenses;
   }
-  if (!Object.keys(patch).length) return [];
+  if (!Object.keys(patch).length) return { rows: [], agoKept: 0 };
 
-  patch.costedAt = new Date();
-  if (actor) patch.costedBy = actor;
+  /**
+   * A trip on the AGO stock ledger keeps the ledger's litres. Its other
+   * figures (price, feeding, product price) still apply; only the litres are
+   * left, and the caller is told how many — so a bulk pass or an import
+   * cannot put a second, different AGO figure beside the ledger's.
+   */
+  const owned = "agoLitres" in patch ? await tripAgoFor(list) : new Map();
+  const free = list.filter((id) => !owned.has(id));
+  const kept = list.filter((id) => owned.has(id));
+  const { agoLitres: _litres, ...rest } = patch;
 
-  const rows = await db
-    .update(deliveryInventory)
-    .set(patch)
-    .where(inArray(deliveryInventory.id, list))
-    .returning();
+  const stamp = { costedAt: new Date(), ...(actor ? { costedBy: actor } : {}) };
+  const write = (ids, set) =>
+    db.update(deliveryInventory).set({ ...set, ...stamp }).where(inArray(deliveryInventory.id, ids)).returning();
 
-  return rows.map(withCosts);
+  const rows = [
+    ...(free.length ? await write(free, patch) : []),
+    ...(kept.length && Object.keys(rest).length ? await write(kept, rest) : []),
+  ];
+
+  return { rows: await costedRows(rows), agoKept: kept.length };
 };
 
 module.exports = {
