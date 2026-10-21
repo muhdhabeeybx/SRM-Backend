@@ -230,6 +230,23 @@ const ensureHouseCustomer = async (purpose, { name, companyName, phone = `HOUSE-
   return row;
 };
 
+/**
+ * A withdrawn request, gone without a trace: its lines in the activity log,
+ * the notices it raised (their delivery rows go with them), then the request.
+ */
+const deleteWithTraces = async (id, tx = db) => {
+  const key = String(Number(id));
+  await tx.execute(sql`
+    DELETE FROM audit_logs
+     WHERE action LIKE 'pfi.trucks_allocation_%'
+       AND metadata->>'allocationId' = ${key}`);
+  await tx.execute(sql`
+    DELETE FROM notifications
+     WHERE type IN ('staff.pfi_allocation_raised', 'staff.pfi_allocation_raised_sms', 'staff.pfi_allocation_decided')
+       AND dedupe_key LIKE ${`%|staff.pfi_allocation_%:${key}`}`);
+  await tx.delete(pfiTruckAllocations).where(eq(pfiTruckAllocations.id, Number(id)));
+};
+
 /** The trucking PFI, inserted in the approval's transaction. */
 const insertPfi = async (values, tx) => {
   const [row] = await tx.insert(pfis).values(values).returning();
@@ -252,4 +269,5 @@ module.exports = {
   stationById,
   ensureHouseCustomer,
   insertPfi,
+  deleteWithTraces,
 };

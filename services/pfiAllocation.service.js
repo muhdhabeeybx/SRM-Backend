@@ -494,17 +494,38 @@ async function reject({ allocationId, user, note }) {
   return allocationRepo.findById(allocationId);
 }
 
-async function withdraw({ allocationId, user, note = "" }) {
+/**
+ * Withdrawn means deleted (the user, 2026-10-21). A request taken back before
+ * anybody decided it leaves nothing behind: not the request, not its lines in
+ * the activity log, not the "waiting for approval" notices. Its letter is free
+ * again at once. Texts already sent stay in the message ledger — that is what
+ * they cost, not a record of the request.
+ *
+ * Only a pending request can be withdrawn; an approved or rejected one is a
+ * decision, and stays.
+ */
+async function withdraw({ allocationId, user }) {
   const current = await allocationRepo.findById(allocationId);
   if (!current) throw httpError(404, "Allocation not found");
   if (Number(current.raisedBy) !== Number(user?.id) && !isApprover(user)) {
     throw httpError(403, "Only whoever raised it, or an admin, can withdraw it");
   }
-  await close(allocationId, "withdrawn", user, String(note || "").trim());
-  return allocationRepo.findById(allocationId);
+  return db.transaction(async (tx) => {
+    const locked = await allocationRepo.lockById(allocationId, tx);
+    if (!locked) throw httpError(404, "Allocation not found");
+    if (locked.status !== "pending") throw httpError(409, `This allocation was already ${locked.status}`);
+    // An approval that placed its order and then failed leaves the request
+    // pending with a real order behind it. Deleting it would strand that order.
+    const placed = await orderRepo.findByIdempotencyKey(orderKey(locked.id), tx);
+    if (placed) {
+      throw httpError(409, `Order ${placed.orderNumber} was already placed for this allocation — approve it again to finish.`);
+    }
+    await allocationRepo.deleteWithTraces(locked.id, tx);
+    return { id: locked.id, pfiNumber: locked.pfiNumber, parentPfiId: locked.parentPfiId };
+  });
 }
 
-/** Refuse or withdraw — the two ways a request ends without making anything. */
+/** Refuse a request — it ends without making anything, and stays on record. */
 async function close(allocationId, status, user, note) {
   await db.transaction(async (tx) => {
     const locked = await allocationRepo.lockById(allocationId, tx);

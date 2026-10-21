@@ -447,16 +447,58 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal((await parentRow()).soldQtyLitres, 78000);
   });
 
-  test("whoever raised it can withdraw it; a decided one stays decided", async () => {
+  test("withdrawn means deleted: no request, no log lines, no notices; a decided one stays", async () => {
     const raised = await as(desk).post(`${API}/${parent.id}/allocations`, raiseBody({
       trucks: [{ truckId: truckB.id, loadedQty: 10000 }],
     }));
-    const res = await as(desk).post(`${API}/allocations/${raised.body.data.allocation.id}/withdraw`);
-    assert.equal(res.status, 200);
-    assert.equal(res.body.data.allocation.status, "withdrawn");
+    const id = raised.body.data.allocation.id;
+    const letter = raised.body.data.allocation.suffix;
+    // What the raise left behind, so its removal is a real check.
+    const who = raised.body.data.allocation.raisedBy;
+    await db.execute(sql`
+      INSERT INTO notifications (recipient_type, staff_id, type, category, title, body, dedupe_key)
+      VALUES ('staff', ${who}, 'staff.pfi_allocation_raised', 'operations', 'waiting', 'waiting',
+              ${`staff:${who}|staff.pfi_allocation_raised:${id}`})`);
+    const rows = (r) => r.rows ?? r;
+    const traces = async () => {
+      const [{ logs }] = rows(await db.execute(sql`
+        SELECT count(*)::int AS logs FROM audit_logs
+         WHERE action LIKE 'pfi.trucks_allocation_%' AND metadata->>'allocationId' = ${String(id)}`));
+      const [{ notes }] = rows(await db.execute(sql`
+        SELECT count(*)::int AS notes FROM notifications WHERE dedupe_key LIKE ${`%|staff.pfi_allocation_%:${id}`}`));
+      return { logs, notes };
+    };
+    // The raise's own notices go out in the background: let them land first,
+    // as they would long before anybody could press Withdraw.
+    let before = await traces();
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      const now = await traces();
+      if (now.notes === before.notes && now.notes > 1) break;
+      before = now;
+    }
+    assert.equal(before.logs, 1, "the raise is in the activity log");
+    assert.ok(before.notes > 1, "and its notices went out");
+
+    const res = await as(desk).post(`${API}/allocations/${id}/withdraw`);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.match(res.body.message, /withdrawn and deleted/);
+
+    const [row] = await db.select().from(pfiTruckAllocations).where(eq(pfiTruckAllocations.id, id));
+    assert.equal(row, undefined, "the request is gone");
+    assert.deepEqual(await traces(), { logs: 0, notes: 0 }, "and every trace of it");
+
+    const list = await as(desk).get(`${API}/${parent.id}/allocations`);
+    assert.ok(!list.body.data.allocations.some((a) => a.id === id), "nothing on the PFI's panel");
+    assert.equal(list.body.data.form.next.letter, letter, "its letter is free again");
+
+    const twice = await as(desk).post(`${API}/allocations/${id}/withdraw`);
+    assert.equal(twice.status, 404);
 
     const late = await as(admin).post(`${API}/allocations/${second.id}/approve`);
     assert.equal(late.status, 409, "a rejected request cannot be approved");
+    const notMine = await as(desk).post(`${API}/allocations/${second.id}/withdraw`);
+    assert.equal(notMine.status, 409, "a rejected request cannot be withdrawn — it stays on record");
   });
 
   test("the queue lists what is waiting, across cargoes", async () => {

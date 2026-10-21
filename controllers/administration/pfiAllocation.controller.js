@@ -58,13 +58,10 @@ const rejectAllocation = asyncHandler(async (req, res) => {
   res.json({ success: true, message: `${allocation.pfiNumber} rejected`, data: { allocation } });
 });
 
+/** Withdrawn means deleted: the request and every trace of it are removed. */
 const withdrawAllocation = asyncHandler(async (req, res) => {
-  const allocation = await allocations.withdraw({
-    allocationId: req.params.allocationId,
-    user: req.user,
-    note: req.body?.note,
-  });
-  res.json({ success: true, message: `${allocation.pfiNumber} withdrawn`, data: { allocation } });
+  const gone = await allocations.withdraw({ allocationId: req.params.allocationId, user: req.user });
+  res.json({ success: true, message: `${gone.pfiNumber} withdrawn and deleted`, data: { deleted: gone } });
 });
 
 module.exports = {
