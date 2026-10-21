@@ -69,6 +69,12 @@ const fleetTrucks = pgTable(
     passportPhoto: text("passport_photo").default(""),
     truckStatus: varchar("truck_status", { length: 500 }).default(""),
     isActive: boolean("is_active").default(true).notNull(),
+    /**
+     * Hired, not ours (0094). Carries loads like any truck, but stays off our
+     * Fixed Assets and papers watchlist, and its trips are costed as haulage.
+     */
+    isThirdParty: boolean("is_third_party").default(false).notNull(),
+    ownerName: varchar("owner_name", { length: 255 }).default("").notNull(),
     // A JSON array of {date, description}. Stored as text and parsed
   // defensively — malformed JSON yields an empty list rather than a crash.
   incidents: text("incidents").default("[]"),

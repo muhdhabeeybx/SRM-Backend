@@ -63,6 +63,12 @@ const deliveryInventory = pgTable(
      * paid expense carries it, and adding both counted it twice.
      */
     feedingInExpenses: boolean("feeding_in_expenses").default(false).notNull(),
+    /**
+     * What a third-party truck's owner charges for the trip (0094). On such a
+     * trip the AGO above is sold to the owner, not burnt by us, and the owner
+     * is paid haulage − AGO. Null on our own trucks.
+     */
+    haulageAmount: decimal("haulage_amount", { precision: 14, scale: 2 }),
     /** What the product cost US per litre — not the selling rate above. */
     productPrice: decimal("product_price", { precision: 14, scale: 2 }),
     costedAt: timestamp("costed_at", { withTimezone: true }),

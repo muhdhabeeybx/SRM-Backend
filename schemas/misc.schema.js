@@ -161,6 +161,8 @@ const inventoryBase = {
   agoPrice: money("AGO price").nullish(),
   feedingAllowance: money("Feeding allowance").nullish(),
   productPrice: money("Product price").nullish(),
+  /** A third-party truck's haulage for the trip (0094). */
+  haulageAmount: money("Haulage").nullish(),
 };
 const createInventory = z.object(inventoryBase).partial();
 const updateInventory = z.object(inventoryBase).partial();
@@ -180,6 +182,8 @@ const bulkCostInventory = z.object({
   agoPrice: money("AGO price").nullish(),
   feedingAllowance: money("Feeding allowance").nullish(),
   productPrice: money("Product price").nullish(),
+  /** A third-party truck's haulage — written to those trucks only. */
+  haulageAmount: money("Haulage").nullish(),
   /** Feeding already paid through Expenses — kept, but not added again. Absent leaves it. */
   feedingInExpenses: z.boolean().optional(),
   /** Without this, a blank field means "leave alone" rather than "clear". */

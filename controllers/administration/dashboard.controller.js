@@ -284,12 +284,13 @@ const getOverview = asyncHandler(async (req, res) => {
       // soft FK is null on every one of the 7,519 rows in the ledger, so a
       // join through it counts nothing. The UNION keeps one row per truck,
       // however many loads it carries across concurrent orders.
+      // Our own fleet: a hired truck (0094) is not ours to keep busy or mend.
       const [total, maintenance, inTransit] = await Promise.all([
-        db.select({ c: count() }).from(trucks).where(eq(trucks.isActive, true)),
+        db.select({ c: count() }).from(trucks).where(and(eq(trucks.isActive, true), eq(trucks.isThirdParty, false))),
         db
           .select({ c: count() })
           .from(trucks)
-          .where(and(eq(trucks.isActive, true), NEEDS_ATTENTION)),
+          .where(and(eq(trucks.isActive, true), eq(trucks.isThirdParty, false), NEEDS_ATTENTION)),
         // Working on an order load, or out on a truck sale. The two overlap
         // heavily — a trucking PFI's truck-sale record usually sits on the
         // same vehicle's order load — so they are unioned, not added.
@@ -299,7 +300,7 @@ const getOverview = asyncHandler(async (req, res) => {
               FROM order_trucks ot
               JOIN orders o ON o.id = ot.order_id
               JOIN fleet_trucks t ON ${normalisedPlate(sql`t.plate_number`)} = ${normalisedPlate(sql`ot.truck_number`)}
-             WHERE t.is_active
+             WHERE t.is_active AND NOT t.is_third_party
                AND ot.status IN ${sql.raw(`('${TRUCK_WORKING_STATUSES.join("','")}')`)}
                AND o.status NOT IN ${sql.raw(`('${ORDER_FINISHED_STATUSES.join("','")}')`)}
                AND COALESCE(ot.security_exited_at, ot.loaded_at, ot.security_entered_at, ot.created_at)
@@ -309,7 +310,7 @@ const getOverview = asyncHandler(async (req, res) => {
               FROM delivery_inventory d
               JOIN fleet_trucks t
                 ON t.id = d.truck_id OR ${normalisedPlate(sql`t.plate_number`)} = ${normalisedPlate(sql`d.truck_number`)}
-             WHERE t.is_active
+             WHERE t.is_active AND NOT t.is_third_party
                AND d.loading_status = 'loaded'
                AND d.created_at > now() - (${TRUCK_SALE_LIVE_DAYS} * interval '1 day')
                AND NOT EXISTS (

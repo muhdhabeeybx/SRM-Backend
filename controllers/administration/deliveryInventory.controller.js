@@ -26,6 +26,7 @@ const COST_FIELDS = [
   "agoLitres", "agoPrice", "agoValue", "agoFromLedger",
   "feedingAllowance", "feedingInExpenses", "totalExpenses", "costPerLitre",
   "productPrice", "landingCost",
+  "haulageAmount", "haulageBalance",
   "margin", "marginValue",
   "costed", "missing", "costedAt", "costedBy",
 ];
@@ -167,8 +168,15 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
   const { ids, clearBlank, ...values } = req.body;
 
   const actor = req.user?.name || req.user?.email || null;
-  const { rows, agoKept } = await deliveryInventoryRepo.setCosts(ids, values, { clearBlank, actor });
+  const { rows, agoKept, haulageSkipped } = await deliveryInventoryRepo.setCosts(ids, values, { clearBlank, actor });
 
+  // Only haulage was sent, and none of these trucks is a third party's.
+  if (!rows.length && haulageSkipped) {
+    return res.status(409).json({
+      success: false,
+      message: "Haulage is entered on third-party trucks only, and none of these is one.",
+    });
+  }
   // Only AGO litres were sent, and every truck has its AGO on the ledger.
   if (!rows.length && agoKept) {
     return res.status(409).json({
@@ -188,19 +196,23 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
   const markOnly =
     typeof values.feedingInExpenses === "boolean" &&
     !clearBlank &&
-    ["agoLitres", "agoPrice", "feedingAllowance", "productPrice"].every((k) => values[k] == null);
+    ["agoLitres", "agoPrice", "feedingAllowance", "productPrice", "haulageAmount"].every((k) => values[k] == null);
 
   const said = markOnly
     ? values.feedingInExpenses
       ? `Feeding on ${trucks} marked as paid in Expenses`
       : `Feeding on ${trucks} added back as a trip cost`
     : `Costs applied to ${trucks}`;
+  const notes = [
+    agoKept ? `AGO litres on ${agoKept} of them come from the AGO Stock Ledger and were left as they are.` : "",
+    haulageSkipped && values.haulageAmount != null
+      ? `Haulage went on the third-party trucks only — ${haulageSkipped} of ours left without it.`
+      : "",
+  ].filter(Boolean);
   res.json({
     success: true,
-    message: agoKept
-      ? `${said}. AGO litres on ${agoKept} of them come from the AGO Stock Ledger and were left as they are.`
-      : said,
-    data: { inventory: rows, updated: rows.length, agoKept },
+    message: notes.length ? `${said}. ${notes.join(" ")}` : said,
+    data: { inventory: rows, updated: rows.length, agoKept, haulageSkipped },
   });
 });
 

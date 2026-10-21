@@ -52,6 +52,7 @@ async function list({ today = lagosToday() } = {}) {
     SELECT t.id, t.plate_number, t.truck_make, t.model, t.year
       FROM fleet_trucks t
      WHERE t.is_active
+       AND NOT t.is_third_party
        AND NOT EXISTS (SELECT 1 FROM fixed_assets a WHERE a.fleet_truck_id = t.id AND a.deleted_at IS NULL)
      ORDER BY t.plate_number`;
 

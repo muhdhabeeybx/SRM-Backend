@@ -61,3 +61,61 @@ describe("tripCosts", () => {
     assert.equal(blank.costed, false);
   });
 });
+
+/**
+ * A third-party truck (0094): its owner charges haulage and buys AGO from us
+ * out of it. ₦3,000,000 haulage, 1,150 L of AGO at ₦1,700 = ₦1,955,000, so
+ * the owner is paid ₦1,045,000 and the trip's carriage is the ₦3,000,000.
+ */
+describe("tripCosts on a third-party truck", () => {
+  const hired = (over = {}) => truck({ truckThirdParty: true, haulageAmount: "3000000", feedingAllowance: null, ...over });
+
+  test("the owner is paid haulage less the AGO they bought", () => {
+    const c = tripCosts(hired());
+    assert.equal(c.thirdParty, true);
+    assert.equal(c.haulageAmount, 3_000_000);
+    assert.equal(c.agoValue, 1_955_000);
+    assert.equal(c.haulageBalance, 1_045_000);
+  });
+
+  test("the carriage is the whole haulage — the AGO is neither added nor taken off", () => {
+    const c = tripCosts(hired());
+    assert.equal(c.totalExpenses, 3_000_000);
+    assert.equal(c.costPerLitre, 60);
+    assert.equal(c.landingCost, 1360);
+    assert.equal(c.margin, 40);
+  });
+
+  test("no AGO given: the owner gets the whole haulage", () => {
+    const c = tripCosts(hired({ agoLitres: null, agoPrice: null }));
+    assert.equal(c.haulageBalance, 3_000_000);
+    assert.equal(c.totalExpenses, 3_000_000);
+  });
+
+  test("AGO given at no price yet: what the owner is owed is unknown, not the whole haulage", () => {
+    const c = tripCosts(hired({ agoPrice: null }));
+    assert.equal(c.haulageBalance, null);
+    assert.equal(c.totalExpenses, 3_000_000);
+  });
+
+  test("a hired truck with no haulage yet is uncosted carriage, not diesel we burnt", () => {
+    const c = tripCosts(hired({ haulageAmount: null }));
+    assert.equal(c.thirdParty, true);
+    assert.equal(c.haulageBalance, null);
+    assert.equal(c.totalExpenses, null);
+    assert.equal(c.costPerLitre, null);
+  });
+
+  test("feeding we paid is still added on top of the haulage", () => {
+    const c = tripCosts(hired({ feedingAllowance: "50000" }));
+    assert.equal(c.totalExpenses, 3_050_000);
+  });
+
+  test("our own truck is costed exactly as before", () => {
+    const c = tripCosts(truck());
+    assert.equal(c.thirdParty, false);
+    assert.equal(c.haulageAmount, null);
+    assert.equal(c.haulageBalance, null);
+    assert.equal(c.totalExpenses, 2_005_000);
+  });
+});

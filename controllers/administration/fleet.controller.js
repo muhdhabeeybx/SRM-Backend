@@ -24,6 +24,16 @@ const createFleetTruck = asyncHandler(async (req, res) => {
   sendServiceResult(res, result, { successStatus: 201, message: "Fleet truck created" });
 });
 
+/** POST /api/fleet/third-party — a hired truck, or the one already on the register. */
+const addThirdPartyTruck = asyncHandler(async (req, res) => {
+  const result = await fleetService.addThirdPartyTruck(req.body, { actor: staffActor(req) });
+  const message = !result.success ? undefined
+    : !result.existed ? `${result.truck.plateNumber} added to the fleet as a third-party truck`
+      : result.truck.isThirdParty ? `${result.truck.plateNumber} is already on the fleet — picked it`
+        : `${result.truck.plateNumber} is one of our own trucks — picked it`;
+  sendServiceResult(res, result, { successStatus: result.existed ? 200 : 201, message });
+});
+
 const updateFleetTruck = asyncHandler(async (req, res) => {
   const result = await fleetService.updateTruck(req.params.id, req.body, { actor: staffActor(req) });
   sendServiceResult(res, result, { message: "Fleet truck updated" });
@@ -154,6 +164,7 @@ module.exports = {
   getFleetTrucks,
   getFleetTruckById,
   createFleetTruck,
+  addThirdPartyTruck,
   updateFleetTruck,
   getComplianceWatchlist,
   recordLedgerEntry,

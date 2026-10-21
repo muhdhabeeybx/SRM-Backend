@@ -87,10 +87,12 @@ async function readiness() {
        AND e.status IN ('admin_approved', 'paid') AND NOT COALESCE(c.is_refund, false)`;
   add("vendors", "Approved expenses naming a vendor only as typed text — on no vendor's statement", typedVendor, "/vendors");
 
-  // Every Fleet Truck is on the Fixed Assets register to cost (0088).
+  // Every Fleet Truck of ours is on the Fixed Assets register to cost (0088);
+  // a hired one (0094) is its owner's asset, not ours.
   const [{ n: trucks }] = await client`
     SELECT COUNT(*)::int AS n FROM fleet_trucks t
      WHERE t.is_active
+       AND NOT t.is_third_party
        AND NOT EXISTS (SELECT 1 FROM fixed_assets a WHERE a.fleet_truck_id = t.id AND a.deleted_at IS NULL)`;
   add("trucks", "Fleet trucks with no cost on the Fixed Assets register yet", trucks, "/accounts/fixed-assets");
 

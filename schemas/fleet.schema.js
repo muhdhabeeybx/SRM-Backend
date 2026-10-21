@@ -45,6 +45,22 @@ const createFleetTruckSchema = z.object({
   truckStatus: z.string().max(500).optional(),
   incidents: z.string().max(100000).optional(),
   notes: z.string().max(5000).optional(),
+  // Hired, not ours (0094) — and whose it is.
+  isThirdParty: z.boolean().optional(),
+  ownerName: z.string().trim().max(255).optional(),
+});
+
+/**
+ * A hired truck added where it is first needed — allocating trucks off a PFI.
+ * Only what loading it takes: the plate, what it holds, who drives it, and
+ * whose it is. The rest can be filled in on the Fleet page later.
+ */
+const thirdPartyTruckSchema = z.object({
+  plateNumber: z.string().trim().min(2).max(50),
+  maxCapacity: z.coerce.number().int().positive().max(100000).nullable().optional(),
+  driverName: z.string().trim().max(255).optional(),
+  driverPhone: z.string().trim().max(50).optional(),
+  ownerName: z.string().trim().max(255).optional(),
 });
 
 const updateFleetTruckSchema = createFleetTruckSchema.partial().extend({
@@ -53,7 +69,8 @@ const updateFleetTruckSchema = createFleetTruckSchema.partial().extend({
 
 const fleetQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(50),
+  // The pickers load the whole register; hired trucks (0094) take it past 100.
+  limit: z.coerce.number().int().positive().max(1000).default(50),
   search: z.string().max(100).optional(),
   isActive: z
     .enum(["true", "false"])
@@ -111,6 +128,7 @@ module.exports = {
   idParamSchema,
   createFleetTruckSchema,
   updateFleetTruckSchema,
+  thirdPartyTruckSchema,
   fleetQuerySchema,
   fleetLedgerEntrySchema,
   fleetLedgerBatchSchema,

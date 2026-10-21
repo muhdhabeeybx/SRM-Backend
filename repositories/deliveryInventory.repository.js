@@ -48,7 +48,31 @@ const withLedgerAgo = async (rows) => {
   });
 };
 
-const costedRows = async (rows) => (await withLedgerAgo(rows)).map(withCosts);
+/**
+ * Whose truck carried each trip (0094). A third party's is costed as haulage
+ * (lib/tripCosts.js), and the screens name its owner. Read off the fleet
+ * register in one query rather than joined into every select of this table.
+ */
+const truckOwners = async (truckIds) => {
+  const ids = [...new Set(truckIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return new Map();
+  const found = await db
+    .select({ id: trucks.id, isThirdParty: trucks.isThirdParty, ownerName: trucks.ownerName })
+    .from(trucks)
+    .where(inArray(trucks.id, ids));
+  return new Map(found.map((t) => [Number(t.id), t]));
+};
+
+const withTruckOwners = async (rows) => {
+  const owners = await truckOwners(rows.filter(Boolean).map((r) => r.truckId));
+  return rows.map((r) => {
+    if (!r) return r;
+    const t = owners.get(Number(r.truckId));
+    return { ...r, truckThirdParty: Boolean(t?.isThirdParty), truckOwner: t?.isThirdParty ? t.ownerName || "" : "" };
+  });
+};
+
+const costedRows = async (rows) => (await withTruckOwners(await withLedgerAgo(rows))).map(withCosts);
 
 const findAll = async ({
   search,
@@ -166,10 +190,10 @@ const deleteById = async (id, tx = db) => {
  */
 const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) => {
   const list = [...new Set((ids || []).map(Number).filter(Boolean))];
-  if (!list.length) return { rows: [], agoKept: 0 };
+  if (!list.length) return { rows: [], agoKept: 0, haulageSkipped: 0 };
 
   const patch = {};
-  for (const key of ["agoLitres", "agoPrice", "feedingAllowance", "productPrice"]) {
+  for (const key of ["agoLitres", "agoPrice", "feedingAllowance", "productPrice", "haulageAmount"]) {
     const v = values[key];
     if (v === undefined) continue;
     if (v === null || v === "") {
@@ -183,7 +207,7 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
   if (typeof values.feedingInExpenses === "boolean") {
     patch.feedingInExpenses = values.feedingInExpenses;
   }
-  if (!Object.keys(patch).length) return { rows: [], agoKept: 0 };
+  if (!Object.keys(patch).length) return { rows: [], agoKept: 0, haulageSkipped: 0 };
 
   /**
    * A trip on the AGO stock ledger keeps the ledger's litres. Its other
@@ -192,20 +216,53 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
    * cannot put a second, different AGO figure beside the ledger's.
    */
   const owned = "agoLitres" in patch ? await tripAgoFor(list) : new Map();
-  const free = list.filter((id) => !owned.has(id));
-  const kept = list.filter((id) => owned.has(id));
-  const { agoLitres: _litres, ...rest } = patch;
+
+  /**
+   * Haulage belongs on a hired truck's trip alone. On one of our own it would
+   * turn the trip's diesel into AGO sold to an owner who does not exist, so a
+   * bulk pass over a mixed batch writes it only to the third party's trucks.
+   * A trip that already carries haulage can always have it corrected.
+   */
+  let hired = new Set();
+  if ("haulageAmount" in patch) {
+    const found = await db
+      .select({ id: deliveryInventory.id })
+      .from(deliveryInventory)
+      .leftJoin(trucks, eq(trucks.id, deliveryInventory.truckId))
+      .where(and(
+        inArray(deliveryInventory.id, list),
+        or(eq(trucks.isThirdParty, true), sql`${deliveryInventory.haulageAmount} IS NOT NULL`),
+      ));
+    hired = new Set(found.map((r) => Number(r.id)));
+  }
+
+  // Each trip's own patch, then one UPDATE per distinct patch.
+  const groups = new Map();
+  for (const id of list) {
+    const set = { ...patch };
+    if (owned.has(id)) delete set.agoLitres;
+    if (!hired.has(id)) delete set.haulageAmount;
+    if (!Object.keys(set).length) continue;
+    const key = Object.keys(set).sort().join("|");
+    if (!groups.has(key)) groups.set(key, { set, ids: [] });
+    groups.get(key).ids.push(id);
+  }
 
   const stamp = { costedAt: new Date(), ...(actor ? { costedBy: actor } : {}) };
-  const write = (ids, set) =>
-    db.update(deliveryInventory).set({ ...set, ...stamp }).where(inArray(deliveryInventory.id, ids)).returning();
+  const rows = [];
+  for (const { set, ids: some } of groups.values()) {
+    rows.push(...(await db
+      .update(deliveryInventory)
+      .set({ ...set, ...stamp })
+      .where(inArray(deliveryInventory.id, some))
+      .returning()));
+  }
 
-  const rows = [
-    ...(free.length ? await write(free, patch) : []),
-    ...(kept.length && Object.keys(rest).length ? await write(kept, rest) : []),
-  ];
-
-  return { rows: await costedRows(rows), agoKept: kept.length };
+  return {
+    rows: await costedRows(rows),
+    agoKept: list.filter((id) => owned.has(id)).length,
+    haulageSkipped: "haulageAmount" in patch ? list.filter((id) => !hired.has(id)).length : 0,
+  };
 };
 
 module.exports = {

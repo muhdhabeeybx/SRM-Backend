@@ -16,6 +16,22 @@ const findByPlate = async (plateNumber) => {
   return row || null;
 };
 
+/**
+ * The truck behind a plate however it was typed: "bwr 835-xb" is BWR835XB.
+ * Plates on the register are written without spaces, but not always.
+ */
+const findByPlateLoose = async (plate) => {
+  const key = String(plate || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!key) return null;
+  const [row] = await db
+    .select()
+    .from(fleetTrucks)
+    .where(sql`regexp_replace(upper(${fleetTrucks.plateNumber}), '[^A-Z0-9]', '', 'g') = ${key}`)
+    .orderBy(asc(fleetTrucks.id))
+    .limit(1);
+  return row || null;
+};
+
 /** Several trucks in one round trip — what a batch posting validates against. */
 const findByIds = async (ids) => {
   const wanted = [...new Set((ids || []).map(Number).filter(Number.isFinite))];
@@ -92,6 +108,8 @@ const findExpiringCompliance = async (byDate) => {
     .where(
       and(
         eq(fleetTrucks.isActive, true),
+        // A hired truck's papers are its owner's to keep, not ours to chase.
+        eq(fleetTrucks.isThirdParty, false),
         or(
           lte(fleetTrucks.insuranceExpiry, byDate),
           lte(fleetTrucks.roadWorthinessExpiry, byDate),
@@ -195,6 +213,7 @@ const summarizeLedger = async ({ truckId, dateFrom, dateTo } = {}) => {
 module.exports = {
   findById,
   findByPlate,
+  findByPlateLoose,
   findByIds,
   findAll,
   create,

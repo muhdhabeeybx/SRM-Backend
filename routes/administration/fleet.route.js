@@ -6,6 +6,7 @@ const {
   idParamSchema,
   createFleetTruckSchema,
   updateFleetTruckSchema,
+  thirdPartyTruckSchema,
   fleetQuerySchema,
   fleetLedgerEntrySchema,
   fleetLedgerBatchSchema,
@@ -15,6 +16,7 @@ const {
   getFleetTrucks,
   getFleetTruckById,
   createFleetTruck,
+  addThirdPartyTruck,
   updateFleetTruck,
   getComplianceWatchlist,
   recordLedgerEntry,
@@ -44,6 +46,8 @@ router.delete("/ledger/:entryId", verifyStaff, deleteLedgerEntry);
 router.delete("/:id", verifyStaff, deleteFleetTruck);
 router.get("/:id", verifyStaff, validate({ params: idParamSchema }), getFleetTruckById);
 router.post("/", verifyStaff, validate({ body: createFleetTruckSchema }), createFleetTruck);
+// A hired truck, added from the Allocate trucks dialog. Static, so before "/:id".
+router.post("/third-party", verifyStaff, validate({ body: thirdPartyTruckSchema }), addThirdPartyTruck);
 router.patch(
   "/:id",
   verifyStaff,

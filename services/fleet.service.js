@@ -23,6 +23,53 @@ const createTruck = async (data, { actor }) => {
   return { success: true, truck };
 };
 
+/**
+ * A hired truck, added where it is first needed: allocating trucks off a PFI.
+ *
+ * The plate is looked up however it was typed, and a truck already on the
+ * register — hired or ours — is handed back as it is rather than duplicated,
+ * so a third party's truck used again next month is the same truck with the
+ * same trips. A new one goes on the register marked as the third party's.
+ */
+const addThirdPartyTruck = async (data, { actor }) => {
+  const plateNumber = String(data.plateNumber || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (plateNumber.length < 2) return { success: false, message: "Enter the truck's plate number" };
+
+  const existing = await fleetTruckRepo.findByPlateLoose(plateNumber);
+  if (existing) return { success: true, truck: existing, existed: true };
+
+  let truck;
+  try {
+    truck = await fleetTruckRepo.create({
+      plateNumber,
+      maxCapacity: data.maxCapacity ?? null,
+      driverName: data.driverName || "",
+      driverPhone: data.driverPhone || "",
+      isThirdParty: true,
+      ownerName: data.ownerName || "",
+      createdBy: actor?.id || null,
+    });
+  } catch (err) {
+    // Somebody added the same plate a moment ago: theirs is the truck.
+    const raced = err?.code === "23505" || err?.cause?.code === "23505"
+      ? await fleetTruckRepo.findByPlateLoose(plateNumber)
+      : null;
+    if (!raced) throw err;
+    return { success: true, truck: raced, existed: true };
+  }
+
+  emitEvent("fleet.truck_created", {
+    actor,
+    entityType: "fleet_truck",
+    entityId: truck.id,
+    plateNumber: truck.plateNumber,
+    thirdParty: true,
+    ownerName: truck.ownerName,
+  });
+
+  return { success: true, truck, existed: false };
+};
+
 const updateTruck = async (id, data, { actor }) => {
   const truck = await fleetTruckRepo.findById(id);
   if (!truck) return { success: false, notFound: true, message: "Fleet truck not found" };
@@ -135,4 +182,4 @@ const recordLedgerEntriesBatch = async (entries, { actor }) => {
   return { success: true, entries: created };
 };
 
-module.exports = { createTruck, updateTruck, recordLedgerEntry, recordLedgerEntriesBatch };
+module.exports = { createTruck, addThirdPartyTruck, updateTruck, recordLedgerEntry, recordLedgerEntriesBatch };
