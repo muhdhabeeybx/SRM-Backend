@@ -64,6 +64,12 @@ const deliveryInventory = pgTable(
      */
     feedingInExpenses: boolean("feeding_in_expenses").default(false).notNull(),
     /**
+     * The Feeding payment request this truck's feeding is on (0095), raised
+     * from Delivery Costing. Its feeding counts on the truck until that
+     * request is paid. The foreign key to pfi_expenses lives in the migration.
+     */
+    feedingExpenseId: integer("feeding_expense_id"),
+    /**
      * What a third-party truck's owner charges for the trip (0094). On such a
      * trip the AGO above is sold to the owner, not burnt by us, and the owner
      * is paid haulage − AGO. Null on our own trucks.

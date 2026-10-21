@@ -72,7 +72,40 @@ const withTruckOwners = async (rows) => {
   });
 };
 
-const costedRows = async (rows) => (await withTruckOwners(await withLedgerAgo(rows))).map(withCosts);
+/**
+ * The Feeding payment request each trip's feeding is on (0095): its
+ * reference and where it stands. A request deleted in Expenses reads as none.
+ */
+const feedingRequests = async (expenseIds) => {
+  const ids = [...new Set(expenseIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+  if (!ids.length) return new Map();
+  const result = await db.execute(sql`
+    SELECT id, reference_number AS reference, status::text AS status
+      FROM pfi_expenses
+     WHERE id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)}) AND deleted_at IS NULL`);
+  return new Map((result.rows ?? result).map((e) => [Number(e.id), { id: Number(e.id), reference: e.reference, status: e.status }]));
+};
+
+const withFeedingRequests = async (rows) => {
+  const found = await feedingRequests(rows.filter(Boolean).map((r) => r.feedingExpenseId));
+  return rows.map((r) => (r ? { ...r, feedingRequest: found.get(Number(r.feedingExpenseId)) ?? null } : r));
+};
+
+const costedRows = async (rows) =>
+  (await withFeedingRequests(await withTruckOwners(await withLedgerAgo(rows)))).map(withCosts);
+
+/** Past pending, a request's figures are being acted on: the feeding behind it is fixed. */
+const FEEDING_OPEN = new Set(["pending", "rejected"]);
+const feedingLockedIds = async (ids) => {
+  const list = [...new Set(ids.map(Number).filter(Boolean))];
+  if (!list.length) return new Set();
+  const result = await db.execute(sql`
+    SELECT d.id, e.status::text AS status
+      FROM delivery_inventory d
+      JOIN pfi_expenses e ON e.id = d.feeding_expense_id AND e.deleted_at IS NULL
+     WHERE d.id IN (${sql.join(list.map((id) => sql`${id}`), sql`, `)})`);
+  return new Set((result.rows ?? result).filter((r) => !FEEDING_OPEN.has(r.status)).map((r) => Number(r.id)));
+};
 
 const findAll = async ({
   search,
@@ -190,7 +223,7 @@ const deleteById = async (id, tx = db) => {
  */
 const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) => {
   const list = [...new Set((ids || []).map(Number).filter(Boolean))];
-  if (!list.length) return { rows: [], agoKept: 0, haulageSkipped: 0 };
+  if (!list.length) return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingTouched: [] };
 
   const patch = {};
   for (const key of ["agoLitres", "agoPrice", "feedingAllowance", "productPrice", "haulageAmount"]) {
@@ -207,7 +240,7 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
   if (typeof values.feedingInExpenses === "boolean") {
     patch.feedingInExpenses = values.feedingInExpenses;
   }
-  if (!Object.keys(patch).length) return { rows: [], agoKept: 0, haulageSkipped: 0 };
+  if (!Object.keys(patch).length) return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingTouched: [] };
 
   /**
    * A trip on the AGO stock ledger keeps the ledger's litres. Its other
@@ -236,12 +269,27 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
     hired = new Set(found.map((r) => Number(r.id)));
   }
 
+  /**
+   * Feeding on a payment request that finance has taken forward (verified,
+   * approved or paid) is what that request was approved for: it is left as
+   * it is, and the caller told how many.
+   */
+  const touchesFeeding = "feedingAllowance" in patch || "feedingInExpenses" in patch;
+  const locked = touchesFeeding ? await feedingLockedIds(list) : new Set();
+
   // Each trip's own patch, then one UPDATE per distinct patch.
   const groups = new Map();
+  const feedingTouched = [];
   for (const id of list) {
     const set = { ...patch };
     if (owned.has(id)) delete set.agoLitres;
     if (!hired.has(id)) delete set.haulageAmount;
+    if (locked.has(id)) {
+      delete set.feedingAllowance;
+      delete set.feedingInExpenses;
+    } else if (touchesFeeding) {
+      feedingTouched.push(id);
+    }
     if (!Object.keys(set).length) continue;
     const key = Object.keys(set).sort().join("|");
     if (!groups.has(key)) groups.set(key, { set, ids: [] });
@@ -262,11 +310,24 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
     rows: await costedRows(rows),
     agoKept: list.filter((id) => owned.has(id)).length,
     haulageSkipped: "haulageAmount" in patch ? list.filter((id) => !hired.has(id)).length : 0,
+    feedingLocked: locked.size,
+    /** Trips whose feeding was written — their payment requests follow. */
+    feedingTouched,
   };
+};
+
+/** Trips by id, costed — what a save hands back once its requests are settled. */
+const findCostedByIds = async (ids) => {
+  const list = [...new Set((ids || []).map(Number).filter(Boolean))];
+  if (!list.length) return [];
+  return costedRows(await db.select().from(deliveryInventory).where(inArray(deliveryInventory.id, list)));
 };
 
 module.exports = {
   setCosts,
+  costedRows,
+  findCostedByIds,
+  feedingLockedIds,
   findById,
   findAll,
   create,
