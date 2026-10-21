@@ -117,7 +117,15 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
   // The trucking PFI first, locked: two trucks added at once must not both
   // read the order before either has resized it.
   const [sub] = await tx.select().from(pfis).where(eq(pfis.id, Number(subPfiId))).for("update").limit(1);
-  if (!sub || sub.status === "not_started") return null;
+  if (!sub) return null;
+  /**
+   * Not started yet: its trucks are on the inventory only if approval wrote
+   * them there (pfi.repository writePendingBatch). Then they are kept in step
+   * like any trucking PFI's — except its sold litres, which Start selling
+   * counts from the rows as they stand then.
+   */
+  const notStarted = sub.status === "not_started";
+  if (notStarted && !sub.pendingBatch?.written) return null;
 
   const [alloc] = await tx
     .select()
@@ -361,7 +369,7 @@ async function syncFromTrucks(subPfiId, { tx, actor, adding = false }) {
     .update(pfis)
     .set({
       startingQtyLitres: total,
-      soldQtyLitres: sql`GREATEST(${pfis.soldQtyLitres} + ${subDelta}, 0)`,
+      ...(notStarted ? {} : { soldQtyLitres: sql`GREATEST(${pfis.soldQtyLitres} + ${subDelta}, 0)` }),
       ticketCount: rows.length,
       updatedAt: new Date(),
     })

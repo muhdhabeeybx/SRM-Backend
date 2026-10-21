@@ -452,6 +452,11 @@ async function approve({ allocationId, user, note = "" }) {
       allocationCode: locked.allocationCode,
     }, tx);
 
+    // Its trucks go on Delivery Inventory now — Costing, the AGO ledger and
+    // the Sales Ledger see them before anyone starts selling. Its stock,
+    // officers and the drivers' texts still wait for Start selling.
+    await pfiRepo.writePendingBatch(sub.id, { tx, enteredByName: user?.name || user?.email || "" });
+
     await allocationRepo.update(locked.id, {
       status: "approved",
       decidedBy: user.id,

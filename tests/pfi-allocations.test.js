@@ -50,6 +50,7 @@ const extraPfiIds = [];
 const as = (token) => ({
   get: (url) => request(app).get(url).set("Authorization", `Bearer ${token}`),
   post: (url, body = {}) => request(app).post(url).set("Authorization", `Bearer ${token}`).send(body),
+  patch: (url, body = {}) => request(app).patch(url).set("Authorization", `Bearer ${token}`).send(body),
 });
 
 const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Lagos" }).format(new Date());
@@ -405,7 +406,34 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal((await parentRow()).soldQtyLitres, 78000);
   });
 
-  test("the trucking PFI's own review writes its trucks to the inventory", async () => {
+  test("approved trucks are on Delivery Inventory before Start selling, kept in step with the order", async () => {
+    const code = `PFI-${SERIAL}B`;
+    const rows = await db.select().from(deliveryInventory).where(eq(deliveryInventory.allocationCode, code));
+    assert.equal(rows.length, 2, "written at approval, for Costing, the AGO ledger and the Sales Ledger");
+    assert.ok(rows.every((r) => r.pfiId === sub.id && r.loadingStatus === "loaded"));
+
+    [sub] = await db.select().from(pfis).where(eq(pfis.id, sub.id));
+    assert.equal(sub.status, "not_started", "still waiting for its bank and officers");
+    assert.ok(sub.pendingBatch.written, "the batch says it is written");
+    assert.equal(sub.soldQtyLitres, 0, "its stock moves at Start selling, not before");
+
+    // A truck corrected on Delivery Inventory carries to the order now, not later.
+    const one = rows[0];
+    const less = Number(one.quantityAllocated) - 1000;
+    const res = await as(admin).patch(`/api/delivery-inventory/${one.id}`, { quantityAllocated: less });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const [o] = await db.select().from(orders).where(eq(orders.id, order.id));
+    assert.equal(o.quantity, 77000);
+    [sub] = await db.select().from(pfis).where(eq(pfis.id, sub.id));
+    assert.equal(sub.startingQtyLitres, 77000);
+    assert.equal(sub.soldQtyLitres, 0, "and still nothing sold before it starts");
+
+    const back = await as(admin).patch(`/api/delivery-inventory/${one.id}`, { quantityAllocated: less + 1000 });
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    assert.equal((await parentRow()).soldQtyLitres, 78000);
+  });
+
+  test("Start selling reads the trucks approval wrote — it writes no second set", async () => {
     const res = await as(admin).post(`${API}/${sub.id}/activate`, {
       bankAccountIds: [account.id],
       officers: { auditOfficerId: deskStaff.id, salesManagerId: deskStaff.id },
@@ -414,6 +442,12 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     const rows = await db.select().from(deliveryInventory).where(eq(deliveryInventory.allocationCode, `PFI-${SERIAL}B`));
     assert.equal(rows.length, 2);
     assert.ok(rows.every((r) => r.pfiId === sub.id));
+    assert.deepEqual([...res.body.data.batch.inventoryIds].sort(), rows.map((r) => r.id).sort(), "every driver is told");
+
+    [sub] = await db.select().from(pfis).where(eq(pfis.id, sub.id));
+    assert.equal(sub.status, "active");
+    assert.equal(sub.soldQtyLitres, 78000, "its litres left with the trucks, once");
+    assert.equal(sub.pendingBatch, null);
   });
 
   test("the file of each names the other", async () => {

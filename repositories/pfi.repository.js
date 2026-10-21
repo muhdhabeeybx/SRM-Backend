@@ -203,6 +203,120 @@ const create = async (data) => {
   return row;
 };
 
+/** The batch's code as the delivery register writes it: "PFI-38B". */
+const batchCode = (pending) => String(pending?.code || "").trim().toUpperCase().replace(/\s+/g, "-");
+
+/**
+ * A trucking batch's trucks, written into the delivery inventory (and a
+ * station's load onto the sales ledger, already assigned). Shared by Start
+ * selling and by approving an allocation, which writes them at once so the
+ * trucks are on Delivery Inventory, Costing and the AGO ledger before anyone
+ * starts selling.
+ */
+const writeBatchRows = async (tx, { pfiId, pfiNumber, pending, enteredByName = "" }) => {
+  const code = batchCode(pending);
+  let loadedTotal = 0;
+
+  const inventoryIds = [];
+  const stationLoads = [];
+  for (const truck of pending.trucks) {
+    const loaded = Number(truck.loadedQty) || 0;
+    loadedTotal += loaded;
+    // Litres allocated straight to one of our stations arrive assigned
+    // to it (services/pfiAllocation.service.js, "To a station").
+    const station = truck.customerId != null
+      ? { id: Number(truck.customerId), name: String(truck.customerName || "") }
+      : null;
+    const [written] = await tx.insert(deliveryInventory).values({
+      allocationCode: code,
+      // Stamped so the batch names its PFI rather than the two being
+      // joinable only through a code somebody typed.
+      pfiId,
+      pfiNumber: pfiNumber || "",
+      truckId: truck.truckId != null ? Number(truck.truckId) : null,
+      truckNumber: truck.plateNumber || "",
+      depot: pending.depotName || "",
+      pfiProduct: pending.productName || "",
+      quantityAllocated: loaded,
+      dateAllocated: pending.dateAllocated || null,
+      loadingStatus: "loaded",
+      ...(station ? { customerId: station.id, customerName: station.name, location: station.name } : {}),
+    }).returning({ id: deliveryInventory.id });
+
+    if (!station) {
+      inventoryIds.push(written.id);
+      continue;
+    }
+    /**
+     * The row the sales ledger's "assign customer" would have written:
+     * the load on the station, no rate. From PFI-47B on a station's share
+     * is priced by the desk alone, so it reads ₦0, pending, until then —
+     * and the station's own pump sales and deposits stay on its page.
+     */
+    await tx.insert(deliverySales).values({
+      truckNumber: truck.plateNumber || "",
+      dateLoaded: pending.dateAllocated || "",
+      depotLoaded: pending.depotName || "",
+      customerId: station.id,
+      customerName: station.name,
+      location: station.name,
+      quantity: loaded,
+      allocationCode: code,
+      book: "trucking",
+      enteredBy: enteredByName,
+    });
+    stationLoads.push(written.id);
+  }
+
+  return { code, loadedTotal, inventoryIds, stationLoads };
+};
+
+/**
+ * The rows approval already wrote, as they stand now — trucks may have been
+ * corrected, added or taken off on Delivery Inventory since. A station's load
+ * stays apart, as when the rows are written here.
+ */
+const writtenBatchRows = async (tx, { pfiId, pending }) => {
+  const code = batchCode(pending);
+  const rows = await tx
+    .select({ id: deliveryInventory.id, qty: deliveryInventory.quantityAllocated })
+    .from(deliveryInventory)
+    .where(and(eq(deliveryInventory.pfiId, pfiId), sql`upper(${deliveryInventory.allocationCode}) = ${code}`));
+  const stations = new Set((pending.written?.stationLoads || []).map(Number));
+  return {
+    code,
+    loadedTotal: rows.reduce((sum, r) => sum + (Number(r.qty) || 0), 0),
+    inventoryIds: rows.map((r) => Number(r.id)).filter((id) => !stations.has(id)),
+    stationLoads: rows.map((r) => Number(r.id)).filter((id) => stations.has(id)),
+  };
+};
+
+/**
+ * Write a not-started trucking PFI's batch into the inventory now, without
+ * starting to sell it (2026-10-21: an approved allocation's trucks are real
+ * from approval). Its stock, its officers and the drivers' texts still wait
+ * for Start selling, which then reads these rows rather than writing more.
+ * Returns null when there is nothing to write, or it was written already.
+ */
+const writePendingBatch = async (pfiId, { tx, enteredByName = "" }) => {
+  const [current] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).for("update").limit(1);
+  const pending = current?.pendingBatch;
+  if (!current || current.status !== "not_started") return null;
+  if (!pending || !Array.isArray(pending.trucks) || !pending.trucks.length || pending.written) return null;
+  const written = await writeBatchRows(tx, { pfiId, pfiNumber: current.pfiNumber, pending, enteredByName });
+  await tx
+    .update(pfis)
+    .set({
+      pendingBatch: {
+        ...pending,
+        written: { at: new Date().toISOString(), inventoryIds: written.inventoryIds, stationLoads: written.stationLoads },
+      },
+      updatedAt: new Date(),
+    })
+    .where(eq(pfis.id, pfiId));
+  return written;
+};
+
 /**
  * Release a PFI to trade: assign, grant sight, write the batch, record who.
  *
@@ -303,63 +417,14 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
         .where(eq(bankAccounts.id, accountId));
     }
 
-    // A trucking batch's loads reach the inventory here and nowhere earlier.
+    // A trucking batch's loads reach the inventory here, unless approving its
+    // allocation already wrote them (writePendingBatch) — then they are read.
     let batch = null;
     const pending = current.pendingBatch;
     if (pending && Array.isArray(pending.trucks) && pending.trucks.length) {
-      const code = String(pending.code || "").trim().toUpperCase().replace(/\s+/g, "-");
-      let loadedTotal = 0;
-
-      const inventoryIds = [];
-      const stationLoads = [];
-      for (const truck of pending.trucks) {
-        const loaded = Number(truck.loadedQty) || 0;
-        loadedTotal += loaded;
-        // Litres allocated straight to one of our stations arrive assigned
-        // to it (services/pfiAllocation.service.js, "To a station").
-        const station = truck.customerId != null
-          ? { id: Number(truck.customerId), name: String(truck.customerName || "") }
-          : null;
-        const [written] = await tx.insert(deliveryInventory).values({
-          allocationCode: code,
-          // Stamped so the batch names its PFI rather than the two being
-          // joinable only through a code somebody typed.
-          pfiId,
-          pfiNumber: current.pfiNumber || "",
-          truckId: truck.truckId != null ? Number(truck.truckId) : null,
-          truckNumber: truck.plateNumber || "",
-          depot: pending.depotName || "",
-          pfiProduct: pending.productName || "",
-          quantityAllocated: loaded,
-          dateAllocated: pending.dateAllocated || null,
-          loadingStatus: "loaded",
-          ...(station ? { customerId: station.id, customerName: station.name, location: station.name } : {}),
-        }).returning({ id: deliveryInventory.id });
-
-        if (!station) {
-          inventoryIds.push(written.id);
-          continue;
-        }
-        /**
-         * The row the sales ledger's "assign customer" would have written:
-         * the load on the station, no rate. From PFI-47B on a station's share
-         * is priced by the desk alone, so it reads ₦0, pending, until then —
-         * and the station's own pump sales and deposits stay on its page.
-         */
-        await tx.insert(deliverySales).values({
-          truckNumber: truck.plateNumber || "",
-          dateLoaded: pending.dateAllocated || "",
-          depotLoaded: pending.depotName || "",
-          customerId: station.id,
-          customerName: station.name,
-          location: station.name,
-          quantity: loaded,
-          allocationCode: code,
-          book: "trucking",
-          enteredBy: activatedByName,
-        });
-        stationLoads.push(written.id);
-      }
+      const { code, loadedTotal, inventoryIds, stationLoads } = pending.written
+        ? await writtenBatchRows(tx, { pfiId, pending })
+        : await writeBatchRows(tx, { pfiId, pfiNumber: current.pfiNumber, pending, enteredByName: activatedByName });
 
       /**
        * The trucks have loaded, so that product has left. Deduct it.
@@ -391,7 +456,7 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
       // The load ids, so the caller can tell each driver once this commits.
       // A station's load has no driver and needs no truck sales desk — it is
       // already assigned — so it is kept out of that list.
-      batch = { code, trucks: pending.trucks.length, loadedTotal, inventoryIds, stationLoads };
+      batch = { code, trucks: inventoryIds.length + stationLoads.length, loadedTotal, inventoryIds, stationLoads };
     }
 
     const [finalPfi] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).limit(1);
@@ -678,6 +743,7 @@ const outstandingWork = async (pfiId) => {
 };
 
 module.exports = {
+  writePendingBatch,
   outstandingWork,
   allowedDepots,
   setAllowedDepots,
