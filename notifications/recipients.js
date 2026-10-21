@@ -152,6 +152,27 @@ const loadAllActiveStaff = async () =>
  *
  * @returns {Promise<Array<{principal: object|null, contact: object}>>}
  */
+/** The staff ids any spec in `to` says to leave out. */
+const exceptedStaffIds = (specs) => {
+  const out = new Set();
+  for (const spec of (Array.isArray(specs) ? specs : [specs]).filter(Boolean)) {
+    if (!Array.isArray(spec.exceptStaffIds)) continue;
+    spec.exceptStaffIds.map(Number).filter(Number.isInteger).forEach((id) => out.add(id));
+  }
+  return out;
+};
+
+/**
+ * Recipients less the staff `to` leaves out. Run again after the per-person
+ * ticks, which can add somebody back — the raiser of a request ticked for its
+ * texts is still not texted about their own request.
+ */
+const withoutExcepted = (resolved, specs) => {
+  const excepted = exceptedStaffIds(specs);
+  if (!excepted.size) return resolved;
+  return resolved.filter((r) => !(r.principal?.type === "staff" && excepted.has(Number(r.principal.id))));
+};
+
 const resolve = async (specs) => {
   const list = (Array.isArray(specs) ? specs : [specs]).filter(Boolean);
   if (!list.length) return [];
@@ -162,12 +183,9 @@ const resolve = async (specs) => {
   const roleSet = new Set();
   let wantAllStaff = false;
   const resolved = [];
-  const excepted = new Set();
+  const excepted = exceptedStaffIds(list);
 
   for (const spec of list) {
-    if (Array.isArray(spec.exceptStaffIds)) {
-      spec.exceptStaffIds.map(Number).filter(Number.isInteger).forEach((id) => excepted.add(id));
-    }
     if (spec.customer?.id) {
       resolved.push({
         principal: toPrincipal("customer", spec.customer.id),
@@ -238,4 +256,6 @@ const resolve = async (specs) => {
   return unique;
 };
 
-module.exports = { resolve, customerContact, staffContact, pickContacts, loadStaffByRoles, loadAllActiveStaff };
+module.exports = {
+  resolve, customerContact, staffContact, pickContacts, loadStaffByRoles, loadAllActiveStaff, exceptedStaffIds, withoutExcepted,
+};

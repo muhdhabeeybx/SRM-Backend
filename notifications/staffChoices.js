@@ -102,9 +102,16 @@ const CHOICES = [
   {
     key: "pfi_allocations",
     label: "Truck allocations to approve",
-    description: "Trucks are allocated off a PFI and wait for approval before the order and the trucking PFI are made. Sent by text as well; never to whoever raised it.",
+    description: "Trucks are allocated off a PFI and wait for approval before the order and the trucking PFI are made.",
     types: ["staff.pfi_allocation_raised"],
     roles: ["admin", "super_admin"],
+  },
+  {
+    key: "pfi_allocations_text",
+    label: "Truck allocations to approve, by text",
+    description: "A text when trucks wait for approval. Nobody by default: tick who should get it. Never sent to whoever raised it.",
+    types: ["staff.pfi_allocation_raised_sms"],
+    roles: [],
   },
   {
     key: "daily_reports",

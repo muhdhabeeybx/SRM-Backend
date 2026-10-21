@@ -2009,10 +2009,8 @@ const CATALOG = {
   "staff.pfi_allocation_raised": {
     audience: "staff",
     category: "operations",
-    priority: "high",
-    // A text as well (2026-10-21): an approver away from the dashboard holds
-    // up the order and the trucking PFI until they look.
-    channels: APP_AND_SMS,
+    priority: "normal",
+    channels: APP_ONLY,
     title: (d) => `${d.pfiNumber} waiting for approval`,
     body: (d) =>
       `${d.raisedByName || "Someone"} allocated ${d.trucks} truck${Number(d.trucks) === 1 ? "" : "s"} ` +
@@ -2021,16 +2019,39 @@ const CATALOG = {
     data: (d) => ({ screen: "PfiDetail", pfiId: d.parentPfiId }),
     actionUrl: (d) => adminLink(`/pfi/details?id=${d.parentPfiId}`),
     dedupe: (d) => (d.allocationId ? `staff.pfi_allocation_raised:${d.allocationId}` : null),
-    // Kept inside one 160-character part: "New trucking PFI 38B needs your approval:
-    // 52 trucks, 2,530,000 Litres off PFI 38, N3,415,500,000. Raised by …"
-    sms: (d) =>
-      `${smsPrefix()}New trucking ${d.pfiShort || d.pfiNumber} needs your approval: ` +
-      (d.stationName
-        ? `${smsQuantity(d.quantity, d.unit)} to ${d.stationName}`
-        : `${d.trucks} truck${Number(d.trucks) === 1 ? "" : "s"}, ${smsQuantity(d.quantity, d.unit)}`) +
-      ` off ${d.parentShort || d.parentPfiNumber}` +
-      `${Number(d.value) > 0 ? `, ${smsMoney(d.value)}` : ""}.` +
-      `${d.raisedByName ? ` Raised by ${d.raisedByName}.` : ""} Approve on the dashboard.`,
+  },
+
+  /**
+   * The same request by text, to whoever is ticked for it on Manage Users
+   * ("pfi_allocations_text" — General Admin, 2026-10-21). Its own type so the
+   * text can go to one approver while the bell still reaches them all.
+   * data: as staff.pfi_allocation_raised, plus pfiShort, parentShort, value, stationName
+   */
+  "staff.pfi_allocation_raised_sms": {
+    audience: "staff",
+    category: "operations",
+    priority: "high",
+    channels: SMS_ONLY,
+    title: (d) => `${d.pfiNumber} waiting for approval`,
+    body: (d) => `${d.raisedByName || "Someone"} allocated trucks off ${d.parentPfiNumber}.`,
+    entity: (d) => ({ type: "pfi", id: d.parentPfiId }),
+    actionUrl: (d) => adminLink(`/pfi/details?id=${d.parentPfiId}`),
+    dedupe: (d) => (d.allocationId ? `staff.pfi_allocation_raised_sms:${d.allocationId}` : null),
+    // Whole sentences, as a note to the approver would read — the user asked
+    // for it to sound professional rather than clipped.
+    sms: (d) => {
+      const pfi = d.pfiShort || d.pfiNumber;
+      const parent = d.parentShort || d.parentPfiNumber;
+      const load = d.stationName
+        ? `It sends ${smsQuantity(d.quantity, d.unit)} to ${d.stationName}`
+        : `It covers ${d.trucks} truck${Number(d.trucks) === 1 ? "" : "s"} carrying ${smsQuantity(d.quantity, d.unit)}`;
+      return (
+        `${smsPrefix()}Good day. A new trucking PFI, ${pfi}, has been raised off ${parent} and is awaiting your approval. ` +
+        `${load}${Number(d.value) > 0 ? `, valued at ${smsMoney(d.value)}` : ""}` +
+        `${d.raisedByName ? `, and was raised by ${d.raisedByName}` : ""}. ` +
+        "Kindly review and approve it on the dashboard."
+      );
+    },
   },
 
   /**

@@ -505,6 +505,9 @@ const dispatch = async (type, { to, data = {}, channels, force = false, campaign
   } catch (err) {
     console.error(`[notify] could not apply staff notification choices for "${type}":`, err.message);
   }
+  // A tick can add somebody the send left out on purpose (the raiser of a
+  // request): they stay out.
+  resolved = recipients.withoutExcepted(resolved, to);
 
   if (!resolved.length) {
     return { type, recipients: 0, delivered: 0, duplicates: 0, results: [] };

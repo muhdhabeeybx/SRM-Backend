@@ -318,26 +318,27 @@ async function raise({ parentId, loadingDate, price, trucks, station, note = "",
 
   const full = await allocationRepo.findById(created.id);
   try {
-    // "PFI 38B" off "PFI 38": the full names run past one text.
+    // "PFI 38B" off "PFI 38": the full names run long in a text.
     const fam = familyOf(full.pfiNumber);
-    notify("staff.pfi_allocation_raised", {
-      // The approvers, by text as well as the bell — never the one who raised it.
-      to: { roles: rolesFor("pfi_allocations"), exceptStaffIds: user?.id ? [user.id] : [] },
-      data: {
-        allocationId: full.id,
-        parentPfiId: parent.id,
-        parentPfiNumber: parent.pfiNumber,
-        pfiNumber: full.pfiNumber,
-        pfiShort: fam ? `PFI ${fam.serial}${fam.letter}` : full.pfiNumber,
-        parentShort: fam ? `PFI ${fam.serial}` : parent.pfiNumber,
-        quantity,
-        unit: full.productUnit,
-        trucks: resolved.length,
-        value: quantity * unitPrice,
-        ...(station ? { stationName: resolved[0].customerName } : {}),
-        raisedByName: full.raisedByName,
-      },
-    });
+    // Never to the one who raised it, on the bell or by text.
+    const except = user?.id ? [user.id] : [];
+    const data = {
+      allocationId: full.id,
+      parentPfiId: parent.id,
+      parentPfiNumber: parent.pfiNumber,
+      pfiNumber: full.pfiNumber,
+      pfiShort: fam ? `PFI ${fam.serial}${fam.letter}` : full.pfiNumber,
+      parentShort: fam ? `PFI ${fam.serial}` : parent.pfiNumber,
+      quantity,
+      unit: full.productUnit,
+      trucks: resolved.length,
+      value: quantity * unitPrice,
+      ...(station ? { stationName: resolved[0].customerName } : {}),
+      raisedByName: full.raisedByName,
+    };
+    // The bell to every approver; the text to whoever is ticked for it.
+    notify("staff.pfi_allocation_raised", { to: { roles: rolesFor("pfi_allocations"), exceptStaffIds: except }, data });
+    notify("staff.pfi_allocation_raised_sms", { to: { roles: rolesFor("pfi_allocations_text"), exceptStaffIds: except }, data });
   } catch (err) {
     console.error("[pfiAllocation.raise] notify failed (allocation IS raised):", err.message);
   }
