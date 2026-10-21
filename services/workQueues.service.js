@@ -1,4 +1,4 @@
-const { and, eq, inArray, notInArray, count, sql } = require("drizzle-orm");
+const { and, or, eq, inArray, notInArray, count, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
 const { outstandingTrucks } = require("./truckProgress.service");
@@ -141,9 +141,9 @@ const QUEUES = [
         .where(
           where(
             inArray(orders.paymentStatus, ["Unpaid", "Part Paid"]),
-            inArray(orders.status, PAYABLE_STATUSES),
-            // Not a truck allocation's order: no customer owes it.
-            sql`NOT ${sql.raw(transferSql('"orders"'))}`,
+            // A truck allocation's order counts whatever its status, as the
+            // page lists it (orderRepo.findPayableOrders).
+            or(inArray(orders.status, PAYABLE_STATUSES), sql.raw(transferSql('"orders"'))),
             notOnClosedPfi(orders.pfiId),
             mine(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId }),
           ),

@@ -1797,11 +1797,21 @@ const countByPfi = async (pfiId) => {
  * finishes them off the same way.
  */
 const findPayableOrders = async (scopeUser) => {
+  const trucking = sql.raw(transferSql('"orders"'));
   const conditions = [
     inArray(orders.paymentStatus, ["Unpaid", "Part Paid"]),
-    // A part-paid order has already been released, so restricting to Pending
-    // would exclude every one of them.
-    inArray(orders.status, ["Pending", "Paid", "Released", "Loading"]),
+    /**
+     * A part-paid order has already been released, so restricting to Pending
+     * would exclude every one of them.
+     *
+     * A truck allocation's order (lib/allocationOrders) is listed whatever its
+     * status, short of Cancelled or Expired, and marked `trucking`. Since 21
+     * October 2026, at the user's request, the trucking money is waited on here
+     * like a customer's. Off a gantry or delivery parent it is Completed the
+     * day it is approved, and it is kept off receivables, so this is the only
+     * desk that lists it while it is unpaid.
+     */
+    or(inArray(orders.status, ["Pending", "Paid", "Released", "Loading"]), trucking),
     /**
      * Not an unpriced order. This is the desk that matches bank lines to what
      * is owed, and an unpriced order owes a figure nobody has agreed — it would
@@ -1810,10 +1820,6 @@ const findPayableOrders = async (scopeUser) => {
      * list until it is priced, and arrives here the moment it is.
      */
     ne(orders.pricingStatus, "pending"),
-    // Not a truck allocation's order (lib/allocationOrders): no customer owes
-    // it, so it is no work for this desk. The company's payment for those
-    // litres is recorded from the finance report or the cargo's allocations.
-    sql`NOT ${sql.raw(transferSql('"orders"'))}`,
   ];
   const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
@@ -1862,6 +1868,8 @@ const findPayableOrders = async (scopeUser) => {
        */
       pfiId: orders.pfiId,
       customerPhone: customers.phone,
+      /** A truck allocation's order: owed by the company's own trucking PFI, on credit. */
+      trucking: sql`${trucking}`.mapWith(Boolean),
       amountPaid: sql`(
         SELECT COALESCE(SUM(op.amount), 0)
           FROM order_payments op

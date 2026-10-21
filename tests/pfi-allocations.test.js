@@ -342,10 +342,14 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     });
   };
 
-  test("the payable desk does not offer it — no customer owes it", async () => {
+  test("the payable desk lists it, marked trucking", async () => {
     const res = await as(admin).get("/api/orders/payable");
     assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.ok(!res.body.data.orders.some((o) => o.id === order.id));
+    const row = res.body.data.orders.find((o) => o.id === order.id);
+    assert.ok(row, "waiting on the desk like a customer's order");
+    assert.equal(row.trucking, true);
+    assert.ok(res.body.data.orders.filter((o) => o.id !== order.id).every((o) => o.trucking === false),
+      "a customer's order is not marked");
   });
 
   test("a payment lands on it, and moves the money only — the litres stay trucking", async () => {
@@ -384,8 +388,10 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(f.totalSold, 78000);
     assert.equal(f.truckedOutReceived, value);
     assert.equal(f.truckedOutOnCredit, 0);
+    const desk = (await as(admin).get("/api/orders/payable")).body.data.orders;
+    assert.ok(!desk.some((o) => o.id === order.id), "paid, it leaves the payable desk");
 
-    report = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=trucking`)).body.data;
+    report =(await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=trucking`)).body.data;
     assert.ok(report.orders.some((o) => o.id === order.id), "listed under trucking once paid");
     assert.equal(report.totals.totalOnCredit, 0);
     const byPaid = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=Paid`)).body.data;
