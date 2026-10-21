@@ -2009,8 +2009,10 @@ const CATALOG = {
   "staff.pfi_allocation_raised": {
     audience: "staff",
     category: "operations",
-    priority: "normal",
-    channels: APP_ONLY,
+    priority: "high",
+    // A text as well (2026-10-21): an approver away from the dashboard holds
+    // up the order and the trucking PFI until they look.
+    channels: APP_AND_SMS,
     title: (d) => `${d.pfiNumber} waiting for approval`,
     body: (d) =>
       `${d.raisedByName || "Someone"} allocated ${d.trucks} truck${Number(d.trucks) === 1 ? "" : "s"} ` +
@@ -2019,6 +2021,16 @@ const CATALOG = {
     data: (d) => ({ screen: "PfiDetail", pfiId: d.parentPfiId }),
     actionUrl: (d) => adminLink(`/pfi/details?id=${d.parentPfiId}`),
     dedupe: (d) => (d.allocationId ? `staff.pfi_allocation_raised:${d.allocationId}` : null),
+    // Kept inside one 160-character part: "New trucking PFI 38B needs your approval:
+    // 52 trucks, 2,530,000 Litres off PFI 38, N3,415,500,000. Raised by …"
+    sms: (d) =>
+      `${smsPrefix()}New trucking ${d.pfiShort || d.pfiNumber} needs your approval: ` +
+      (d.stationName
+        ? `${smsQuantity(d.quantity, d.unit)} to ${d.stationName}`
+        : `${d.trucks} truck${Number(d.trucks) === 1 ? "" : "s"}, ${smsQuantity(d.quantity, d.unit)}`) +
+      ` off ${d.parentShort || d.parentPfiNumber}` +
+      `${Number(d.value) > 0 ? `, ${smsMoney(d.value)}` : ""}.` +
+      `${d.raisedByName ? ` Raised by ${d.raisedByName}.` : ""} Approve on the dashboard.`,
   },
 
   /**

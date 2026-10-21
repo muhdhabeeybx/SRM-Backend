@@ -21,6 +21,10 @@ const { normalizedKey } = require("../utils/phone");
  *   { allStaff: true }        every active staff member
  *   { email, phone, name }    a contact with no account behind it
  *
+ * Any spec may also carry `exceptStaffIds: [...]`: those staff are left out
+ * of the result, however they were reached — the person who raised a request
+ * is not told it is waiting for them.
+ *
  * Arrays of specs, and single specs, are both accepted.
  */
 
@@ -158,8 +162,12 @@ const resolve = async (specs) => {
   const roleSet = new Set();
   let wantAllStaff = false;
   const resolved = [];
+  const excepted = new Set();
 
   for (const spec of list) {
+    if (Array.isArray(spec.exceptStaffIds)) {
+      spec.exceptStaffIds.map(Number).filter(Number.isInteger).forEach((id) => excepted.add(id));
+    }
     if (spec.customer?.id) {
       resolved.push({
         principal: toPrincipal("customer", spec.customer.id),
@@ -218,6 +226,7 @@ const resolve = async (specs) => {
   const unique = [];
   for (const r of resolved) {
     if (!r.principal && !r.contact.email && !r.contact.phone) continue;
+    if (r.principal?.type === "staff" && excepted.has(Number(r.principal.id))) continue;
     const key = r.principal
       ? `${r.principal.type}:${r.principal.id}`
       : `contact:${r.contact.email || r.contact.phone}`;

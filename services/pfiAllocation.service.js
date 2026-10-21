@@ -318,16 +318,23 @@ async function raise({ parentId, loadingDate, price, trucks, station, note = "",
 
   const full = await allocationRepo.findById(created.id);
   try {
+    // "PFI 38B" off "PFI 38": the full names run past one text.
+    const fam = familyOf(full.pfiNumber);
     notify("staff.pfi_allocation_raised", {
-      to: { roles: rolesFor("pfi_allocations") },
+      // The approvers, by text as well as the bell — never the one who raised it.
+      to: { roles: rolesFor("pfi_allocations"), exceptStaffIds: user?.id ? [user.id] : [] },
       data: {
         allocationId: full.id,
         parentPfiId: parent.id,
         parentPfiNumber: parent.pfiNumber,
         pfiNumber: full.pfiNumber,
+        pfiShort: fam ? `PFI ${fam.serial}${fam.letter}` : full.pfiNumber,
+        parentShort: fam ? `PFI ${fam.serial}` : parent.pfiNumber,
         quantity,
         unit: full.productUnit,
         trucks: resolved.length,
+        value: quantity * unitPrice,
+        ...(station ? { stationName: resolved[0].customerName } : {}),
         raisedByName: full.raisedByName,
       },
     });
