@@ -83,6 +83,7 @@ const authenticateStaff = async (req, res, next) => {
     canViewAllLocations: authContext.canViewAllLocations,
     scope: authContext.scope,
     pageOverrides: authContext.pageOverrides,
+    rolePages: authContext.rolePages,
   };
   // Deliberately not `req.session` — that name belongs to express-session, and
   // colliding with it would be a confusing trap if it is ever added.

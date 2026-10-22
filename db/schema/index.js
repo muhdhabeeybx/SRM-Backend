@@ -83,6 +83,7 @@ const messageTemplateSchema = require("./messageTemplate");
 const messageCampaignSchema = require("./messageCampaign");
 // After ./pfi and ./staff — cfoReportEntry destructures both at load time.
 const cfoReportEntrySchema = require("./cfoReportEntry");
+const rolePagesSchema = require("./rolePages");
 // After ./pfi, ./order, ./depot, ./product and ./staff — it references all five.
 const pfiTruckAllocationSchema = require("./pfiTruckAllocation");
 const messageLogSchema = require("./messageLog");
@@ -159,4 +160,5 @@ module.exports = {
   ...messageTemplateSchema,
   ...messageCampaignSchema,
   ...cfoReportEntrySchema,
+  ...rolePagesSchema,
 };

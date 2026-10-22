@@ -1,4 +1,5 @@
 const { client } = require("../config/db");
+const { PFI_SLOTS } = require("../lib/pfiSlots");
 const { pfiRepo } = require("../repositories");
 const { toIso } = require("../repositories/pfiFile.repository");
 
@@ -33,19 +34,13 @@ const SOURCE_LABELS = {
   pfi_activation: "PFI activation",
   account_deleted: "Account deleted",
   pfi_deleted: "PFI deleted",
+  pfi_officers: "PFI officers changed",
   history_start: "In place when the record began",
   unattributed: "Outside the app (not attributed)",
 };
 
 /** The officer roles a PFI can name, with the words its own screens use. */
-const OFFICER_ROLES = [
-  { column: "audit_officer_id", label: "Finance / Audit Officer" },
-  { column: "sales_manager_id", label: "Sales Manager" },
-  { column: "product_officer_id", label: "Product Manager" },
-  { column: "commission_officer_id", label: "Commission Officer" },
-  { column: "it_compliance_officer_id", label: "IT Compliance Officer" },
-  { column: "security_exit_officer_id", label: "Security Exit Officer" },
-];
+const OFFICER_ROLES = PFI_SLOTS;
 
 const DAY = 86_400_000;
 const daysBetween = (from, to) => {

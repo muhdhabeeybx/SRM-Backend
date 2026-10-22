@@ -8,6 +8,7 @@ const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../li
 const pfiAssignments = require("../../services/pfiAssignments.service");
 const sessionService = require("../../services/session.service");
 const auditLogRepo = require("../../repositories/auditLog.repository");
+const pfiRoles = require("../../services/pfiRoles.service");
 
 const REALM = "staff";
 
@@ -221,15 +222,19 @@ const getAllAdmins = asyncHandler(async (req, res) => {
 
   const safeStaff = staff.map(({ password, refreshToken, passwordResetToken, passwordResetExpires, ...rest }) => rest);
   const staffIds = safeStaff.map((s) => s.id);
-  const [scopeByStaff, overridesByStaff, notificationsByStaff, activity] = await Promise.all([
+  const [scopeByStaff, overridesByStaff, notificationsByStaff, activity, slotsByStaff] = await Promise.all([
     staffScopeRepo.getScopeWithNamesForStaffIds(staffIds),
     staffScopeRepo.getPageOverridesForStaffIds(staffIds),
     staffChoices.overridesForStaffIds(staffIds),
     sessionRepo.staffActivity(staffIds),
+    pfiRoles.forStaff(staffIds),
   ]);
   const enriched = safeStaff.map((s) => ({
     ...s,
     ...scopeByStaff.get(s.id),
+    // Which of their roles a PFI slot gives, and the open PFIs naming them —
+    // on the list too, because the edit form opens from it.
+    ...slotsByStaff.get(s.id),
     pageOverrides: overridesByStaff.get(s.id) || [],
     // Carried on the list for the same reason as pageOverrides: the edit form
     // opens from it, and a save that started without them would wipe them.
@@ -258,11 +263,12 @@ const getAdminById = asyncHandler(async (req, res) => {
   }
 
   const { password, refreshToken, passwordResetToken, passwordResetExpires, ...safeAdmin } = admin;
-  const [scope, pageOverrides, notificationOverrides, activity] = await Promise.all([
+  const [scope, pageOverrides, notificationOverrides, activity, slots] = await Promise.all([
     staffScopeRepo.getScopeWithNames(admin.id),
     staffScopeRepo.getPageOverrides(admin.id),
     staffChoices.overridesFor(admin.id),
     sessionRepo.staffActivity([admin.id]),
+    pfiRoles.forStaff([admin.id]),
   ]);
   const seen = activity.get(Number(admin.id));
 
@@ -272,6 +278,7 @@ const getAdminById = asyncHandler(async (req, res) => {
       admin: {
         ...safeAdmin,
         ...scope,
+        ...slots.get(Number(admin.id)),
         pageOverrides,
         notificationOverrides,
         lastActiveAt: seen?.lastActiveAt ?? null,
@@ -384,21 +391,34 @@ const updateAdmin = asyncHandler(async (req, res) => {
   }
   if (phone_number !== undefined) updateData.phoneNumber = phone_number || null;
   Object.assign(updateData, altContactUpdate(req.body));
-  if (roles && roles.length > 0) updateData.roles = mapRolesToBackend(roles);
   if (suspended !== undefined) updateData.suspended = suspended;
   if (can_view_all_locations !== undefined) updateData.canViewAllLocations = can_view_all_locations;
 
-  const updated = await staffRepo.update(admin.id, updateData);
+  let updated = await staffRepo.update(admin.id, updateData);
+
+  /**
+   * The roles typed here are their own. Roles a PFI slot gives them are kept
+   * on top, and are taken back only when the slot is emptied or the PFI
+   * closed (services/pfiRoles.service.js) — the form shows them, but does not
+   * send them.
+   */
+  if (roles && roles.length > 0) {
+    await pfiRoles.saveOwnRoles(admin.id, mapRolesToBackend(roles), { actorId: req.user?.id ?? null });
+    updated = await staffRepo.findById(admin.id);
+  }
 
   if (
     depot_ids !== undefined || lpg_station_ids !== undefined ||
     pfi_ids !== undefined || filling_station_ids !== undefined
   ) {
     const current = await staffScopeRepo.getScopeWithNames(admin.id);
+    // A PFI that names them in a slot is theirs while it does: unticking it
+    // here would leave them answerable for a PFI they cannot open.
+    const namedOn = await pfiRoles.slotPfiIdsHeld(admin.id);
     await staffScopeRepo.setScope(admin.id, {
       depotIds: depot_ids !== undefined ? toIdList(depot_ids) : current.depotIds,
       lpgStationIds: lpg_station_ids !== undefined ? toIdList(lpg_station_ids) : current.lpgStationIds,
-      pfiIds: pfi_ids !== undefined ? toIdList(pfi_ids) : current.pfiIds,
+      pfiIds: pfi_ids !== undefined ? [...new Set([...toIdList(pfi_ids), ...namedOn])] : current.pfiIds,
       fillingStationIds:
         filling_station_ids !== undefined ? toIdList(filling_station_ids) : current.fillingStationIds,
     }, contextFromRequest(req, SOURCES.MANAGE_USERS));

@@ -53,13 +53,18 @@ function pageFrom(req) {
   return page;
 }
 
-/** Whether this person holds `page` as view only. */
+/**
+ * Whether this person holds `page` as view only — by their own tick, or, with
+ * no tick on it, by the set their roles give (services/rolePages.service.js).
+ */
 function isViewOnlyPage(user, page) {
   if (!user || !page) return false;
   const roles = Array.isArray(user.roles) ? user.roles : [];
   if (roles.includes("super_admin")) return false;
   const row = (user.pageOverrides || []).find((o) => o.routePath === page);
-  return Boolean(row && row.allowed && row.viewOnly);
+  if (row) return Boolean(row.allowed && row.viewOnly);
+  const fromRoles = (user.rolePages || []).find((p) => p.routePath === page);
+  return Boolean(fromRoles?.viewOnly);
 }
 
 /**

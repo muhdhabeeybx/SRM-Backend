@@ -2,6 +2,7 @@ const { eq, and, or, ilike, desc, asc, count, sql, gte, lte, inArray } = require
 const { setAssignmentContext } = require("../lib/pfiAssignmentContext");
 const { db } = require("../config/db");
 const { pfis, depots, products, staff, pfiStaff, bankAccounts, deliveryInventory, deliverySales } = require("../db/schema");
+const { PFI_SLOTS } = require("../lib/pfiSlots");
 const { lpgStations } = require("../db/schema/lpgStation");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
@@ -333,10 +334,7 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
     const [current] = await tx.select().from(pfis).where(eq(pfis.id, pfiId)).limit(1);
     if (!current) throw new Error("PFI not found");
 
-    const OFFICER_FIELDS = [
-      "auditOfficerId", "productOfficerId", "itComplianceOfficerId",
-      "securityExitOfficerId", "commissionOfficerId", "salesManagerId",
-    ];
+    const OFFICER_FIELDS = PFI_SLOTS.map((slot) => slot.idKey);
     const assigned = {};
     for (const field of OFFICER_FIELDS) {
       if (officers[field] != null && officers[field] !== "") {

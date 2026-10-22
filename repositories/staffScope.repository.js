@@ -1,5 +1,6 @@
 const { eq, and, inArray } = require("drizzle-orm");
 const { setAssignmentContext } = require("../lib/pfiAssignmentContext");
+const rolePages = require("../services/rolePages.service");
 const { db } = require("../config/db");
 const {
   staff,
@@ -49,6 +50,9 @@ const getAuthContext = async (staffId) => {
       fillingStationIds: fillingRows.map((r) => r.id),
     },
     pageOverrides: overrideRows,
+    // The pages their roles open, or null when roles do not decide their
+    // pages (services/rolePages.service.js).
+    rolePages: await rolePages.pagesFor(roles),
   };
 };
 

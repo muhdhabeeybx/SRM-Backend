@@ -27,6 +27,8 @@ const stepNotices = require("../../services/stepNotices.service");
 const { allocationPfis } = require("../../services/allocationTrucks.service");
 const { localDateStr } = require("../../lib/zonedDay");
 const gantryRegister = require("../../lib/gantryTicketRegister");
+const { PFI_SLOTS, officersOn } = require("../../lib/pfiSlots");
+const pfiRoles = require("../../services/pfiRoles.service");
 
 function httpErr(status, message) {
   return Object.assign(new Error(message), { status });
@@ -144,6 +146,16 @@ const normalisePfiType = (raw) => {
   return PFI_TYPES.has(t) ? t : "coastal";
 };
 
+/**
+ * Give and take back the roles a PFI's slots give (services/pfiRoles.service.js)
+ * for these people. Run after the PFI is saved, and never fails the save: the
+ * sweep in jobs/scheduler.js brings anybody missed here up to date.
+ */
+const followSlots = (staffIds, req) =>
+  pfiRoles
+    .recompute({ staffIds, actorId: req.user?.id ?? null })
+    .catch((err) => console.error("[pfi] roles from PFI slots not brought up to date:", err.message));
+
 const createPfi = asyncHandler(async (req, res) => {
   const pfi_number = req.body.pfi_number || req.body.pfiNumber;
   const description = req.body.description || "";
@@ -163,12 +175,6 @@ const createPfi = asyncHandler(async (req, res) => {
   const qty_volume_mt = req.body.qty_volume_mt ?? req.body.qtyVolumeMt;
   const unit_price = req.body.unit_price ?? req.body.unitPrice;
   const credit_balance = req.body.credit_balance ?? req.body.creditBalance;
-  const audit_officer = req.body.audit_officer || req.body.auditOfficerId;
-  const product_officer = req.body.product_officer || req.body.productOfficerId;
-  const it_compliance_officer = req.body.it_compliance_officer || req.body.itComplianceOfficerId;
-  const security_exit_officer = req.body.security_exit_officer || req.body.securityExitOfficerId;
-  const commission_officer = req.body.commission_officer || req.body.commissionOfficerId;
-  const sales_manager = req.body.sales_manager || req.body.salesManagerId;
   const supplier_vendor_id = req.body.supplier_vendor_id ?? req.body.supplierVendorId;
   const vessel_broker = req.body.vessel_broker || req.body.vesselBroker;
   const vessel_name = req.body.vessel_name || req.body.vesselName;
@@ -237,19 +243,11 @@ const createPfi = asyncHandler(async (req, res) => {
     }
   }
 
-  const officerDefs = [
-    { field: "audit_officer", idKey: "auditOfficerId", nameKey: "auditOfficerName" },
-    { field: "product_officer", idKey: "productOfficerId", nameKey: "productOfficerName" },
-    { field: "it_compliance_officer", idKey: "itComplianceOfficerId", nameKey: "itComplianceOfficerName" },
-    { field: "security_exit_officer", idKey: "securityExitOfficerId", nameKey: "securityExitOfficerName" },
-    { field: "commission_officer", idKey: "commissionOfficerId", nameKey: "commissionOfficerName" },
-    { field: "sales_manager", idKey: "salesManagerId", nameKey: "salesManagerName" },
-  ];
-
-  const officerNames = {};
-  for (const { field, idKey, nameKey } of officerDefs) {
+  const officers = {};
+  for (const { field, idKey, nameKey } of PFI_SLOTS) {
     const val = req.body[field] || req.body[idKey] || req.body[`${field}_id`];
-    officerNames[nameKey] = await resolveOfficerName(val);
+    officers[idKey] = val ? (parseInt(val, 10) || val) : null;
+    officers[nameKey] = await resolveOfficerName(val);
   }
 
   /**
@@ -288,14 +286,8 @@ const createPfi = asyncHandler(async (req, res) => {
     ticketCount: ticket_count == null || ticket_count === "" ? null : Number(ticket_count),
     unitPrice: String(Number(unit_price) || 0),
     creditBalance: String(Number(credit_balance) || 0),
-    auditOfficerId: audit_officer ? (parseInt(audit_officer, 10) || audit_officer) : null,
-    productOfficerId: product_officer ? (parseInt(product_officer, 10) || product_officer) : null,
-    itComplianceOfficerId: it_compliance_officer ? (parseInt(it_compliance_officer, 10) || it_compliance_officer) : null,
-    securityExitOfficerId: security_exit_officer ? (parseInt(security_exit_officer, 10) || security_exit_officer) : null,
-    commissionOfficerId: commission_officer ? (parseInt(commission_officer, 10) || commission_officer) : null,
-    salesManagerId: sales_manager ? (parseInt(sales_manager, 10) || sales_manager) : null,
     supplierVendorId: supplier_vendor_id ? Number(supplier_vendor_id) || null : null,
-    ...officerNames,
+    ...officers,
     vesselBroker: isGantry ? "" : vessel_broker || "",
     vesselName: isGantry ? "" : vessel_name || "",
     surveyorName: isGantry ? "" : surveyor_name || "",
@@ -358,6 +350,8 @@ const createPfi = asyncHandler(async (req, res) => {
   // Every PFI becomes an expense category the moment it exists. Without this
   // there is no way to book a cost against the batch at all.
   await pfiExpenseRepo.ensureCategoryForPfi(pfi.id, pfi.pfiNumber);
+
+  await followSlots(officersOn(pfi), req);
 
   res.status(201).json({
     success: true,
@@ -480,16 +474,7 @@ const updatePfi = asyncHandler(async (req, res) => {
     }
   }
 
-  const officerDefs = [
-    { field: "audit_officer", idKey: "auditOfficerId", nameKey: "auditOfficerName" },
-    { field: "product_officer", idKey: "productOfficerId", nameKey: "productOfficerName" },
-    { field: "it_compliance_officer", idKey: "itComplianceOfficerId", nameKey: "itComplianceOfficerName" },
-    { field: "security_exit_officer", idKey: "securityExitOfficerId", nameKey: "securityExitOfficerName" },
-    { field: "commission_officer", idKey: "commissionOfficerId", nameKey: "commissionOfficerName" },
-    { field: "sales_manager", idKey: "salesManagerId", nameKey: "salesManagerName" },
-  ];
-
-  for (const { field, idKey, nameKey } of officerDefs) {
+  for (const { field, idKey, nameKey } of PFI_SLOTS) {
     const val =
       req.body[idKey] !== undefined
         ? req.body[idKey]
@@ -561,6 +546,19 @@ const updatePfi = asyncHandler(async (req, res) => {
 
   const updated = await pfiRepo.update(pfi.id, updateData);
 
+  // An officer changed: once the PFI trades, who can open it follows its
+  // slots, and the roles the slots give follow them on any PFI still open.
+  if (PFI_SLOTS.some((slot) => Number(pfi[slot.idKey] || 0) !== Number(updated[slot.idKey] || 0))) {
+    await pfiRoles
+      .syncSight({
+        before: pfi,
+        after: updated,
+        context: contextFromRequest(req, SOURCES.PFI_OFFICERS, `Officers changed on ${updated.pfiNumber}`),
+      })
+      .catch((err) => console.error("[pfi] PFI sight not brought in line with its officers:", err.message));
+    await followSlots([...officersOn(pfi), ...officersOn(updated)], req);
+  }
+
   if (onRegister && pfiType !== "gantry") {
     await gantryRegister.stop(pfi.id);
   } else if (!onRegister && pfiType === "gantry" && pfi.pfiType !== "gantry" && pfi.status === "not_started") {
@@ -601,6 +599,7 @@ const deletePfi = asyncHandler(async (req, res) => {
     contextFromRequest(req, SOURCES.PFI_DELETED, `PFI ${pfi.pfiNumber || pfi.id} was deleted`),
     (tx) => pfiRepo.deleteById(pfi.id, tx),
   );
+  await followSlots(officersOn(pfi), req);
 
   res.json({ success: true, message: "PFI deleted successfully" });
 });
@@ -692,6 +691,7 @@ const activatePfi = asyncHandler(async (req, res) => {
   // A trucking PFI's trucks were written just now: each driver hears he is
   // loaded, and the truck sales desk that the batch is ready. Never throws.
   if (updated.batch?.inventoryIds?.length) stepNotices.trucksLoaded(updated.batch.inventoryIds);
+  await followSlots(officersOn(updated.pfi), req);
 
   res.json({
     success: true,
@@ -765,6 +765,8 @@ const finishPfi = asyncHandler(async (req, res) => {
   }
 
   const updated = await withFinancials(await pfiRepo.update(pfi.id, updateData));
+  // Closed: its slots stop giving their roles.
+  await followSlots(officersOn(pfi), req);
 
   // Nothing reconciles the manual closure figures against the computed ones,
   // so surface the gap instead of leaving two answers to the same question.

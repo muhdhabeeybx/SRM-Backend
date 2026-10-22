@@ -13,7 +13,7 @@ const REALM = "staff";
 // see — so this payload builder needs the extra lookup, hence async.
 const getAdminPayload = async (user) => {
   const ctx = await staffScopeRepo.getAuthContext(user.id);
-  const { pageOverrides } = ctx;
+  const { pageOverrides, rolePages } = ctx;
   return {
     id: user.id,
     email: user.email,
@@ -31,6 +31,10 @@ const getAdminPayload = async (user) => {
     // dead ends.
     pfiScoped: isConfined(ctx),
     pageOverrides: pageOverrides.map((o) => ({ routePath: o.routePath, allowed: o.allowed, viewOnly: Boolean(o.viewOnly) })),
+    // The pages their roles open while role pages are on; null means pages are
+    // decided as before (services/rolePages.service.js). Their own ticks
+    // above still add to it or take a page away.
+    rolePages,
     profilePicture: {
       url: user.profilePictureUrl,
       publicId: user.profilePicturePublicId,
@@ -307,7 +311,10 @@ const handleGetMe = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    data: { user: safeAdmin },
+    // `session` is what sign-in gives: the dashboard reads it every half
+    // minute, so a role or page given from PFI Tracking reaches the menu
+    // without signing out.
+    data: { user: safeAdmin, session: await getAdminPayload(admin) },
   });
 });
 

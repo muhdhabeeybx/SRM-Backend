@@ -114,6 +114,16 @@ const pfis = pgTable(
     /** Who the product was bought from (0083). FK to vendors in the migration. */
     supplierVendorId: integer("supplier_vendor_id"),
     salesManagerName: varchar("sales_manager_name", { length: 255 }).default(""),
+    // The desks a PFI names since 0096. Each slot gives its role while the PFI
+    // is open (lib/pfiSlots.js).
+    ticketingOfficerId: integer("ticketing_officer_id").references(() => staff.id, { onDelete: "set null" }),
+    ticketingOfficerName: varchar("ticketing_officer_name", { length: 255 }).default(""),
+    gateEntryOfficerId: integer("gate_entry_officer_id").references(() => staff.id, { onDelete: "set null" }),
+    gateEntryOfficerName: varchar("gate_entry_officer_name", { length: 255 }).default(""),
+    truckSalesOfficerId: integer("truck_sales_officer_id").references(() => staff.id, { onDelete: "set null" }),
+    truckSalesOfficerName: varchar("truck_sales_officer_name", { length: 255 }).default(""),
+    stockOfficerId: integer("stock_officer_id").references(() => staff.id, { onDelete: "set null" }),
+    stockOfficerName: varchar("stock_officer_name", { length: 255 }).default(""),
     // Vessel & Surveyor
     vesselBroker: varchar("vessel_broker", { length: 255 }).default(""),
     vesselName: varchar("vessel_name", { length: 255 }).default(""),

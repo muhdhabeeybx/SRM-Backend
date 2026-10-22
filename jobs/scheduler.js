@@ -13,6 +13,7 @@ const {
 const { resetPricesForTheDay } = require("../services/priceReset.service");
 const { syncTermii } = require("../services/messageLog.service");
 const ledgerPosting = require("../services/accounting/posting.service");
+const pfiRoles = require("../services/pfiRoles.service");
 
 // An ad-hoc pg-boss queue created on demand, mirroring the WhatsApp maintenance
 // cron — not part of the WhatsApp queue set.
@@ -26,6 +27,13 @@ const MESSAGE_COST_QUEUE = "message-cost-sync";
 const LEDGER_POSTING_QUEUE = "ledger-posting";
 /** Every ten minutes, so the books are never far behind the desks. */
 const LEDGER_POSTING_CRON = "*/10 * * * *";
+const PFI_ROLES_QUEUE = "pfi-roles-sweep";
+/**
+ * Every fifteen minutes. A PFI saved or closed through the dashboard brings
+ * its officers' roles up to date at once (pfi.controller followSlots); this
+ * catches whatever moved another way — a script, a failed follow-up.
+ */
+const PFI_ROLES_CRON = "*/15 * * * *";
 const MESSAGE_COST_CRON = process.env.MESSAGE_COST_CRON || "*/30 * * * *";
 
 /**
@@ -218,6 +226,22 @@ const start = async () => {
     await unschedule(LEDGER_POSTING_QUEUE);
     console.log("[scheduler] ledger posting is switched off (LEDGER_POSTING_ENABLED is not true)");
   }
+
+  // ── Roles given by PFI slots ──────────────────────────────────────────────
+  //
+  // Does nothing while role pages are switched off (services/rolePages.service.js).
+  await registerWorker(PFI_ROLES_QUEUE, async () => {
+    try {
+      const changes = await pfiRoles.recompute();
+      if (changes.length) console.log(`[scheduler] roles from PFI slots — ${changes.length} people brought up to date`);
+      return { changed: changes.length };
+    } catch (err) {
+      console.error("[scheduler] roles from PFI slots failed:", err.message);
+      return { failed: true };
+    }
+  });
+  await scheduleCron(PFI_ROLES_QUEUE, PFI_ROLES_CRON, {}, { tz: DAILY_REPORT_TZ });
+  console.log(`[scheduler] PFI roles sweep scheduled (${PFI_ROLES_CRON})`);
 
   // Say at boot whether this can actually work, rather than at 23:50 when
   // nobody is looking. An unset REPORT_RECIPIENTS is the single most likely

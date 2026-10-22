@@ -101,6 +101,8 @@ app.use("/api/delivery-inventory", require("./routes/administration/deliveryInve
 app.use("/api/delivery-sales", require("./routes/administration/deliverySale.route"));
 // Who enters a station's sales and its deposits — migration 0067.
 app.use("/api/station-entry-staff", require("./routes/administration/stationEntryStaff.route"));
+// The pages each role opens, and roles given by PFI slots — migration 0096.
+app.use("/api/role-pages", require("./routes/administration/rolePages.route"));
 app.use("/api/orders", require("./routes/administration/order.route"));
 // Overpayment sent back to the customer. Its own mount rather than a path
 // under /api/orders, where it would have to be matched above /:id.
