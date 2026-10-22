@@ -343,7 +343,7 @@ const activityFor = async (pfiIds) => {
 
   const blank = () => ({
     liveOrders: 0, paidOrders: 0, partPaidOrders: 0, customers: 0,
-    salesValue: 0, received: 0, outstanding: 0,
+    salesValue: 0, deliveryValue: 0, received: 0, outstanding: 0,
     firstOrderAt: null, lastOrderAt: null, firstConfirmedAt: null, lastConfirmedAt: null,
     firstPaymentAt: null, lastPaymentAt: null, statementPayments: 0,
     trucks: 0, trucksOut: 0, truckQty: 0,
@@ -356,6 +356,7 @@ const activityFor = async (pfiIds) => {
     Object.assign(out.get(Number(pfiId)), {
       ...r,
       salesValue: Number(r.salesValue),
+      deliveryValue: Number(r.deliveryValue),
       received: Number(r.received),
       outstanding: Number(r.outstanding),
       awaitingPriceQty: Number(r.awaitingPriceQty),
