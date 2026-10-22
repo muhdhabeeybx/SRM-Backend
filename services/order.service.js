@@ -978,11 +978,14 @@ async function placeOrder({
   // Finance on the order's PFI is asked to confirm its payment — priced or
   // not, since an unpriced order is theirs to price. Never throws.
   //
-  // An order on credit has no payment to confirm. It was born Released, which
-  // no state transition announced, so the ticketing desk is told here — a
-  // no-op off a PFI with no desk, where it has already completed.
+  // An order on credit was born Released, which no state transition
+  // announced, so the ticketing desk is told here — a no-op off a PFI with no
+  // desk, where it has already completed. A truck allocation's is on credit
+  // only so its trucks load at once: its money is owed like any customer's
+  // (since 22 October 2026, at the user's request), so finance is asked to
+  // confirm its payment too.
   if (onCredit) stepNotices.orderArrived(order.id, "Released");
-  else stepNotices.orderPlaced(order.id);
+  if (!onCredit || isAllocationOrder(order)) stepNotices.orderPlaced(order.id);
 
   /**
    * An unpriced order sends the customer nothing at creation.

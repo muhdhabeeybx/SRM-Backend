@@ -36,6 +36,7 @@ const DELIVERY_NAME = `PFI/${DELIVERY_SERIAL}/26/TEST DELIVERY/${RUN}`;
 let admin;      // super_admin + admin
 let desk;       // raises, cannot approve
 let deskStaff;
+let financeStaff; // finance officer on the cargo
 let depot;
 let product;
 let parent;
@@ -77,6 +78,8 @@ describe("truck allocations — off a cargo, approved into an order and a letter
       locationId: depot.id, locationName: depot.name, productId: product.id, productName: product.name,
       startingQtyLitres: 100000, soldQtyLitres: 0,
     }).returning();
+    financeStaff = (await staffTokenWithRoles(["finance"], `alloc-finance-${RUN}@soroman.test`)).staff;
+    await db.execute(sql`INSERT INTO pfi_staff (pfi_id, staff_id) VALUES (${parent.id}, ${financeStaff.id})`);
     [account] = await db.insert(bankAccounts).values({
       bankName: "Zenith Bank", accountName: `ALLOC TEST ${RUN}`, accountNumber: `7${RUN}`.slice(-10),
       status: "Active", depotIds: [depot.id], pfiIds: [parent.id],
@@ -123,6 +126,7 @@ describe("truck allocations — off a cargo, approved into an order and a letter
         await db.delete(orders).where(inArray(orders.id, orderIds));
       }
       const pfiIds = [...subIds, ...extraPfiIds, parent.id, deliveryParent.id];
+      await db.execute(sql`DELETE FROM pfi_staff WHERE pfi_id = ${parent.id}`);
       await db.execute(sql`DELETE FROM expense_categories WHERE pfi_id IN ${sql`(${sql.join(pfiIds.map((i) => sql`${i}`), sql`, `)})`}`).catch(() => {});
       await db.delete(pfis).where(inArray(pfis.id, pfiIds));
       await db.delete(bankStatementLines).where(eq(bankStatementLines.bankAccountId, account.id));
@@ -277,6 +281,17 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     const subs = await db.select().from(pfis).where(eq(pfis.parentPfiId, parent.id));
     assert.equal(subs.length, 1);
     assert.equal((await parentRow()).soldQtyLitres, 78000);
+  });
+
+  test("finance on the cargo is asked to confirm its payment, like any customer's order", async () => {
+    let told = [];
+    for (const until = Date.now() + 3000; Date.now() < until; await new Promise((r) => setTimeout(r, 100))) {
+      const rows = await db.execute(sql`SELECT staff_id FROM notifications
+        WHERE type = 'desk.order_to_confirm' AND data->>'orderId' = ${String(order.id)}`);
+      told = (rows.rows ?? rows).map((r) => Number(r.staff_id));
+      if (told.length) break;
+    }
+    assert.ok(told.includes(financeStaff.id), "the cargo's finance officer is told");
   });
 
   test("the order never lapses unpaid", async () => {
