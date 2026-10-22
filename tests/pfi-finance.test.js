@@ -399,9 +399,9 @@ describe("an order money has started landing on", () => {
     assert.equal(f.profitLoss, 840_000_000 - 1_000_000_000);
   });
 
-  test("the workings name it", () => {
+  test("the workings count it in sold, with no part-paid quantity of its own", () => {
     const lines = explainFinancials(pfi, f);
-    assert.match(lines.find((e) => e.key === "partPaid").workings, /2 order\(s\) = 200,000 Litres, ₦100,000,000\.00 received of ₦240,000,000\.00/);
+    assert.equal(lines.find((e) => e.key === "partPaid"), undefined);
     assert.equal(lines.find((e) => e.key === "remaining").formula, "Initial Quantity − Total Sold");
     assert.match(lines.find((e) => e.key === "revenue").workings, /₦600,000,000\.00 paid in full \+ ₦240,000,000\.00 part paid = ₦840,000,000\.00/);
   });
