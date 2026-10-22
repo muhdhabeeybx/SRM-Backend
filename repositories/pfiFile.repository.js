@@ -257,9 +257,10 @@ const doersFor = async (pfiIds) => {
  * `received` is orders.amount_paid, which the payment service keeps equal to
  * the sum of the order's payments, i.e. the finance report's figure.
  *
- * Depot sales only: a truck allocation's order is trucking, paid or not, and
- * its money is the PFI's truckedOutReceived / truckedOutOnCredit
- * (pfiExpense.repository), never a customer's received or owed.
+ * A truck allocation's order (lib/allocationOrders) is a customer's order here
+ * like any other, since 22 October 2026 at the user's request. Its litres are
+ * sold at approval, paid or not, so its money has "landed" from then: its value
+ * is in the sales, what is paid on it is received, and the rest is owed.
  *
  * Merged-away orders are Cancelled and empty, and fall out with the rest.
  *
@@ -269,15 +270,15 @@ const doersFor = async (pfiIds) => {
 const UNPRICED = client.unsafe(
   "o.pricing_status = 'pending' AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired')",
 );
+/** An order's money has landed: Paid or Part Paid, or a truck allocation's, paid or not. */
+const LANDED = client.unsafe(
+  `(o.payment_status IN ('Paid', 'Part Paid') OR ${transferSql("o")})`,
+);
 /**
  * A priced order trusted to load before payment, and not yet paid. Not a
- * transfer to a trucking PFI: that is on credit too, but nobody owes it — it
- * is trucked out (lib/allocationOrders).
+ * truck allocation's: that is released on credit too, but its money has
+ * landed already (LANDED), and what it owes is counted there.
  */
-/** A depot sale's money has landed: Paid or Part Paid, and not trucking. */
-const LANDED = client.unsafe(
-  `o.payment_status IN ('Paid', 'Part Paid') AND NOT ${transferSql("o")}`,
-);
 const CREDIT_UNPAID = client.unsafe(
   "o.credit_qty > 0 AND o.pricing_status = 'priced' AND o.payment_status::text <> 'Paid' "
   + "AND COALESCE(o.status::text, '') NOT IN ('Cancelled', 'Expired') "

@@ -1,6 +1,5 @@
 const { sql } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { transferSql } = require("../lib/allocationOrders");
 const { unrecordedMoveSql } = require("../lib/walletMoves");
 
 /**
@@ -80,11 +79,10 @@ const financeSummary = async ({ from, to }) => {
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p
           WHERE p.order_id = o.id AND p.source NOT IN ('transfer_in', 'transfer_out', 'refund')
         )), 0) AS received,
-        -- Owed by customers. What is unpaid on a truck allocation's order is on
-        -- credit to the company's own trucking PFI (lib/allocationOrders).
+        -- Owed by customers, a truck allocation's order with the rest.
         COALESCE(SUM(GREATEST(0, o.total_amount::numeric - (
           SELECT COALESCE(SUM(p.amount), 0) FROM order_payments p WHERE p.order_id = o.id
-        ))) FILTER (WHERE NOT ${sql.raw(transferSql("o"))}), 0) AS shortfall,
+        ))), 0) AS shortfall,
         -- What the order still holds beyond its value: the same reading as
         -- the refund desk (services/orderRefund.service.js realSurplus).
         -- Transfers already net out through their transfer_out rows; what
@@ -127,8 +125,6 @@ const financeSummary = async ({ from, to }) => {
       WHERE o.created_at >= ${from} AND o.created_at <= ${to}
         AND o.payment_status IN ('Unpaid', 'Part Paid')
         AND o.status NOT IN ('Cancelled', 'Expired')
-        -- A truck allocation's order is owed by no customer.
-        AND NOT ${sql.raw(transferSql("o"))}
     `),
   );
 

@@ -894,22 +894,22 @@ const findFinanceReport = async ({
   if (scope) conditions.push(scope);
   /**
    * A truck allocation's order (lib/allocationOrders): stock the company moved
-   * from a cargo to its own trucking PFI, placed on credit and paid like any
-   * order when the company settles it. On this report it is Trucking — listed
-   * in the default view beside the depot sales, paid or not. What is still
-   * unpaid on it reads ON CREDIT and is kept out of what customers owe, which
-   * it is not; what has been paid shows as on any order. It is none of Paid,
-   * Part Paid or Unpaid, so those filters leave it out; 'trucking' (or its
-   * older name 'on_credit') lists only these. The first was placed 2 Oct
-   * 2026, after the audit, so no audited figure moves.
+   * from a cargo to its own trucking PFI. Since 22 October 2026, at the user's
+   * request, it is a customer's order like any other here — what is unpaid on
+   * it is owed and totalled with every other balance, and the Paid / Part Paid
+   * / Unpaid filters take it by its own status. Its litres are sold the day it
+   * is approved, paid or not, so the default view lists it even while Unpaid.
+   * 'trucking' (or its older name 'on_credit') still lists only these, for an
+   * older page. The first was placed 2 Oct 2026, after the audit, so no
+   * audited figure moves.
    */
-  const onCredit = sql.raw(transferSql('"orders"'));
+  const trucking = sql.raw(transferSql('"orders"'));
   if (paymentStatus === "on_credit" || paymentStatus === "trucking") {
-    conditions.push(onCredit);
+    conditions.push(trucking);
   } else if (paymentStatus && paymentStatus !== "all") {
-    conditions.push(eq(orders.paymentStatus, paymentStatus), sql`NOT ${onCredit}`);
+    conditions.push(eq(orders.paymentStatus, paymentStatus));
   } else if (!paymentStatus) {
-    conditions.push(or(inArray(orders.paymentStatus, ["Paid", "Part Paid"]), onCredit));
+    conditions.push(or(inArray(orders.paymentStatus, ["Paid", "Part Paid"]), trucking));
   }
   if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
   if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));
@@ -1006,12 +1006,6 @@ const findFinanceReport = async ({
   const columns = {
     ...FULL_ORDER_COLUMNS,
     pfiLocationName: pfis.locationName,
-    /** A truck allocation's order: Trucking, its unpaid part ON CREDIT, owed by no customer. */
-    trucking: sql`${onCredit}`.mapWith(Boolean),
-    /** The same flag under its first name, for a page built before payments were allowed. */
-    onCredit: sql`${onCredit}`.mapWith(Boolean),
-    /** Set on the company's own account, whose position is not a customer's. */
-    customerHouseAccount: customers.houseAccount,
   };
 
   const [rows, [totalsRow]] = await Promise.all([
@@ -1091,16 +1085,9 @@ const findFinanceReport = async ({
         totalSurplus: sql`COALESCE(SUM(GREATEST(0, (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
         ) - (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric)), 0)`,
-        // Owed by customers — an order on credit is not, and is totalled on
-        // its own below.
-        totalShortfall: sql`COALESCE(SUM(CASE WHEN ${onCredit} THEN 0 ELSE GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
+        totalShortfall: sql`COALESCE(SUM(GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
           SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
-        )) END), 0)`,
-        totalOnCredit: sql`COALESCE(SUM(CASE WHEN ${onCredit} THEN GREATEST(0, (${orders.totalAmount} - ${orders.deliveryFromSurplus})::numeric - (
-          SELECT COALESCE(SUM(op.amount), 0) FROM order_payments op WHERE op.order_id = ${orders.id}
-        )) ELSE 0 END), 0)`,
-        onCreditQuantity: sql`COALESCE(SUM(${orders.quantity}) FILTER (WHERE ${onCredit}), 0)`,
-        onCreditCount: sql`COUNT(*) FILTER (WHERE ${onCredit})::int`,
+        ))), 0)`,
         reconciledCount: sql`COUNT(*) FILTER (WHERE ${hasStatement})::int`,
         partPaidCount: sql`COUNT(*) FILTER (WHERE ${orders.paymentStatus} = 'Part Paid')::int`,
         /**
@@ -1627,8 +1614,7 @@ const findFinanceReport = async ({
    * handful of people rather than the whole customer book.
    */
   const customerDifferentials = await findCustomerDifferentials(
-    // The company's own account is not a customer with a position to state.
-    [...new Set(rows.filter((r) => !r.customerHouseAccount).map((r) => r.customerId).filter((id) => id != null))],
+    [...new Set(rows.map((r) => r.customerId).filter((id) => id != null))],
     scopeUser,
   );
 
@@ -1657,13 +1643,8 @@ const findFinanceReport = async ({
        * reconciliation against the statement is checked against.
        */
       totalAmountPaidIn: Number(totalsRow.totalAmountPaidIn),
-      /**
-       * Sales value against the bank figure, before any transfer. Here and in
-       * totalBalance an order on credit is left out — nobody owes it — and
-       * totalOnCredit states it instead.
-       */
-      totalDifferential:
-        Number(totalsRow.totalAmount) - Number(totalsRow.totalAmountPaidIn) - Number(totalsRow.totalOnCredit),
+      /** Sales value against the bank figure, before any transfer. */
+      totalDifferential: Number(totalsRow.totalAmount) - Number(totalsRow.totalAmountPaidIn),
       /** Movement between orders: netted, and the outgoing side unsigned. */
       totalNetTransfers: Number(totalsRow.totalNetTransfers),
       totalTransferredOut: Number(totalsRow.totalTransferredOut),
@@ -1671,18 +1652,10 @@ const findFinanceReport = async ({
       /** What the listed orders hold once transfers are taken into account. */
       totalReceived: Number(totalsRow.totalReceived),
       /** What is left after both — zero on a fully settled window. */
-      totalBalance:
-        Number(totalsRow.totalAmount) - Number(totalsRow.totalReceived) - Number(totalsRow.totalOnCredit),
+      totalBalance: Number(totalsRow.totalAmount) - Number(totalsRow.totalReceived),
       /** Summed per order, never netted — see the SQL above. */
       totalSurplus: Number(totalsRow.totalSurplus),
       totalShortfall: Number(totalsRow.totalShortfall),
-      /**
-       * On the trucking orders: what is still unpaid (on credit, owed by no
-       * customer), and their litres and count, paid or not.
-       */
-      totalOnCredit: Number(totalsRow.totalOnCredit),
-      onCreditQuantity: Number(totalsRow.onCreditQuantity),
-      onCreditCount: Number(totalsRow.onCreditCount),
       /** How much of the book an external audit can actually check. */
       reconciledCount,
       unreconciledCount: total - reconciledCount,
@@ -1805,11 +1778,10 @@ const findPayableOrders = async (scopeUser) => {
      * would exclude every one of them.
      *
      * A truck allocation's order (lib/allocationOrders) is listed whatever its
-     * status, short of Cancelled or Expired, and marked `trucking`. Since 21
-     * October 2026, at the user's request, the trucking money is waited on here
-     * like a customer's. Off a gantry or delivery parent it is Completed the
-     * day it is approved, and it is kept off receivables, so this is the only
-     * desk that lists it while it is unpaid.
+     * status, short of Cancelled or Expired: its trucks load at approval and
+     * off a gantry or delivery parent it is Completed the same day, but it
+     * never lapses, so it waits here until it is paid. Since 22 October 2026,
+     * at the user's request, it is a plain customer's row, owed like any other.
      */
     or(inArray(orders.status, ["Pending", "Paid", "Released", "Loading"]), trucking),
     /**
@@ -1868,8 +1840,6 @@ const findPayableOrders = async (scopeUser) => {
        */
       pfiId: orders.pfiId,
       customerPhone: customers.phone,
-      /** A truck allocation's order: owed by the company's own trucking PFI, on credit. */
-      trucking: sql`${trucking}`.mapWith(Boolean),
       amountPaid: sql`(
         SELECT COALESCE(SUM(op.amount), 0)
           FROM order_payments op
@@ -2013,9 +1983,6 @@ const findReceivables = async ({ search = "", minDays = 0 } = {}) => {
         */
        AND ((o.total_amount - o.amount_paid) > 0 OR o.pricing_status = 'pending')
        AND (o.credit_qty > 0 OR o.status IN ('Loading', 'Completed'))
-       -- The company selling to itself (a truck allocation's order, on credit by
-       -- design) is not money a customer owes.
-       AND c.house_account IS NULL
        ${term ? sql`AND (${ref} ILIKE ${pattern} OR c.name ILIKE ${pattern} OR o.company_name ILIKE ${pattern} OR c.company_name ILIKE ${pattern})` : sql``}
      ORDER BY "exposedSince" ASC NULLS LAST
   `);

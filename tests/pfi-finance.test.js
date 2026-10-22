@@ -343,7 +343,7 @@ describe("stock moved to a trucking PFI (trucking)", () => {
     const lines = explainFinancials(pfi, f);
     const trucked = lines.find((e) => e.key === "truckedOut");
     assert.equal(trucked.label, "Trucking (Litres)");
-    assert.match(trucked.workings, /300,000 Litres worth ₦330,000,000\.00: ₦130,000,000\.00 paid, ₦200,000,000\.00 on credit/);
+    assert.equal(trucked.workings, "1 allocation(s) = 300,000 Litres", "the volume only, nothing on credit");
     assert.equal(lines.find((e) => e.key === "sold").label, "Depot Sales (Litres)");
     const total = lines.find((e) => e.key === "totalSold");
     assert.equal(total.formula, "Depot Sales + Trucking");

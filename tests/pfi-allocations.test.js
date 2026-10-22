@@ -304,27 +304,45 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(f.sellThrough, 0.78);
   });
 
-  test("the finance report lists it as trucking, on credit — not owed", async () => {
-    for (const status of ["", "&paymentStatus=all", "&paymentStatus=on_credit", "&paymentStatus=trucking"]) {
+  test("the finance report lists it as a customer's order, owed", async () => {
+    const value = 78000 * 925;
+    for (const status of ["", "&paymentStatus=all", "&paymentStatus=Unpaid", "&paymentStatus=trucking"]) {
       const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}${status}`);
       assert.equal(res.status, 200, JSON.stringify(res.body));
       const { orders: listed, totals, customerDifferentials } = res.body.data;
       const row = listed.find((o) => o.id === order.id);
       assert.ok(row, `listed under '${status}'`);
-      assert.equal(row.trucking, true);
-      assert.equal(row.onCredit, true);
-      assert.equal(totals.onCreditCount, 1);
-      assert.equal(totals.onCreditQuantity, 78000);
-      assert.equal(totals.totalOnCredit, 78000 * 925);
-      assert.equal(totals.totalShortfall, 0, "the company selling to itself owes nothing");
-      assert.equal(totals.totalBalance, 0, "nor is it in the balance");
-      assert.equal(totals.totalDifferential, 0);
-      assert.ok(!customerDifferentials.some((c) => c.customerId === order.customerId), "not a customer's position");
+      assert.equal(row.trucking, undefined, "a plain row, not marked");
+      assert.equal(row.onCredit, undefined);
+      assert.equal(totals.totalOnCredit, undefined, "no trucking total of its own");
+      assert.equal(totals.totalShortfall, value, "owed, like any customer's order");
+      assert.equal(totals.totalBalance, value);
+      assert.equal(totals.totalDifferential, value);
+      // Positions are what money has landed on, for every customer alike.
+      assert.ok(!customerDifferentials.some((c) => c.customerId === order.customerId), "nothing paid yet");
     }
-    for (const status of ["Paid", "Part Paid", "Unpaid"]) {
+    for (const status of ["Paid", "Part Paid"]) {
       const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=${status}`);
       assert.ok(!res.body.data.orders.some((o) => o.id === order.id), `not under '${status}'`);
     }
+  });
+
+  test("the cargo's file counts its value as sold and owed, like a customer's", async () => {
+    const res = await as(admin).get(`${API}/${parent.id}/file`);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const { activity } = res.body.data;
+    assert.equal(activity.salesValue, 78000 * 925);
+    assert.equal(activity.received, 0);
+    assert.equal(activity.outstanding, 78000 * 925, "owed");
+    assert.equal(activity.creditOwed, 0, "and not counted again as credit");
+  });
+
+  test("receivables lists it like any customer's debt", async () => {
+    const res = await as(admin).get("/api/orders/receivables");
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    const row = res.body.data.orders.find((o) => o.id === order.id);
+    assert.ok(row, "released on credit and unpaid, so it is owed");
+    assert.equal(Number(row.outstanding), 78000 * 925);
   });
 
   /** One credit on the cargo's own account, claimed for the allocation's order. */
@@ -342,14 +360,12 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     });
   };
 
-  test("the payable desk lists it, marked trucking", async () => {
+  test("the payable desk lists it, a plain customer's row", async () => {
     const res = await as(admin).get("/api/orders/payable");
     assert.equal(res.status, 200, JSON.stringify(res.body));
     const row = res.body.data.orders.find((o) => o.id === order.id);
     assert.ok(row, "waiting on the desk like a customer's order");
-    assert.equal(row.trucking, true);
-    assert.ok(res.body.data.orders.filter((o) => o.id !== order.id).every((o) => o.trucking === false),
-      "a customer's order is not marked");
+    assert.equal(row.trucking, undefined, "not marked");
   });
 
   test("a payment lands on it, and moves the money only — the litres stay trucking", async () => {
@@ -369,15 +385,19 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(f.remaining, 100000 - 78000, "the cargo's balance does not move");
 
     let report = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}`)).body.data;
-    assert.ok(report.orders.find((o) => o.id === order.id)?.trucking);
-    assert.equal(report.totals.totalOnCredit, value / 2, "what is left is on credit");
-    assert.equal(report.totals.totalShortfall, 0, "and owed by no customer");
-    assert.equal(report.totals.totalBalance, 0);
-    assert.equal(report.totals.totalDifferential, 0);
-    for (const status of ["Paid", "Part Paid", "Unpaid"]) {
+    assert.ok(report.orders.some((o) => o.id === order.id));
+    assert.equal(report.totals.totalShortfall, value / 2, "what is left is owed");
+    assert.equal(report.totals.totalBalance, value / 2);
+    assert.equal(report.totals.totalDifferential, value / 2);
+    assert.ok(report.customerDifferentials.some((c) => c.customerId === order.customerId), "a customer's position like any other");
+    for (const [status, listed] of [["Paid", false], ["Part Paid", true], ["Unpaid", false]]) {
       const res = await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=${status}`);
-      assert.ok(!res.body.data.orders.some((o) => o.id === order.id), `not under '${status}'`);
+      assert.equal(res.body.data.orders.some((o) => o.id === order.id), listed, `under '${status}': ${listed}`);
     }
+    const file = (await as(admin).get(`${API}/${parent.id}/file`)).body.data.activity;
+    assert.equal(file.received, value / 2);
+    assert.equal(file.outstanding, value / 2);
+    assert.equal(file.partPaidOrders, 1);
 
     await pay(value / 2, "rest");
     const [paid] = await db.select().from(orders).where(eq(orders.id, order.id));
@@ -391,11 +411,10 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     const desk = (await as(admin).get("/api/orders/payable")).body.data.orders;
     assert.ok(!desk.some((o) => o.id === order.id), "paid, it leaves the payable desk");
 
-    report =(await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=trucking`)).body.data;
-    assert.ok(report.orders.some((o) => o.id === order.id), "listed under trucking once paid");
-    assert.equal(report.totals.totalOnCredit, 0);
+    report = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}`)).body.data;
+    assert.equal(report.totals.totalShortfall, 0, "settled");
     const byPaid = (await as(admin).get(`/api/finance-report?pfiId=${parent.id}&paymentStatus=Paid`)).body.data;
-    assert.ok(!byPaid.orders.some((o) => o.id === order.id), "never a depot sale under Paid");
+    assert.ok(byPaid.orders.some((o) => o.id === order.id), "under Paid once paid, like any order");
 
     const view = (await as(admin).get(`${API}/${parent.id}/allocations`)).body.data;
     const a = view.allocations.find((x) => x.orderId === order.id);
