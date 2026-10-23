@@ -76,7 +76,7 @@ const outstandingReports = async (dateStr) => {
         FROM pfis
        WHERE status = 'active' AND pfi_type::text <> 'trucking'
          AND NOT (starting_qty_litres + evacuation_surplus_litres - operational_loss_litres > 0
-                  AND sold_qty_litres >= starting_qty_litres + evacuation_surplus_litres - operational_loss_litres)
+                  AND sold_qty_litres >= FLOOR(starting_qty_litres + evacuation_surplus_litres - operational_loss_litres))
        ORDER BY id DESC`,
     client`
       SELECT id, report_type::text AS role, pfi_number, submitted_by, submitted_by_name,

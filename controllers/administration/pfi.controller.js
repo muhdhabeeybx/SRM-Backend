@@ -517,7 +517,7 @@ const updatePfi = asyncHandler(async (req, res) => {
    */
   if (pfi.parentPfiId != null) {
     const typedQty = updateData.startingQtyLitres !== undefined
-      && Math.round(Number(updateData.startingQtyLitres)) !== Math.round(Number(pfi.startingQtyLitres));
+      && Math.round(Number(updateData.startingQtyLitres) * 100) !== Math.round(Number(pfi.startingQtyLitres) * 100);
     const typedTrucks = updateData.ticketCount !== undefined
       && Number(updateData.ticketCount ?? 0) !== Number(pfi.ticketCount ?? 0);
     if ((typedQty || typedTrucks) && (await allocationPfis([pfi.id])).length) {

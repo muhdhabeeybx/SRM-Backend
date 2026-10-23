@@ -445,7 +445,9 @@ const activate = async ({ pfiId, bankAccountIds = [], officers = {}, activatedBy
         await tx
           .update(pfis)
           .set({
-            soldQtyLitres: sql`LEAST(${pfis.soldQtyLitres} + ${loadedTotal}, ${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.operationalLossLitres})`,
+            // FLOOR: sold is whole litres and the stock may carry decimals
+            // (0097), which would otherwise round the cap up past the stock.
+            soldQtyLitres: sql`LEAST(${pfis.soldQtyLitres} + ${loadedTotal}, FLOOR(${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.operationalLossLitres}))`,
             updatedAt: new Date(),
           })
           .where(eq(pfis.id, pfiId));
@@ -527,7 +529,9 @@ const markFinishedIfComplete = async (pfiId, tx = db) => {
     .where(
       and(
         eq(pfis.id, pfiId),
-        sql`${pfis.soldQtyLitres} >= ${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.operationalLossLitres}`
+        // Whole litres sold against a stock that may carry decimals (0097):
+        // the part of a litre left over can never go on an order.
+        sql`${pfis.soldQtyLitres} >= FLOOR(${pfis.startingQtyLitres} + ${pfis.evacuationSurplusLitres} - ${pfis.operationalLossLitres})`
       )
     )
     .returning();

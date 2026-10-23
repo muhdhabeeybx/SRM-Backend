@@ -56,13 +56,14 @@ const pfis = pgTable(
     productName: varchar("product_name", { length: 255 }).default(""),
     productUnit: varchar("product_unit", { length: 30 }).default("Litres"),
     // The measured figure — what actually landed in the tank. This is what you
-    // sell from, so the stock balance runs off it.
-    startingQtyLitres: integer("starting_qty_litres").default(0).notNull(),
+    // sell from, so the stock balance runs off it. Two places since 0097, read
+    // as a number like the integer it replaced.
+    startingQtyLitres: decimal("starting_qty_litres", { precision: 14, scale: 2, mode: "number" }).default(0).notNull(),
     // The documented figure from the shipping papers. This is what you are
     // charged for, so cargo value is computed from it — never from the tank.
     // Nullable with no default: null means "not entered yet", which is what
     // makes every downstream money figure read "—" instead of a false ₦0.
-    blQtyLitres: integer("bl_qty_litres"),
+    blQtyLitres: decimal("bl_qty_litres", { precision: 14, scale: 2, mode: "number" }),
     // The same "not entered yet" figure as blQtyLitres, in MT — nullable with
     // no default for the same reason: an unknown BL weight must not read as 0.
     //
