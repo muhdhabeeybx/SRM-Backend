@@ -56,22 +56,22 @@ const pfis = pgTable(
     productName: varchar("product_name", { length: 255 }).default(""),
     productUnit: varchar("product_unit", { length: 30 }).default("Litres"),
     // The measured figure — what actually landed in the tank. This is what you
-    // sell from, so the stock balance runs off it. Two places since 0097, read
-    // as a number like the integer it replaced.
-    startingQtyLitres: decimal("starting_qty_litres", { precision: 14, scale: 2, mode: "number" }).default(0).notNull(),
+    // sell from, so the stock balance runs off it. Three places since 0097,
+    // as the papers print it, read as a number like the integer it replaced.
+    startingQtyLitres: decimal("starting_qty_litres", { precision: 15, scale: 3, mode: "number" }).default(0).notNull(),
     // The documented figure from the shipping papers. This is what you are
     // charged for, so cargo value is computed from it — never from the tank.
     // Nullable with no default: null means "not entered yet", which is what
     // makes every downstream money figure read "—" instead of a false ₦0.
-    blQtyLitres: decimal("bl_qty_litres", { precision: 14, scale: 2, mode: "number" }),
+    blQtyLitres: decimal("bl_qty_litres", { precision: 15, scale: 3, mode: "number" }),
     // The same "not entered yet" figure as blQtyLitres, in MT — nullable with
     // no default for the same reason: an unknown BL weight must not read as 0.
     //
     // Tonnage is decimal in reality (14832.20 MT) and these are
     // display/reporting figures, so exact numeric — float4 cannot even
     // represent 19863.55 and would show 19863.549805.
-    blQtyMt: decimal("bl_qty_mt", { precision: 14, scale: 2 }),
-    qtyVolumeMt: decimal("qty_volume_mt", { precision: 14, scale: 2 }).default("0"),
+    blQtyMt: decimal("bl_qty_mt", { precision: 15, scale: 3 }),
+    qtyVolumeMt: decimal("qty_volume_mt", { precision: 15, scale: 3 }).default("0"),
     // Gantry only: how many tickets the allocation was split into. Nullable
     // with no default for the same reason as blQtyLitres — a batch nobody has
     // counted tickets for is not a batch with zero tickets.
@@ -96,7 +96,9 @@ const pfis = pgTable(
      */
     operationalLossLitres: integer("operational_loss_litres").default(0).notNull(),
     totalAmount: decimal("total_amount", { precision: 15, scale: 2 }).default("0"),
-    unitPrice: decimal("unit_price", { precision: 15, scale: 2 }).default("0"),
+    // Three places since 0097: papers price a litre at ₦1,228.765, and the
+    // kobo would move a 26.7m L cargo's cost by ₦133k.
+    unitPrice: decimal("unit_price", { precision: 16, scale: 3 }).default("0"),
     // Rebate, discount or claim credited back against this cargo. Subtracted
     // from total cost to get the grand total cost — see lib/pfiFinance.js.
     creditBalance: decimal("credit_balance", { precision: 15, scale: 2 }).default("0"),
@@ -245,8 +247,8 @@ const pfiPriceReviews = pgTable(
   {
     id: serial("id").primaryKey(),
     pfiId: integer("pfi_id").notNull().references(() => pfis.id, { onDelete: "cascade" }),
-    price: decimal("price", { precision: 15, scale: 2 }).notNull(),
-    previousPrice: decimal("previous_price", { precision: 15, scale: 2 }).default("0").notNull(),
+    price: decimal("price", { precision: 16, scale: 3 }).notNull(),
+    previousPrice: decimal("previous_price", { precision: 16, scale: 3 }).default("0").notNull(),
     effectiveOn: date("effective_on").notNull(),
     note: text("note").default("").notNull(),
     recordedBy: integer("recorded_by").references(() => staff.id, { onDelete: "set null" }),

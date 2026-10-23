@@ -14,10 +14,11 @@ const { isSoldOut, sellableQty } = require("../lib/pfiStock");
 const { computeFinancials } = require("../lib/pfiFinance");
 
 /**
- * A PFI's quantity and BL figure carry decimals (0097): the papers say
- * 26,714,386.86 L and the tank 27,090,717.50 L. Saved as typed, read back as
- * numbers, and the half litre that orders in whole litres can never take does
- * not keep the PFI from reading sold out.
+ * A PFI's figures carry three places (0097), as the papers print them: BL
+ * 26,714,386.863 L at ₦1,228.765 a litre. Saved as typed, quantities read back
+ * as numbers, the cargo cost runs off the price as printed, and the half litre
+ * that orders in whole litres can never take does not keep the PFI from
+ * reading sold out.
  */
 const API = "/api/pfis";
 const RUN = Date.now();
@@ -35,40 +36,48 @@ describe("PFI quantities carry decimals", () => {
     await closeDb();
   });
 
-  test("raising a PFI keeps the decimals of its quantity and BL figure", async () => {
+  test("raising a PFI keeps three places on its quantities, tonnage and price", async () => {
     const res = await request(app).post(API).set("Authorization", `Bearer ${token}`).send({
       pfiNumber: `PFI/DEC/${RUN}`,
       pfiType: "coastal",
-      startingQtyLitres: "27090717.50",
-      blQtyLitres: "26714386.86",
-      unitPrice: "1228.76",
+      startingQtyLitres: "27090717.5",
+      qtyVolumeMt: "20201.873",
+      blQtyLitres: "26714386.863",
+      blQtyMt: "19921.243",
+      unitPrice: "1228.765",
     });
     assert.equal(res.status, 201, res.body.message);
 
     const [row] = await db.select().from(pfis).where(eq(pfis.pfiNumber, `PFI/DEC/${RUN}`));
     pfiId = row.id;
     assert.equal(row.startingQtyLitres, 27090717.5);
-    assert.equal(row.blQtyLitres, 26714386.86);
+    assert.equal(row.blQtyLitres, 26714386.863);
     assert.equal(typeof row.startingQtyLitres, "number", "read as a number, as the integer was");
+    assert.equal(Number(row.qtyVolumeMt), 20201.873);
+    assert.equal(Number(row.blQtyMt), 19921.243);
+    assert.equal(Number(row.unitPrice), 1228.765, "not cut to the kobo");
+
+    // The cost the papers print, not ₦133k off it.
+    assert.equal(computeFinancials(row).pfiValue, 32825703573.71);
   });
 
   test("editing keeps the decimals too", async () => {
     const res = await request(app).patch(`${API}/${pfiId}`).set("Authorization", `Bearer ${token}`).send({
-      startingQtyLitres: "27090717.25",
+      startingQtyLitres: "27090717.125",
       blQtyLitres: "26714386.5",
     });
     assert.equal(res.status, 200, res.body.message);
 
     const [row] = await db.select().from(pfis).where(eq(pfis.id, pfiId));
-    assert.equal(row.startingQtyLitres, 27090717.25);
+    assert.equal(row.startingQtyLitres, 27090717.125);
     assert.equal(row.blQtyLitres, 26714386.5);
   });
 
-  test("the surplus reads to the two places, not float noise", () => {
+  test("the surplus reads to the three places, not float noise", () => {
     const f = computeFinancials({
-      pfiType: "coastal", startingQtyLitres: 27090717, blQtyLitres: 26714386.86, unitPrice: "1228.76",
+      pfiType: "coastal", startingQtyLitres: 27090717, blQtyLitres: 26714386.863, unitPrice: "1228.765",
     });
-    assert.equal(f.surplusDeficitLitres, 376330.14);
+    assert.equal(f.surplusDeficitLitres, 376330.137);
   });
 
   test("less than one litre left is sold out — orders are whole litres", () => {

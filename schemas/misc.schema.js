@@ -789,16 +789,17 @@ const optPfiBlFloat = (label = "Volume") =>
     .optional()
     .transform((v) => (v === "" || v === null ? null : v === undefined ? undefined : Number(v)));
 
-const optPfiMoney = (label = "Amount") =>
+/** `places`: 3 for a price per unit (0097), as the papers print it. */
+const optPfiMoney = (label = "Amount", places = 2) =>
   z
     .union([
-      money(label),
-      numberLike(label).pipe(z.number().nonnegative(`${label} cannot be negative`)).transform((v) => v.toFixed(2)),
+      money(label, { places }),
+      numberLike(label).pipe(z.number().nonnegative(`${label} cannot be negative`)).transform((v) => v.toFixed(places)),
       z.literal(""),
       z.null(),
     ])
     .optional()
-    .transform((v) => (v === "" || v === null ? "0.00" : v === undefined ? undefined : typeof v === "number" ? v.toFixed(2) : String(v)));
+    .transform((v) => (v === "" || v === null ? (0).toFixed(places) : v === undefined ? undefined : typeof v === "number" ? v.toFixed(places) : String(v)));
 
 const optPfiDate = (label = "Date") =>
   z
@@ -908,8 +909,8 @@ const pfiBase = {
   qty_volume_mt: optPfiFloat("Quantity volume (MT)"),
   blQtyMt: optPfiBlFloat("BL quantity (MT)"),
   bl_qty_mt: optPfiBlFloat("BL quantity (MT)"),
-  unitPrice: optPfiMoney("Unit price"),
-  unit_price: optPfiMoney("Unit price"),
+  unitPrice: optPfiMoney("Unit price", 3),
+  unit_price: optPfiMoney("Unit price", 3),
   creditBalance: optPfiMoney("Credit balance"),
   credit_balance: optPfiMoney("Credit balance"),
   auditOfficerId: optPfiId("Audit officer"),
@@ -1048,7 +1049,7 @@ const voidPfiLoss = z.object({
 const pfiPriceParam = z.object({ id: id("PFI"), entryId: id("Price review") });
 const gantryTicketParam = z.object({ id: id("PFI"), ticketId: id("Ticket") });
 const recordPfiPrice = z.object({
-  price: money("Price", { min: 0.01 }),
+  price: money("Price", { min: 0.001, places: 3 }),
   effectiveOn: optCalendarDay("Effective date").refine((v) => v != null, "Give the date the new price applies from"),
   note: requiredString("Reason", 1000),
 });

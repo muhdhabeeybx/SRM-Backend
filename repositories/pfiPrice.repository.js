@@ -36,9 +36,11 @@ const noTable = (err) => err?.code === "42P01" || err?.cause?.code === "42P01";
 const reviewsUnavailable = () =>
   httpError(503, "Price reviews are not available yet — the database has not been updated for them (migration 0074).");
 
-const cents = (v) => Math.round((Number(v) || 0) * 100);
+// A price per unit carries three places (0097), so prices are compared and
+// written in thousandths of a naira, not kobo.
+const mils = (v) => Math.round((Number(v) || 0) * 1000);
 const naira = (v) =>
-  `₦${Number(v).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  `₦${Number(v).toLocaleString("en-NG", { minimumFractionDigits: 2, maximumFractionDigits: 3 })}`;
 
 const shape = (r) => r && { ...r, price: Number(r.price), previousPrice: Number(r.previousPrice) };
 
@@ -84,7 +86,7 @@ const record = async ({ pfiId, price, effectiveOn, note = "", staffId = null, st
       if (current <= 0) {
         throw httpError(409, "This PFI has no price yet. Enter its price on Edit details first.");
       }
-      if (cents(price) === cents(current)) {
+      if (mils(price) === mils(current)) {
         throw httpError(409, `The price is already ${naira(current)}.`);
       }
 
@@ -99,13 +101,13 @@ const record = async ({ pfiId, price, effectiveOn, note = "", staffId = null, st
         );
       }
 
-      const next = (cents(price) / 100).toFixed(2);
+      const next = (mils(price) / 1000).toFixed(3);
       const [entry] = await tx
         .insert(pfiPriceReviews)
         .values({
           pfiId: pfi.id,
           price: next,
-          previousPrice: current.toFixed(2),
+          previousPrice: current.toFixed(3),
           effectiveOn,
           note,
           recordedBy: staffId,

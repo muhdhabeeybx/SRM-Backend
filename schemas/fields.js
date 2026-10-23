@@ -98,12 +98,12 @@ const volume = (label = "Volume") =>
  */
 const MAX_INTEGER_DIGITS = 13;
 
-const money = (label = "Amount", { min = 0 } = {}) => {
+const money = (label = "Amount", { min = 0, places = 2 } = {}) => {
   let inner = z
     .string()
     .regex(
-      /^\d+(\.\d{1,2})?$/,
-      `${label} must be a positive amount with at most 2 decimal places`
+      new RegExp(`^\\d+(\\.\\d{1,${places}})?$`),
+      `${label} must be a positive amount with at most ${places} decimal places`
     )
     .refine(
       (s) => s.split(".")[0].replace(/^0+(?=\d)/, "").length <= MAX_INTEGER_DIGITS,
@@ -119,9 +119,9 @@ const money = (label = "Amount", { min = 0 } = {}) => {
 
   return z
     .union([z.number().finite(), z.string().trim()], { error: typeError(label, "an amount") })
-    .transform((v) => (typeof v === "number" ? v.toFixed(2) : v))
+    .transform((v) => (typeof v === "number" ? v.toFixed(places) : v))
     // Normalise so the driver always receives the same shape.
-    .pipe(inner.transform((s) => Number(s).toFixed(2)));
+    .pipe(inner.transform((s) => Number(s).toFixed(places)));
 };
 
 /** Text that must actually contain something. */

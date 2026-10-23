@@ -499,7 +499,7 @@ const updatePfi = asyncHandler(async (req, res) => {
    */
   if (
     updateData.unitPrice !== undefined
-    && Math.round(Number(updateData.unitPrice) * 100) !== Math.round(Number(pfi.unitPrice || 0) * 100)
+    && Math.round(Number(updateData.unitPrice) * 1000) !== Math.round(Number(pfi.unitPrice || 0) * 1000)
     && (await pfiPriceRepo.summaryFor([pfi.id])).has(Number(pfi.id))
   ) {
     return res.status(409).json({
@@ -517,7 +517,7 @@ const updatePfi = asyncHandler(async (req, res) => {
    */
   if (pfi.parentPfiId != null) {
     const typedQty = updateData.startingQtyLitres !== undefined
-      && Math.round(Number(updateData.startingQtyLitres) * 100) !== Math.round(Number(pfi.startingQtyLitres) * 100);
+      && Math.round(Number(updateData.startingQtyLitres) * 1000) !== Math.round(Number(pfi.startingQtyLitres) * 1000);
     const typedTrucks = updateData.ticketCount !== undefined
       && Number(updateData.ticketCount ?? 0) !== Number(pfi.ticketCount ?? 0);
     if ((typedQty || typedTrucks) && (await allocationPfis([pfi.id])).length) {
