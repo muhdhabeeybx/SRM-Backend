@@ -332,7 +332,8 @@ const createFromStatementLines = async ({ lineIds, bankAccountId, staffId = null
  * share: their share is changed from Edit, where its payments are.
  *
  * The truck's load names its first buyer when it had none, as the old assign
- * page did, so a truck with one customer reads that customer everywhere.
+ * page did, so a truck with one customer reads that customer everywhere, and
+ * is marked offloaded — sold and offloaded are one moment now.
  */
 const sellTruck = async ({ loadingId, lines, enteredBy = "" }) => {
   const customerIds = [...new Set(lines.map((l) => Number(l.customerId)))];
@@ -428,12 +429,19 @@ const sellTruck = async ({ loadingId, lines, enteredBy = "" }) => {
 
     const sales = await tx.insert(deliverySales).values(rows).returning();
 
-    if (!onTruck.size) {
-      await tx
-        .update(deliveryInventory)
-        .set({ customerId: rows[0].customerId, customerName: rows[0].customerName, location: rows[0].location, updatedAt: new Date() })
-        .where(eq(deliveryInventory.id, Number(load.id)));
-    }
+    // Sold is offloaded, at once (the owner, 24 Oct 2026): the truck reads
+    // Offloaded from the sale, then Part Paid and Paid as finance confirms the
+    // money. A day or a name already recorded is kept.
+    await tx
+      .update(deliveryInventory)
+      .set({
+        loadingStatus: "offloaded",
+        dateOffloaded: sql`COALESCE(NULLIF(${deliveryInventory.dateOffloaded}, ''), ${lagosToday()})`,
+        offloadedBy: sql`COALESCE(NULLIF(${deliveryInventory.offloadedBy}, ''), ${enteredBy})`,
+        ...(onTruck.size ? {} : { customerId: rows[0].customerId, customerName: rows[0].customerName, location: rows[0].location }),
+        updatedAt: new Date(),
+      })
+      .where(eq(deliveryInventory.id, Number(load.id)));
 
     return { load: { ...load, total, sold: sold + selling, left: Math.max(0, left - selling) }, sales };
   });

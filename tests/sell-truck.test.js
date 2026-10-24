@@ -86,10 +86,16 @@ describe("selling a truck", () => {
     assert.equal(byCustomer.get(ali).phoneNumber, "0800000999");
     assert.deepEqual([load.total, load.sold, load.left], [50000, 45000, 5000]);
 
-    // The load names its first buyer, as the old assign page did.
-    const [row] = await client`SELECT customer_id, location FROM delivery_inventory WHERE id = ${loadId}`;
+    // The load names its first buyer, as the old assign page did, and is
+    // offloaded the moment it is sold.
+    const [row] = await client`
+      SELECT customer_id, location, loading_status::text AS status, date_offloaded, offloaded_by
+        FROM delivery_inventory WHERE id = ${loadId}`;
     assert.equal(Number(row.customer_id), musa);
     assert.equal(row.location, "Kano");
+    assert.equal(row.status, "offloaded");
+    assert.match(row.date_offloaded, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(row.offloaded_by);
   });
 
   test("never more than is left on the truck", async () => {
