@@ -107,6 +107,9 @@ describe("selling a truck", () => {
   test("a customer needs a rate and a destination; the same customer twice is refused", async () => {
     let res = await sell(seller, [{ customerId: bala, quantity: 1000, location: "Gombe" }]);
     assert.equal(res.status, 400, JSON.stringify(res.body));
+    assert.match(JSON.stringify(res.body.errors), /rate/);
+    res = await sell(seller, [{ customerId: bala, quantity: 1000, rate: "0", location: "Gombe" }]);
+    assert.equal(res.status, 400, JSON.stringify(res.body));
     assert.match(res.body.message, /rate/);
     res = await sell(seller, [{ customerId: bala, quantity: 1000, rate: "1350" }]);
     assert.equal(res.status, 400, JSON.stringify(res.body));
@@ -118,12 +121,15 @@ describe("selling a truck", () => {
     assert.equal(res.status, 400, JSON.stringify(res.body));
   });
 
-  test("the rest sold later, to a station its desk will price", async () => {
-    const res = await sell(seller, [{ customerId: station, quantity: 5000 }]);
+  test("the rest sold later, to one of our stations, priced like any customer", async () => {
+    let res = await sell(seller, [{ customerId: station, quantity: 5000 }]);
+    assert.equal(res.status, 400, JSON.stringify(res.body));
+    res = await sell(seller, [{ customerId: station, quantity: 5000, rate: "1332", location: "ignored" }]);
     assert.equal(res.status, 201, JSON.stringify(res.body));
     const [sale] = res.body.data.sales;
     assert.equal(sale.location, `${RUN} Kano FS`);
-    assert.equal(Number(sale.salesValue), 0);
+    assert.equal(Number(sale.salesValue), 6_660_000);
+    assert.equal(sale.book, "trucking");
     assert.equal(res.body.data.load.left, 0);
   });
 
@@ -203,13 +209,13 @@ describe("the texts a sale sends", () => {
     assert.match(sms, /Kindly pay into SOROMAN NIGERIA LTD 1234567890 - Zenith Bank\./);
   });
 
-  test("a station's share: no price, nothing to pay", () => {
+  test("one of our stations is told the same, and where to pay", () => {
     const sms = CATALOG["delivery.sold_customer"].sms({
-      ...base, customerName: "Kano FS", quantity: 5000, rate: 0, value: 0, destination: "Kano FS",
-      account: { accountName: "X", accountNumber: "1", bankName: "Y" },
+      ...base, customerName: "Kano FS", quantity: 5000, rate: 1332, value: 6660000, destination: "Kano FS",
+      account: { accountName: "SOROMAN", accountNumber: "1", bankName: "Zenith Bank" },
     });
-    assert.doesNotMatch(sms, /N0|pay into/);
-    assert.match(sms, /You have bought 5,000 Litres of PMS on truck BWR835XB for delivery to Kano FS\./);
+    assert.match(sms, /You have bought 5,000 Litres of PMS on truck BWR835XB at N1,332 per litre, N6,660,000 in total, for delivery to Kano FS\./);
+    assert.match(sms, /Kindly pay into SOROMAN 1 - Zenith Bank\./);
   });
 
   test("the driver: every drop and how to reach them", () => {

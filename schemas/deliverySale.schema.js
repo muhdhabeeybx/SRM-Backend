@@ -161,9 +161,8 @@ const transferOverpayment = z.object({
  *
  * Everything about the truck itself (plate, load day, depot, batch) is read
  * off its load server-side, so a line carries only what the seller decides:
- * who, how much, at what rate, and where to. The rate may be left out only for
- * a filling station or LPG plant, whose share the station desk prices
- * (lib/deliveryBook) — the controller refuses it for a customer.
+ * who, how much, at what rate, and where to. One of our own stations is sold
+ * to at a rate like any customer, and its destination is the station itself.
  */
 const sellTruck = z.object({
   loadingId: id("Truck"),
@@ -171,7 +170,7 @@ const sellTruck = z.object({
     .array(z.object({
       customerId: id("Customer"),
       quantity: volume("Quantity"),
-      rate: money("Rate").optional(),
+      rate: money("Rate"),
       location: optionalString("Destination", 255),
       phoneNumber: optionalString("Phone number", 30),
       remarks: optionalString("Remarks", 1000),

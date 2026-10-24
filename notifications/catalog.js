@@ -595,9 +595,8 @@ function deliverySms() {
     // ── Sold from the Sell truck dialog (stepNotices.truckSold) ────────────
 
     /**
-     * One to each customer on the truck: what they bought, and — when it is
-     * priced — where to pay. A station's share has no price until its desk
-     * sets one, so it hears only what is coming.
+     * One to each customer on the truck — one of our own stations included,
+     * which settles like any customer: what they bought, and where to pay.
      *
      * data: customerName, quantity, product, truckNumber, rate, value,
      *       destination, driverName, driverPhone, account {accountName, accountNumber, bankName}
@@ -847,8 +846,8 @@ function deskSteps() {
 
     /**
      * A truck was sold (the Sell truck dialog): finance on its PFI learns what
-     * money to expect from whom, and confirms each payment on Pending Orders
-     * as it lands. Only the priced lines — a station's share is nobody's debt.
+     * money to expect from whom, our own stations included, and confirms each
+     * payment on Pending Orders as it lands.
      *
      * data: truckNumber, allocationCode, pfiNumber, total,
      *       lines [{customerName, quantity, rate, value}]

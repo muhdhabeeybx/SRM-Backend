@@ -388,8 +388,9 @@ const sellTruck = async ({ loadingId, lines, enteredBy = "" }) => {
         throw httpError(409, `${customer.name} is already on this truck — change their share from Edit.`);
       }
       const station = isStationType(customer.customerType);
+      // One of our own stations too: it settles its truck like any customer.
       const rate = Number(line.rate || 0);
-      if (!station && !(rate > 0)) throw httpError(400, `Line ${n}: enter the rate ${customer.name} is paying.`);
+      if (!(rate > 0)) throw httpError(400, `Line ${n}: enter the rate ${customer.name} is paying.`);
       const location = station ? customer.name : String(line.location || "").trim();
       if (!location) throw httpError(400, `Line ${n}: enter where ${customer.name}'s litres are going.`);
       const quantity = Number(line.quantity);

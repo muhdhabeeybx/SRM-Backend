@@ -436,11 +436,11 @@ const collectionAccount = async (pfiId) => {
 };
 
 /**
- * A truck was sold from the Sell truck dialog. Each customer hears what they
- * bought and, when it is priced, where to pay; the driver once, with every
- * drop; finance on the PFI what money to expect, so they confirm each payment
- * on Pending Orders as it lands. Only the lines just sold — a second customer
- * added later is news to them, not to the first.
+ * A truck was sold from the Sell truck dialog. Each customer — one of our own
+ * stations included — hears what they bought and where to pay; the driver
+ * once, with every drop; finance on the PFI what money to expect, so they
+ * confirm each payment on Pending Orders as it lands. Only the lines just
+ * sold — a second customer added later is news to them, not to the first.
  */
 const truckSold = (inventoryId, sales = []) =>
   later("truckSold", async () => {
@@ -483,8 +483,6 @@ const truckSold = (inventoryId, sales = []) =>
       });
     }
 
-    const priced = lines.filter((l) => l.value > 0);
-    if (!priced.length) return;
     const to = await officersFor({ pfiId: load.pfiId, depotId: load.depotId, roles: DESK_ROLES.finance });
     if (!to.length) return;
     await notify("desk.truck_sold", {
@@ -494,8 +492,8 @@ const truckSold = (inventoryId, sales = []) =>
         customerName: "",
         pfiNumber: load.pfiNumber || "",
         saleId: sales[0].id,
-        lines: priced,
-        total: priced.reduce((sum, l) => sum + l.value, 0),
+        lines,
+        total: lines.reduce((sum, l) => sum + l.value, 0),
       },
     });
   });
