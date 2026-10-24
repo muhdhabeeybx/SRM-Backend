@@ -20,7 +20,11 @@ const getRolePages = asyncHandler(async (req, res) => {
     success: true,
     data: {
       ...(await rolePages.overview()),
-      slots: PFI_SLOTS.map((s) => ({ key: s.idKey, label: s.label, role: s.role })),
+      // A slot that gives another role on a trucking PFI is listed under both.
+      slots: PFI_SLOTS.flatMap((s) => [
+        { key: s.idKey, label: s.label, role: s.role },
+        ...(s.trucking ? [{ key: s.idKey, label: `${s.label} (trucking PFI)`, role: s.trucking }] : []),
+      ]),
     },
   });
 });

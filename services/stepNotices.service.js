@@ -24,6 +24,8 @@ const gantryRegister = require("../lib/gantryTicketRegister");
  *                cancelled  → finance and ticketing
  *
  *   Truck sales  loaded     → each driver: you are loaded; truck sales: sell them
+ *                sold       → each customer: what you bought, where to pay;
+ *                             the driver: every drop; finance: money to expect
  *                customer   → the driver: who you deliver to; the customer: your truck
  *                payment    → driver, customer, payer; finance: confirm the deposit
  *                confirmed  → the customer: payment confirmed
@@ -410,6 +412,94 @@ const salesRecorded = (sales = []) =>
     }
   });
 
+/**
+ * The account a PFI's money goes into, for a customer told where to pay: its
+ * first active account, the one the truck invoice prints. Null with none.
+ */
+const collectionAccount = async (pfiId) => {
+  if (pfiId == null) return null;
+  const [row] = rowsOf(
+    await db.execute(sql`
+      SELECT ba.account_name AS "accountName", ba.account_number AS "accountNumber", ba.bank_name AS "bankName"
+        FROM bank_accounts ba
+       WHERE ba.status = 'Active'
+         AND EXISTS (
+           SELECT 1
+             FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(ba.pfi_ids) = 'array' THEN ba.pfi_ids ELSE '[]'::jsonb END) AS x(pfi_id)
+            WHERE x.pfi_id = ${String(pfiId)}
+         )
+       ORDER BY ba.id
+       LIMIT 1
+    `)
+  );
+  return row || null;
+};
+
+/**
+ * A truck was sold from the Sell truck dialog. Each customer hears what they
+ * bought and, when it is priced, where to pay; the driver once, with every
+ * drop; finance on the PFI what money to expect, so they confirm each payment
+ * on Pending Orders as it lands. Only the lines just sold — a second customer
+ * added later is news to them, not to the first.
+ */
+const truckSold = (inventoryId, sales = []) =>
+  later("truckSold", async () => {
+    const [load] = await loadsWithDrivers([inventoryId]);
+    if (!load || !sales.length) return;
+
+    const account = await collectionAccount(load.pfiId);
+    const base = {
+      inventoryId: load.id,
+      truckNumber: load.truckNumber,
+      product: load.product || "",
+      allocationCode: load.allocationCode || "",
+      driverName: load.driverName,
+      driverPhone: load.driverPhone,
+    };
+    const lines = [];
+    for (const s of sales) {
+      lines.push({
+        customerName: s.customerName || "",
+        customerPhone: await deliveryCustomerPhone(s.customerId),
+        quantity: Number(s.quantity || 0),
+        rate: Number(s.rate || 0),
+        value: Number(s.salesValue || 0),
+        destination: s.location || "",
+      });
+    }
+
+    for (const l of lines) {
+      if (!l.customerPhone) continue;
+      await notify("delivery.sold_customer", {
+        to: { phone: l.customerPhone, name: l.customerName },
+        data: { ...base, ...l, account },
+      });
+    }
+
+    if (load.driverPhone) {
+      await notify("delivery.sold_driver", {
+        to: { phone: load.driverPhone, name: load.driverName },
+        data: { ...base, customerName: "", lines },
+      });
+    }
+
+    const priced = lines.filter((l) => l.value > 0);
+    if (!priced.length) return;
+    const to = await officersFor({ pfiId: load.pfiId, depotId: load.depotId, roles: DESK_ROLES.finance });
+    if (!to.length) return;
+    await notify("desk.truck_sold", {
+      to,
+      data: {
+        ...base,
+        customerName: "",
+        pfiNumber: load.pfiNumber || "",
+        saleId: sales[0].id,
+        lines: priced,
+        total: priced.reduce((sum, l) => sum + l.value, 0),
+      },
+    });
+  });
+
 /** Finance marked a truck payment's deposit as received: the customer hears. */
 const depositConfirmed = (sale) =>
   later("depositConfirmed", async () => {
@@ -435,6 +525,7 @@ module.exports = {
   truckGatedIn,
   truckGatedOut,
   trucksLoaded,
+  truckSold,
   salesRecorded,
   depositConfirmed,
 };

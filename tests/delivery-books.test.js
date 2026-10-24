@@ -176,7 +176,8 @@ describe("the sales ledger and a station's own record", () => {
 
   test("who enters a station's deposits does not hold up the ledger", async () => {
     const enterer = await staffTokenWithRoles(["accountant"], `books-enterer-${RUN}@soroman.test`);
-    const desk = await staffTokenWithRoles(["accountant"], `books-desk-${RUN}@soroman.test`);
+    // Finance: a truck sale's payment is theirs alone (tests/sell-truck.test.js).
+    const desk = await staffTokenWithRoles(["finance"], `books-desk-${RUN}@soroman.test`);
     await client`
       INSERT INTO station_entry_staff (delivery_customer_id, pfi_id, entry_kind, staff_id)
       VALUES (${stationId}, NULL, 'deposits', ${enterer.staff.id}), (${stationId}, NULL, 'sales', ${enterer.staff.id})`;

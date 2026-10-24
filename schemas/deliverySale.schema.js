@@ -156,6 +156,30 @@ const transferOverpayment = z.object({
     .max(20, "Too many destinations in one transfer"),
 })
 
+/**
+ * One truck sold to one or more customers — the Sell truck dialog.
+ *
+ * Everything about the truck itself (plate, load day, depot, batch) is read
+ * off its load server-side, so a line carries only what the seller decides:
+ * who, how much, at what rate, and where to. The rate may be left out only for
+ * a filling station or LPG plant, whose share the station desk prices
+ * (lib/deliveryBook) — the controller refuses it for a customer.
+ */
+const sellTruck = z.object({
+  loadingId: id("Truck"),
+  lines: z
+    .array(z.object({
+      customerId: id("Customer"),
+      quantity: volume("Quantity"),
+      rate: money("Rate").optional(),
+      location: optionalString("Destination", 255),
+      phoneNumber: optionalString("Phone number", 30),
+      remarks: optionalString("Remarks", 1000),
+    }))
+    .min(1, "Add at least one customer")
+    .max(20, "Too many customers on one truck"),
+});
+
 const cycleStandingQuery = z.object({
   truckNumber: z.string().trim().max(100, "Truck number is too long"),
   dateLoaded: z.string().trim().max(40, "Date loaded is too long").optional(),
@@ -170,5 +194,6 @@ module.exports = {
   listDeliverySales,
   idParam,
   transferOverpayment,
+  sellTruck,
   cycleStandingQuery,
 };

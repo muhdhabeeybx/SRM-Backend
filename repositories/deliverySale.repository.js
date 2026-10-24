@@ -1,6 +1,7 @@
 const { eq, and, or, ilike, desc, count, sql, inArray, getTableColumns } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { deliverySales, deliveryCustomers, bankStatementLines } = require("../db/schema");
+const { deliverySales, deliveryCustomers, deliveryInventory, bankStatementLines } = require("../db/schema");
+const { isStationType } = require("../lib/customerTypes");
 const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 const { readBookSql } = require("../lib/deliveryBook");
 const { assertNotBankEntries } = require("../lib/bankEntries");
@@ -310,6 +311,133 @@ const createFromStatementLines = async ({ lineIds, bankAccountId, staffId = null
   });
 };
 
+/**
+ * Sell one loaded truck: a share row per customer, all or none.
+ *
+ * Each line becomes the row the ledger already reads as a customer's share of
+ * a load (lib/load-split on the dashboard) — customer, litres, destination,
+ * rate and the sales value they make — with no money on it. Payments are
+ * added beside it later, by finance, off the bank statement.
+ *
+ * ── What is left on the truck ─────────────────────────────────────────────
+ *
+ * Read here, under a lock on the load, from the shares already on it: the
+ * same cycle (plate without spaces, the load day) and the sales ledger's side
+ * only, each customer's share being the largest quantity across their rows,
+ * as the ledger counts it. The truck is the larger of what was allocated and
+ * what is already sold off it. Two people selling the same truck at once wait
+ * for each other, and the second is told what is really left.
+ *
+ * A customer already on the truck is refused rather than given a second
+ * share: their share is changed from Edit, where its payments are.
+ *
+ * The truck's load names its first buyer when it had none, as the old assign
+ * page did, so a truck with one customer reads that customer everywhere.
+ */
+const sellTruck = async ({ loadingId, lines, enteredBy = "" }) => {
+  const customerIds = [...new Set(lines.map((l) => Number(l.customerId)))];
+  if (customerIds.length !== lines.length) {
+    throw httpError(400, "The same customer is on two lines — put their litres on one.");
+  }
+
+  return db.transaction(async (tx) => {
+    const [load] = await tx.execute(sql`
+      SELECT id, truck_number AS "truckNumber", date_allocated AS "dateAllocated",
+             COALESCE(NULLIF(depot, ''), pfi_location, '') AS depot,
+             COALESCE(quantity_allocated, 0) AS "quantityAllocated",
+             allocation_code AS "allocationCode", pfi_id AS "pfiId"
+        FROM delivery_inventory
+       WHERE id = ${Number(loadingId)}
+         FOR UPDATE`);
+    if (!load) throw httpError(404, "That truck is not on the inventory.");
+    if (!String(load.truckNumber || "").trim()) throw httpError(409, "That load has no truck on it yet.");
+
+    const found = await tx
+      .select({ id: deliveryCustomers.id, name: deliveryCustomers.name, customerType: deliveryCustomers.customerType })
+      .from(deliveryCustomers)
+      .where(inArray(deliveryCustomers.id, customerIds));
+    const byId = new Map(found.map((c) => [Number(c.id), c]));
+
+    const day = String(load.dateAllocated || "").slice(0, 10);
+    const shares = await tx.execute(sql`
+      SELECT ${deliverySales.customerId} AS "customerId",
+             MAX(CASE
+                   WHEN COALESCE(${deliverySales.rate}, 0) > 0 AND COALESCE(${deliverySales.salesValue}, 0) > 0
+                    AND ABS(${deliverySales.salesValue} / ${deliverySales.rate} - COALESCE(${deliverySales.quantity}, 0)::numeric) > 1
+                   THEN ${deliverySales.salesValue} / ${deliverySales.rate}
+                   ELSE COALESCE(${deliverySales.quantity}, 0)::numeric
+                 END) AS quantity
+        FROM ${deliverySales}
+        LEFT JOIN ${deliveryCustomers} ON ${deliveryCustomers.id} = ${deliverySales.customerId}
+       WHERE regexp_replace(UPPER(COALESCE(${deliverySales.truckNumber}, '')), '\\s', '', 'g')
+           = regexp_replace(UPPER(${load.truckNumber}), '\\s', '', 'g')
+         AND COALESCE(LEFT(${deliverySales.dateLoaded}, 10), '') = ${day}
+         AND ${readBookSql(deliverySales, deliveryCustomers.customerType)} <> 'station'
+       GROUP BY ${deliverySales.customerId}`);
+
+    const sold = shares.reduce((sum, s) => sum + Number(s.quantity || 0), 0);
+    const total = Math.max(Number(load.quantityAllocated || 0), sold);
+    const left = Math.max(0, total - sold);
+    const onTruck = new Set(shares.map((s) => Number(s.customerId)).filter(Boolean));
+
+    const rows = lines.map((line, i) => {
+      const n = i + 1;
+      const customer = byId.get(Number(line.customerId));
+      if (!customer) throw httpError(400, `Line ${n}: that customer does not exist.`);
+      if (onTruck.has(Number(customer.id))) {
+        throw httpError(409, `${customer.name} is already on this truck — change their share from Edit.`);
+      }
+      const station = isStationType(customer.customerType);
+      const rate = Number(line.rate || 0);
+      if (!station && !(rate > 0)) throw httpError(400, `Line ${n}: enter the rate ${customer.name} is paying.`);
+      const location = station ? customer.name : String(line.location || "").trim();
+      if (!location) throw httpError(400, `Line ${n}: enter where ${customer.name}'s litres are going.`);
+      const quantity = Number(line.quantity);
+      const value = (Math.round(rate * quantity * 100) / 100).toFixed(2);
+      return {
+        truckNumber: load.truckNumber,
+        dateLoaded: day || lagosToday(),
+        depotLoaded: load.depot || "",
+        customerId: Number(customer.id),
+        customerName: customer.name,
+        location,
+        quantity,
+        rate: rate.toFixed(2),
+        salesValue: value,
+        balance: value,
+        allocationCode: load.allocationCode || null,
+        // The sales ledger's own record, a station's share included — the
+        // same as every row the ledger writes (lib/deliveryBook).
+        book: "trucking",
+        phoneNumber: line.phoneNumber || "",
+        remarks: line.remarks || "",
+        enteredBy,
+      };
+    });
+
+    const selling = rows.reduce((sum, r) => sum + r.quantity, 0);
+    // A litre of slack: the figures are floats, and rounding is not a dispute.
+    if (total > 0 && selling > left + 1) {
+      throw httpError(
+        409,
+        `Only ${left.toLocaleString("en-NG")} Litres are left on ${load.truckNumber} ` +
+          `(${sold.toLocaleString("en-NG")} of ${total.toLocaleString("en-NG")} already sold).`,
+      );
+    }
+
+    const sales = await tx.insert(deliverySales).values(rows).returning();
+
+    if (!onTruck.size) {
+      await tx
+        .update(deliveryInventory)
+        .set({ customerId: rows[0].customerId, customerName: rows[0].customerName, location: rows[0].location, updatedAt: new Date() })
+        .where(eq(deliveryInventory.id, Number(load.id)));
+    }
+
+    return { load: { ...load, total, sold: sold + selling, left: Math.max(0, left - selling) }, sales };
+  });
+};
+
 const update = async (id, data) => {
   const [row] = await db
     .update(deliverySales)
@@ -500,6 +628,7 @@ module.exports = {
   create,
   createMany,
   createFromStatementLines,
+  sellTruck,
   update,
   deleteById,
   cycleStanding,

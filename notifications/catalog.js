@@ -592,6 +592,55 @@ function deliverySms() {
         " We will text you when your payment is received."
     ),
 
+    // ── Sold from the Sell truck dialog (stepNotices.truckSold) ────────────
+
+    /**
+     * One to each customer on the truck: what they bought, and — when it is
+     * priced — where to pay. A station's share has no price until its desk
+     * sets one, so it hears only what is coming.
+     *
+     * data: customerName, quantity, product, truckNumber, rate, value,
+     *       destination, driverName, driverPhone, account {accountName, accountNumber, bankName}
+     */
+    "delivery.sold_customer": make(
+      "Truck sold to you",
+      (d) => {
+        const account = d.value > 0 && d.account ? smsPayTo(d.account) : "";
+        return (
+          `${P()}Good day${d.customerName ? ` ${d.customerName}` : ""}. ` +
+          `You have bought ${smsQuantity(d.quantity, "Litres")}${d.product ? ` of ${d.product}` : ""} on truck ${truck(d)}` +
+          `${d.value > 0 ? `${smsRate(d.rate)}, ${smsMoney(d.value)} in total,` : ""}` +
+          ` for delivery to ${d.destination || "your location"}.` +
+          `${d.driverName ? ` Your driver is ${d.driverName}${on(d.driverPhone)}.` : ""}` +
+          `${account ? ` Kindly pay into ${account}.` : ""}` +
+          ` ${smsThanks()}`
+        );
+      },
+      "high"
+    ),
+
+    /**
+     * The driver, once per sale: who each share goes to, and how to reach them.
+     *
+     * data: driverName, truckNumber, lines [{customerName, customerPhone, quantity, destination}]
+     */
+    "delivery.sold_driver": make(
+      "Your truck has been sold",
+      (d) => {
+        const drops = (d.lines || []).map(
+          (l) =>
+            `${smsQuantity(l.quantity, "Litres")} to ${l.customerName || "the customer"}` +
+            `${l.destination ? ` at ${l.destination}` : ""}${l.customerPhone ? `, phone ${l.customerPhone}` : ""}`,
+        );
+        const list = drops.length > 1 ? `${drops.slice(0, -1).join(", ")} and ${drops[drops.length - 1]}` : drops[0] || "";
+        return (
+          `${P()}Good day${d.driverName ? ` ${d.driverName}` : ""}. Your truck ${truck(d)} has been sold.` +
+          `${list ? ` Please deliver ${list}.` : ""}`
+        );
+      },
+      "high"
+    ),
+
     "delivery.paid_driver": make(
       "Product sold — contact the customer",
       (d) =>
@@ -794,6 +843,34 @@ function deskSteps() {
         `${plateList(d.plates)}. Please put their customers on them.`.replace(/ +/g, " "),
       entity: (d) => ({ type: "delivery_batch", id: d.allocationCode || "" }),
       actionUrl: () => adminLink("/delivery-operations"),
+    }),
+
+    /**
+     * A truck was sold (the Sell truck dialog): finance on its PFI learns what
+     * money to expect from whom, and confirms each payment on Pending Orders
+     * as it lands. Only the priced lines — a station's share is nobody's debt.
+     *
+     * data: truckNumber, allocationCode, pfiNumber, total,
+     *       lines [{customerName, quantity, rate, value}]
+     */
+    "desk.truck_sold": staffStep({
+      category: "payments",
+      title: (d) => `Truck ${d.truckNumber || ""} sold — ${smsMoney(d.total)} to collect`.replace(/ +/g, " "),
+      body: (d) =>
+        `${(d.lines || []).map((l) => `${l.customerName || "A customer"}: ${smsQuantity(l.quantity, "Litres")}${smsRate(l.rate)}`).join("; ")}` +
+        `${d.allocationCode ? `, on batch ${d.allocationCode}` : ""}. Confirm each payment on Pending Orders as it lands.`,
+      sms: (d) => {
+        const sold = (d.lines || []).map(
+          (l) => `${smsQuantity(l.quantity, "Litres")} to ${l.customerName || "a customer"}${smsRate(l.rate)}, ${smsMoney(l.value)}`,
+        );
+        const list = sold.length > 1 ? `${sold.slice(0, -1).join("; ")} and ${sold[sold.length - 1]}` : sold[0] || "";
+        return (
+          `${P()}Good day. Truck ${d.truckNumber || "TBA"}${d.allocationCode ? ` on batch ${d.allocationCode}` : ""} has been sold: ` +
+          `${list}. Kindly confirm each payment on Pending Orders when it lands.`
+        );
+      },
+      entity: (d) => ({ type: "delivery_sale", id: d.saleId || "" }),
+      actionUrl: () => adminLink("/payable-orders"),
     }),
 
     "desk.truck_payment": staffStep({

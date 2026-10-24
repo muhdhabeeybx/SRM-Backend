@@ -1,7 +1,7 @@
 const { and, eq, inArray, sql } = require("drizzle-orm");
 const { db, client } = require("../config/db");
 const { staff, staffPfiRoles, pfiStaff } = require("../db/schema");
-const { PFI_SLOTS, officersOn } = require("../lib/pfiSlots");
+const { PFI_SLOTS, officersOn, roleSql } = require("../lib/pfiSlots");
 const { setAssignmentContext } = require("../lib/pfiAssignmentContext");
 const auditLogRepo = require("../repositories/auditLog.repository");
 const rolePages = require("./rolePages.service");
@@ -33,7 +33,7 @@ const rolePages = require("./rolePages.service");
  */
 
 const OPEN_SQL = "(p.status <> 'finished' OR p.closure_date IS NULL)";
-const SLOT_VALUES = PFI_SLOTS.map((s) => `('${s.role}', '${s.label}', p.${s.column})`).join(", ");
+const SLOT_VALUES = PFI_SLOTS.map((s) => `(${roleSql(s)}, '${s.label}', p.${s.column})`).join(", ");
 const SLOT_ORDER = PFI_SLOTS.map((s) => s.role);
 
 /** The PFI assignment sources a slot writes. A PFI ticked in Manage Users is not one. */

@@ -41,6 +41,24 @@ const forbidden = (res, message) => res.status(403).json({ success: false, messa
 const saleVisible = (codes, sale) => codes === null || (!!sale && codes.includes(code(sale.allocationCode)));
 
 /*
+  ── Who records a truck sale's money ──────────────────────────────────────
+
+  Selling a truck and taking its money are two jobs (the owner, 24 Oct 2026):
+  the sales manager on the batch says who bought it and at what rate, and the
+  finance officer on the PFI matches the payments off the bank statement —
+  from Pending Orders or the ledger. The same people as an order's payment
+  (enforceRole('finance', 'admin') on the order routes; super admin passes).
+  One person holding both roles does both.
+
+  Only the sales ledger's money: recording a payment, changing or deleting
+  one, and moving an overpayment between trucks. A station's own deposits are
+  its entry staff's (lib/stationEntry).
+*/
+const MONEY_ROLES = ["finance", "admin", "super_admin"];
+const takesMoney = (user) => (user?.roles || []).some((r) => MONEY_ROLES.includes(r));
+const NOT_FINANCE = "Only finance records a truck sale's payment.";
+
+/*
   ── Who enters a station's rows ────────────────────────────────────────────
 
   Seeing a station is not the same as entering for it. Its sales and
@@ -155,6 +173,8 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   // record named is its own deposit.
   const [placed] = await placeRows([claiming ? { ...typed, paymentAmount: typed.paymentAmount || 1 } : typed]);
   const base = { ...typed, book: placed.book };
+  const money = claiming || Number(base.paymentAmount || 0) !== 0;
+  if (money && base.book === "trucking" && !takesMoney(req.user)) return forbidden(res, NOT_FINANCE);
 
   // Only onto a batch of this person's PFI, and only from its accounts.
   const codes = await allocationCodesFor(req.user);
@@ -192,6 +212,46 @@ const createDeliverySale = asyncHandler(async (req, res) => {
     success: true,
     message: "Delivery sale record created",
     data: { sale },
+  });
+});
+
+/**
+ * Sell a loaded truck to one or more customers — the Sell truck dialog.
+ *
+ * One call for the whole sale, so the lines land together and the texts go
+ * out once: each customer hears what they bought and where to pay, the driver
+ * who to deliver to, and finance on the PFI what money to expect
+ * (stepNotices.truckSold). What is left on the truck is checked server-side,
+ * under a lock (deliverySaleRepo.sellTruck); more can be sold off it later
+ * while litres remain.
+ */
+const sellTruck = asyncHandler(async (req, res) => {
+  const { loadingId, lines } = req.body;
+  const [load] = await client`
+    SELECT id, allocation_code AS "allocationCode" FROM delivery_inventory WHERE id = ${Number(loadingId)}`;
+  const codes = await allocationCodesFor(req.user);
+  if (!load || (codes !== null && !codes.includes(code(load.allocationCode)))) {
+    return res.status(404).json({ success: false, message: "That truck is not on the inventory." });
+  }
+  if (lines.some((l) => !stationWriteOk(req.user, l))) {
+    return forbidden(res, "One or more of those customers is a station that is not one of yours.");
+  }
+
+  const { load: sold, sales } = await deliverySaleRepo.sellTruck({
+    loadingId,
+    lines,
+    enteredBy: actorName(req.user),
+  });
+  stepNotices.truckSold(sold.id, sales);
+
+  const litres = sales.reduce((sum, s) => sum + Number(s.quantity || 0), 0);
+  const value = sales.reduce((sum, s) => sum + Number(s.salesValue || 0), 0);
+  res.status(201).json({
+    success: true,
+    message:
+      `${sold.truckNumber} sold to ${sales.length} customer${sales.length === 1 ? "" : "s"} — ` +
+      `${litres.toLocaleString("en-NG")} Litres${value > 0 ? `, ₦${value.toLocaleString("en-NG")}` : ""}`,
+    data: { sales, load: sold },
   });
 });
 
@@ -265,6 +325,7 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
  * caller's word.
  */
 const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
+  if (!takesMoney(req.user)) return forbidden(res, NOT_FINANCE);
   // Money may only move between trucks this person can see, both ends.
   const codes = await allocationCodesFor(req.user);
   if (codes !== null) {
@@ -349,6 +410,9 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
   // into a deposit by somebody who does not enter deposits, nor the reverse.
   const refusal = await stationEntry.refusalFor(req.user, [current, { ...current, ...req.body }]);
   if (refusal) return forbidden(res, refusal);
+  const movesMoney = req.body.paymentAmount !== undefined
+    && Number(req.body.paymentAmount || 0) !== Number(sale.paymentAmount || 0);
+  if (movesMoney && current.book === "trucking" && !takesMoney(req.user)) return forbidden(res, NOT_FINANCE);
 
   // An edit is not a new author: whoever recorded the row stays on it. The
   // page resends the whole row, "Unknown" and all, so it is dropped here.
@@ -408,6 +472,14 @@ const deleteDeliverySale = asyncHandler(async (req, res) => {
     const refusal = await stationEntry.refusalFor(req.user, existing ? [existing] : []);
     if (refusal) return forbidden(res, refusal);
   }
+  // A payment on the ledger, once recorded, is finance's to take off again.
+  if (!takesMoney(req.user)) {
+    const existing = await deliverySaleRepo.findById(req.params.id);
+    if (existing && Number(existing.paymentAmount || 0) !== 0) {
+      const side = existing.book || (await deliverySaleRepo.readBookById(existing.id));
+      if (side === "trucking") return forbidden(res, NOT_FINANCE);
+    }
+  }
   const sale = await deliverySaleRepo.deleteById(req.params.id);
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });
@@ -420,6 +492,7 @@ module.exports = {
   getDeliverySales,
   getDeliverySaleById,
   createDeliverySale,
+  sellTruck,
   updateDeliverySale,
   setDeliverySaleDepositStatus,
   deleteDeliverySale,

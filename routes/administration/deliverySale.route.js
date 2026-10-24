@@ -8,6 +8,7 @@ const {
   getDeliverySaleById,
   createDeliverySale,
   createDeliverySalesBulk,
+  sellTruck,
   updateDeliverySale,
   setDeliverySaleDepositStatus,
   deleteDeliverySale,
@@ -22,6 +23,8 @@ router.get("/cycle-standing", verifyStaff, validate({ query: saleSchemas.cycleSt
 // One transaction for many rows — see the controller.
 router.post("/bulk", verifyStaff, validate({ body: saleSchemas.createDeliverySalesBulk }), createDeliverySalesBulk);
 router.post("/transfer", verifyStaff, validate({ body: saleSchemas.transferOverpayment }), transferDeliveryOverpayment);
+// A truck sold to its customers in one go — see the controller.
+router.post("/sell-truck", verifyStaff, validate({ body: saleSchemas.sellTruck }), sellTruck);
 router.get("/:id", verifyStaff, validate({ params: saleSchemas.idParam }), getDeliverySaleById);
 router.post("/", verifyStaff, validate({ body: saleSchemas.createDeliverySale }), createDeliverySale);
 router.patch("/:id", verifyStaff, validate({ params: saleSchemas.idParam, body: saleSchemas.updateDeliverySale }), updateDeliverySale);

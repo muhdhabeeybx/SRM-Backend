@@ -176,10 +176,10 @@ const CHOICES = [
     key: "desk_steps",
     label: "Order and truck steps for their desk",
     description:
-      "A text when an order or truck on their PFI reaches their desk: an order to confirm, tickets to write, trucks at the gate, truck payments to confirm.",
+      "A text when an order or truck on their PFI reaches their desk: an order to confirm, tickets to write, trucks at the gate, a truck sold, truck payments to confirm.",
     types: [
       "desk.order_to_confirm", "desk.order_to_ticket", "desk.order_to_stock", "desk.trucks_to_admit", "desk.trucks_on_yard",
-      "desk.order_completed", "desk.order_cancelled", "desk.trucks_to_sell", "desk.truck_payment",
+      "desk.order_completed", "desk.order_cancelled", "desk.trucks_to_sell", "desk.truck_sold", "desk.truck_payment",
     ],
     personal: true,
   },
