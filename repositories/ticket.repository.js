@@ -1,4 +1,4 @@
-const { scopeCondition } = require("../lib/scopeFilter");
+const { orderScopeCondition } = require("../lib/scopeFilter");
 const { eq, and, or, ilike, desc, count, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { tickets, orders, customers, depots, products, staff, pfis } = require("../db/schema");
@@ -234,7 +234,7 @@ const findAll = async ({ search, status, page = 1, limit = 50, scopeUser = null 
   const conditions = [];
 
   // Staff assigned to a PFI see its orders' tickets and no others.
-  const scope = scopeCondition(scopeUser, { pfiColumn: orders.pfiId });
+  const scope = orderScopeCondition(scopeUser, { pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
 
   if (status) {

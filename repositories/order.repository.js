@@ -13,7 +13,7 @@ const {
 } = require("../db/schema/orderPayment");
 const { generateOrderReference, parseOrderReference } = require("../utils/helpers");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
-const { scopeCondition } = require("../lib/scopeFilter");
+const { orderScopeCondition } = require("../lib/scopeFilter");
 const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 const { unrecordedMoveSql, moveReachedAnOrderSql } = require("../lib/walletMoves");
 
@@ -459,7 +459,7 @@ const findAll = async ({
 
   const conditions = [];
 
-  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  const scope = orderScopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
 
   if (search) {
@@ -662,7 +662,7 @@ const findAll = async ({
 const findCustomerDifferentials = async (customerIds, scopeUser) => {
   if (!customerIds.length) return [];
 
-  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  const scope = orderScopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   const scopeClause = scope ? sql` AND ${scope}` : sql``;
 
   const result = await db.execute(sql`
@@ -890,7 +890,7 @@ const findFinanceReport = async ({
   scopeUser,
 } = {}) => {
   const conditions = [];
-  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  const scope = orderScopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
   /**
    * A truck allocation's order (lib/allocationOrders): stock the company moved
@@ -1793,7 +1793,7 @@ const findPayableOrders = async (scopeUser) => {
      */
     ne(orders.pricingStatus, "pending"),
   ];
-  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  const scope = orderScopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
 
   const rows = await db

@@ -1,7 +1,7 @@
 const { and, eq, isNull, desc, count, or, ne, notInArray, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { notifications, orders } = require("../db/schema");
-const { scopeCondition } = require("../lib/scopeFilter");
+const { orderScopeCondition } = require("../lib/scopeFilter");
 const { isConfined } = require("../lib/pfiScope");
 const staffChoices = require("../notifications/staffChoices");
 
@@ -49,7 +49,7 @@ const aboutThem = (user, hiddenTypes = []) => {
     isNull(notifications.archivedAt),
   ];
 
-  const orderScope = scopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  const orderScope = orderScopeCondition(user, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (orderScope) conditions.push(or(ne(notifications.entityType, "order"), orderScope));
 
   if (isConfined(user)) conditions.push(notInArray(notifications.entityType, UNLINKED_REQUESTS));

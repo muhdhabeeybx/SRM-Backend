@@ -2,7 +2,7 @@ const { eq, and, asc, desc, count, gte, lte, sql, or, ilike, isNotNull } = requi
 const { alias } = require("drizzle-orm/pg-core");
 const { db } = require("../config/db");
 const { orderTrucks, orders, customers, depots, products, pfis, staff } = require("../db/schema");
-const { scopeCondition } = require("../lib/scopeFilter");
+const { orderScopeCondition } = require("../lib/scopeFilter");
 const { generateOrderReference } = require("../utils/helpers");
 const { dayEdge, lagosToday, localDateStr } = require("../lib/zonedDay");
 
@@ -121,7 +121,7 @@ const sumQuantityByOrder = async (orderId, tx = db) => {
  */
 const findGateMovements = async ({ dateFrom, dateTo, depotId, pfiId, search, scopeUser } = {}) => {
   const conditions = [isNotNull(orderTrucks.securityEnteredAt)];
-  const scope = scopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
+  const scope = orderScopeCondition(scopeUser, { depotColumn: orders.depotId, pfiColumn: orders.pfiId });
   if (scope) conditions.push(scope);
   if (depotId) conditions.push(eq(orders.depotId, Number(depotId)));
   if (pfiId) conditions.push(eq(orders.pfiId, Number(pfiId)));

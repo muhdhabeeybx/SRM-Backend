@@ -3,6 +3,7 @@ const { db } = require("../config/db");
 const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
 const { outstandingTrucks } = require("./truckProgress.service");
 const { transferSql } = require("../lib/allocationOrders");
+const { confinedAwayFromOrders } = require("../lib/scopeFilter");
 
 /**
  * How much work is waiting, per desk.
@@ -56,6 +57,12 @@ const where = (...conditions) => and(...conditions.filter(Boolean));
  */
 const mine = (user, { depotColumn, pfiColumn } = {}) => {
   const { depotIds = [], pfiIds = [] } = user?.scope || {};
+  /*
+    Confined to stations or LPG plants alone: no depot order is theirs, so an
+    order queue counts none for them (lib/scopeFilter confinedAwayFromOrders).
+    Every queue reading this with a depot column is an order queue.
+  */
+  if (depotColumn && confinedAwayFromOrders(user)) return sql`false`;
   /*
     A PFI assignment is the whole answer, as lib/scopeFilter has it. This used
     to OR it with depot scope, so somebody assigned to one PFI and a depot had
