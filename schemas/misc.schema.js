@@ -184,10 +184,29 @@ const bulkCostInventory = z.object({
   productPrice: money("Product price").nullish(),
   /** A third-party truck's haulage — written to those trucks only. */
   haulageAmount: money("Haulage").nullish(),
+  /** The owner's rate per litre: the trip's haulage is this × its litres. Hired trucks only. */
+  haulageRate: money("Haulage rate", { places: 4 }).nullish(),
   /** Feeding already paid through Expenses — kept, but not added again. Absent leaves it. */
   feedingInExpenses: z.boolean().optional(),
   /** Without this, a blank field means "leave alone" rather than "clear". */
   clearBlank: z.boolean().optional(),
+});
+/** A feeding expense already raised, linked to trucks: its amount split equally across them. */
+const linkFeeding = z.object({
+  expenseId: id("Expense"),
+  ids: z.array(id("Truck")).min(1, "Pick the trucks").max(300),
+});
+/** A payment request to a hired truck's owner, or one already raised spread across the trucks. */
+const ownerPayment = z.object({
+  ids: z.array(id("Truck")).min(1, "Pick the trucks").max(300),
+  kind: enumOf("Kind", ["advance", "balance"]),
+  amount: money("Amount").nullish(),
+  expenseId: id("Expense").optional(),
+  note: optionalString("Note", 500),
+});
+/** The PFIs whose unlinked feeding and haulage expenses are wanted: "38,79". */
+const linkablePayments = z.object({
+  pfiIds: z.string().trim().regex(/^\d+(,\d+)*$/, "PFI ids").max(500),
 });
 const listInventory = pagination.extend({
   search: searchTerm,
@@ -1154,7 +1173,7 @@ module.exports = {
   listPfis,
   listTickets, ticketIdOrCode,
   createStation, updateStation, listStations,
-  createInventory, updateInventory, listInventory, bulkCostInventory,
+  createInventory, updateInventory, listInventory, bulkCostInventory, linkFeeding, ownerPayment, linkablePayments,
   createStaff, updateStaff, setStaffPassword, listStaff, updateMyProfile, changeMyPassword,
   createBankAccount, updateBankAccount,
   createBankStatement, bankStatementMapping, matchBankLines,

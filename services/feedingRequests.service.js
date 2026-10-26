@@ -20,6 +20,22 @@
  * is paid, then the PFI's paid expenses carry it (lib/tripCosts.js). A
  * rejected or deleted request leaves the feeding on the truck, where it can be
  * corrected and saved again.
+ *
+ * ── A request raised by hand first ─────────────────────────────────────────
+ *
+ * The desk often raises the batch's feeding in Expenses before anybody costs
+ * the trucks (EXP-646, ₦2.3m for 46 trucks on PFI 38B, 21 Oct 2026). Costing
+ * the trucks afterwards raised a second request for the same naira. Now:
+ *
+ *   - Such a request is LINKED to the batch's trucks (link): its amount is
+ *     split equally across them and becomes their feeding, and it is their
+ *     request from then on, whatever stage finance has it at. Any request
+ *     raised from here for those trucks is taken off them.
+ *   - While a PFI has a feeding expense linked to no truck, costing its trucks
+ *     raises no new request (`held`) — it says which one to link instead.
+ *
+ * Hired trucks are fed by their owner (the user, 2026-10-26): their feeding
+ * is never entered, so never raised or linked.
  */
 const { client } = require("../db");
 const pfiExpenseRepo = require("../repositories/pfiExpense.repository");
@@ -38,6 +54,48 @@ const feedingCategoryId = async (tx) => {
   return c ? Number(c.id) : null;
 };
 
+/** Every Feeding account, the chart's and the one from before it. */
+const feedingCategoryIds = async (tx) =>
+  (await tx`SELECT id FROM expense_categories WHERE pfi_id IS NULL AND lower(name) LIKE 'feeding%'`).map((r) => Number(r.id));
+
+/**
+ * Feeding expenses on these PFIs that carry no truck's feeding: raised by hand,
+ * not rejected, not deleted. What costing should link rather than raise anew.
+ */
+async function unlinked(pfiIds, tx = client) {
+  const ids = ints(pfiIds);
+  if (!ids.length) return [];
+  const cats = await feedingCategoryIds(tx);
+  if (!cats.length) return [];
+  const rows = await tx`
+    SELECT e.id, e.pfi_id, e.reference_number AS reference, e.status::text AS status,
+           e.amount_ngn AS amount, e.description, e.created_at
+      FROM pfi_expenses e
+     WHERE e.pfi_id = ANY(${ids}::int[]) AND e.category_id = ANY(${cats}::int[])
+       AND e.deleted_at IS NULL AND e.status <> 'rejected'
+       AND NOT EXISTS (SELECT 1 FROM delivery_inventory d WHERE d.feeding_expense_id = e.id)
+     ORDER BY e.id DESC`;
+  return rows.map((r) => ({
+    id: Number(r.id),
+    pfiId: Number(r.pfi_id),
+    reference: r.reference,
+    status: r.status,
+    amount: Number(r.amount || 0),
+    description: r.description || "",
+    raisedAt: r.created_at ? new Date(r.created_at).toISOString() : null,
+  }));
+}
+
+/** ₦2,300,000 over 46 trucks: kobo-exact, the odd kobo on the first trucks. */
+const equalSplit = (total, count) => {
+  const k = Math.round(Number(total) * 100);
+  const base = Math.floor(k / count);
+  const extra = k - base * count;
+  return Array.from({ length: count }, (_, i) => (base + (i < extra ? 1 : 0)) / 100);
+};
+
+const httpError = (status, message) => Object.assign(new Error(message), { status, statusCode: status });
+
 /** "Drivers' feeding allowance: 32 trucks on PFI-47D, ₦50,000 each." */
 const describe = ({ trucks, total, each, codes }) =>
   `Drivers' feeding allowance: ${trucks} truck${trucks === 1 ? "" : "s"}` +
@@ -54,7 +112,7 @@ const describe = ({ trucks, total, each, codes }) =>
  * @returns {{ raised: object[], changed: object[], dropped: object[], noPfi: number, noCategory: boolean }}
  */
 async function sync({ tripIds = [], expenseIds = [], actor = {} }) {
-  const out = { raised: [], changed: [], dropped: [], noPfi: 0, noCategory: false };
+  const out = { raised: [], changed: [], dropped: [], held: [], noPfi: 0, noCategory: false };
   const ids = ints(tripIds);
   const also = ints(expenseIds);
   if (!ids.length && !also.length) return out;
@@ -112,6 +170,12 @@ async function sync({ tripIds = [], expenseIds = [], actor = {} }) {
              FOR UPDATE`;
           let id = pending ? Number(pending.id) : null;
           if (!id) {
+            // Raised by hand already and linked to no truck: link that, not a second one.
+            const waiting = await unlinked([pfiId], tx);
+            if (waiting.length) {
+              out.held.push({ pfiId, trucks: tripList.length, requests: waiting.map((w) => ({ reference: w.reference, amount: w.amount })) });
+              continue;
+            }
             const row = await pfiExpenseRepo.createExpense({
               pfi_id: pfiId,
               category_id: category,
@@ -163,12 +227,11 @@ async function sync({ tripIds = [], expenseIds = [], actor = {} }) {
       }
 
       const total = Number(sum.total);
-      const description = describe({
-        trucks: sum.trucks,
-        total,
-        each: sum.amounts === 1 ? Number(sum.each) : null,
-        codes: sum.codes,
-      });
+      // A request somebody wrote by hand and linked keeps their words.
+      const ours = isNew || !e.description || e.description.includes("Raised from Delivery Costing");
+      const description = ours
+        ? describe({ trucks: sum.trucks, total, each: sum.amounts === 1 ? Number(sum.each) : null, codes: sum.codes })
+        : e.description;
       if (!isNew && Number(e.amount) === total && e.description === description) continue;
 
       const row = await pfiExpenseRepo.updateExpense(id, { amount: String(total), description }, tx);
@@ -195,6 +258,100 @@ async function sync({ tripIds = [], expenseIds = [], actor = {} }) {
   return out;
 }
 
+/**
+ * Link a feeding expense already raised to these trucks: its amount, split
+ * equally, becomes their feeding, and it is their request from now on.
+ *
+ * Refused when it is not a Feeding expense, was rejected, is on another PFI,
+ * already carries other trucks, when a truck is hired, or when a truck's
+ * feeding is on another request finance has taken forward — two live
+ * requests for the same feeding is for Expenses to settle, by rejecting one.
+ */
+async function link({ expenseId, tripIds, actor = {} }) {
+  const ids = ints(tripIds);
+  if (!ids.length) throw httpError(400, "Pick the trucks");
+  const replaced = new Set();
+  let said = null;
+
+  await client.begin(async (tx) => {
+    const [e] = await tx`
+      SELECT e.*, c.name AS category_name, p.pfi_number, p.allocation_code
+        FROM pfi_expenses e
+        JOIN expense_categories c ON c.id = e.category_id
+        LEFT JOIN pfis p ON p.id = e.pfi_id
+       WHERE e.id = ${Number(expenseId)}
+       FOR UPDATE OF e`;
+    if (!e || e.deleted_at) throw httpError(404, "Expense not found");
+    const ref = e.reference_number;
+    if (!/^feeding/i.test(e.category_name || "")) throw httpError(409, `${ref} is not a Feeding expense`);
+    if (e.status === "rejected") throw httpError(409, `${ref} was rejected`);
+    if (!(Number(e.amount_ngn) > 0)) throw httpError(409, `${ref} has no amount in naira`);
+
+    const trips = await tx`
+      SELECT d.id, d.pfi_id, d.truck_number, d.feeding_expense_id, COALESCE(f.is_third_party, false) AS hired
+        FROM delivery_inventory d
+        LEFT JOIN fleet_trucks f ON f.id = d.truck_id
+       WHERE d.id = ANY(${ids}::int[])
+       ORDER BY d.id
+       FOR UPDATE OF d`;
+    if (trips.length !== ids.length) throw httpError(404, "A truck was not found");
+    const pfiName = e.allocation_code || e.pfi_number || "its PFI";
+    if (trips.some((t) => Number(t.pfi_id) !== Number(e.pfi_id))) {
+      throw httpError(409, `${ref} is on ${pfiName}, and not every one of these trucks is`);
+    }
+    const hired = trips.filter((t) => t.hired);
+    if (hired.length) {
+      throw httpError(409, `${hired.map((t) => t.truck_number).join(", ")} ${hired.length === 1 ? "is a hired truck" : "are hired trucks"} — the owner feeds the driver. Leave ${hired.length === 1 ? "it" : "them"} out.`);
+    }
+    const [others] = await tx`
+      SELECT count(*)::int AS n FROM delivery_inventory
+       WHERE feeding_expense_id = ${e.id} AND NOT (id = ANY(${ids}::int[]))`;
+    if (others.n > 0) throw httpError(409, `${ref} already carries the feeding of ${others.n} other truck${others.n === 1 ? "" : "s"}`);
+
+    const elsewhere = ints(trips.map((t) => t.feeding_expense_id).filter((x) => x && Number(x) !== Number(e.id)));
+    if (elsewhere.length) {
+      const reqs = await tx`
+        SELECT id, reference_number, status::text AS status, deleted_at
+          FROM pfi_expenses WHERE id = ANY(${elsewhere}::int[])`;
+      const fixed = reqs.filter((r) => !r.deleted_at && !["pending", "rejected"].includes(r.status));
+      if (fixed.length) {
+        throw httpError(
+          409,
+          `Feeding on some of these trucks is on ${fixed.map((r) => r.reference_number).join(", ")}, which finance has already ` +
+            `taken forward. Both it and ${ref} pay for the same feeding — reject one of them in Expenses first.`,
+        );
+      }
+      for (const r of reqs) replaced.add(Number(r.id));
+    }
+
+    const shares = equalSplit(Number(e.amount_ngn), trips.length);
+    for (let i = 0; i < trips.length; i += 1) {
+      await tx`
+        UPDATE delivery_inventory
+           SET feeding_allowance = ${shares[i]}, feeding_in_expenses = false, feeding_expense_id = ${e.id},
+               costed_at = NOW(), costed_by = ${actor.name || null}, updated_at = NOW()
+         WHERE id = ${trips[i].id}`;
+    }
+    const each = shares.every((x) => x === shares[0]) ? shares[0] : null;
+    await pfiExpenseRepo.writeAudit({
+      expenseId: e.id,
+      action: "updated",
+      changes: {
+        note: `Linked to ${trips.length} truck${trips.length === 1 ? "" : "s"} in Delivery Costing` +
+          (each != null ? `, ${naira(each)} each` : ""),
+        trips: trips.map((t) => Number(t.id)),
+      },
+      actorId: actor.id ?? null,
+      actorName: actor.name || "",
+    }, tx);
+    said = { reference: ref, amount: Number(e.amount_ngn), trucks: trips.length, each, pfiName };
+  });
+
+  // The requests raised from here for those trucks are re-totalled — deleted if left with none.
+  const requests = replaced.size ? await sync({ expenseIds: [...replaced], actor }) : null;
+  return { ...said, requests };
+}
+
 /** What a save did to the requests, in a sentence for the toast. */
 function sentence(result, pfiNames = new Map()) {
   const on = (r) => (pfiNames.get(r.pfiId) ? ` on ${pfiNames.get(r.pfiId)}` : "");
@@ -203,9 +360,16 @@ function sentence(result, pfiNames = new Map()) {
     ...result.changed.map((r) => `Feeding request ${r.reference} now ${naira(r.amount)} for ${r.trucks} truck${r.trucks === 1 ? "" : "s"}`),
     ...result.dropped.map((r) => `Feeding request ${r.reference} deleted — no truck's feeding left on it`),
   ];
+  for (const h of result.held || []) {
+    const refs = h.requests.map((r) => `${r.reference} (${naira(r.amount)})`).join(", ");
+    parts.push(
+      `No new feeding request raised${on(h)}: ${refs} ${h.requests.length === 1 ? "is" : "are"} already raised there and linked to no truck. ` +
+        "Link it to these trucks in Feeding instead",
+    );
+  }
   if (result.noPfi) parts.push(`${result.noPfi} truck${result.noPfi === 1 ? " is" : "s are"} on no PFI, so no feeding request was raised for ${result.noPfi === 1 ? "it" : "them"}`);
   if (result.noCategory) parts.push("No Feeding account in the chart, so no feeding request was raised");
   return parts.join(". ");
 }
 
-module.exports = { sync, sentence };
+module.exports = { sync, sentence, link, unlinked, equalSplit };

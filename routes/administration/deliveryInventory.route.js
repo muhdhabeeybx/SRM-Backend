@@ -10,6 +10,9 @@ const {
   updateDeliveryInventory,
   setDeliveryTripCosts,
   deleteDeliveryInventory,
+  getLinkablePayments,
+  linkFeedingExpense,
+  raiseOwnerPayment,
 } = require("../../controllers/administration/deliveryInventory.controller");
 const {
   confirmAllocation,
@@ -33,6 +36,8 @@ router.get("/batches", verifyStaff, getDeliveryBatchStatuses);
 router.patch("/batches/:code", verifyStaff, setDeliveryBatchStatus);
 
 router.get("/", verifyStaff, validate({ query: misc.listInventory }), getDeliveryInventory);
+// Feeding and haulage expenses raised by hand that no truck carries yet. Above "/:id".
+router.get("/linkable", verifyStaff, validate({ query: misc.linkablePayments }), getLinkablePayments);
 router.get("/:id", verifyStaff, validate({ params: misc.idParam }), getDeliveryInventoryById);
 router.post("/", verifyStaff, validate({ body: misc.createInventory }), createDeliveryInventory);
 // Above "/:id" so "costs" is never read as an inventory id.
@@ -42,6 +47,9 @@ router.post(
   validate({ body: misc.bulkCostInventory }),
   setDeliveryTripCosts
 );
+
+router.post("/feeding-link", verifyStaff, validate({ body: misc.linkFeeding }), linkFeedingExpense);
+router.post("/owner-payments", verifyStaff, validate({ body: misc.ownerPayment }), raiseOwnerPayment);
 
 router.patch("/:id", verifyStaff, validate({ params: misc.idParam, body: misc.updateInventory }), updateDeliveryInventory);
 router.delete("/:id", verifyStaff, validate({ params: misc.idParam }), deleteDeliveryInventory);

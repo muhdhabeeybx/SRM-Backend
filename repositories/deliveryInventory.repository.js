@@ -9,6 +9,7 @@ const {
 const { scopeCondition } = require("../lib/scopeFilter");
 const { tripCosts } = require("../lib/tripCosts");
 const { tripAgoFor } = require("../lib/tripAgo");
+const tripOwnerPayments = require("./tripOwnerPayment.repository");
 
 const findById = async (id) => {
   const [row] = await db
@@ -91,8 +92,20 @@ const withFeedingRequests = async (rows) => {
   return rows.map((r) => (r ? { ...r, feedingRequest: found.get(Number(r.feedingExpenseId)) ?? null } : r));
 };
 
+/**
+ * A hired truck's part of the payment requests raised to its owner (0098):
+ * what is paid, what is asked for and not paid yet, and each request.
+ */
+const withOwnerPayments = async (rows) => {
+  const ids = rows.filter(Boolean).map((r) => r.id);
+  const [found, rates] = await Promise.all([tripOwnerPayments.forTrips(ids), tripOwnerPayments.haulageRates(ids)]);
+  return rows.map((r) => (r
+    ? { ...r, ownerPayments: found.get(Number(r.id)) ?? null, haulageRate: rates.get(Number(r.id)) ?? null }
+    : r));
+};
+
 const costedRows = async (rows) =>
-  (await withFeedingRequests(await withTruckOwners(await withLedgerAgo(rows)))).map(withCosts);
+  (await withOwnerPayments(await withFeedingRequests(await withTruckOwners(await withLedgerAgo(rows))))).map(withCosts);
 
 /** Past pending, a request's figures are being acted on: the feeding behind it is fixed. */
 const FEEDING_OPEN = new Set(["pending", "rejected"]);
@@ -223,7 +236,21 @@ const deleteById = async (id, tx = db) => {
  */
 const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) => {
   const list = [...new Set((ids || []).map(Number).filter(Boolean))];
-  if (!list.length) return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingTouched: [] };
+  if (!list.length) return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingSkippedHired: 0, feedingTouched: [] };
+
+  /**
+   * The haulage rate per litre (0098) is written apart from the drizzle
+   * columns (repositories/tripOwnerPayment). `undefined` leaves it alone,
+   * null clears it, as for the figures below.
+   */
+  let haulageRate;
+  if (values.haulageRate !== undefined) {
+    if (values.haulageRate === null || values.haulageRate === "") {
+      if (clearBlank) haulageRate = null;
+    } else {
+      haulageRate = Number(values.haulageRate);
+    }
+  }
 
   const patch = {};
   for (const key of ["agoLitres", "agoPrice", "feedingAllowance", "productPrice", "haulageAmount"]) {
@@ -240,7 +267,10 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
   if (typeof values.feedingInExpenses === "boolean") {
     patch.feedingInExpenses = values.feedingInExpenses;
   }
-  if (!Object.keys(patch).length) return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingTouched: [] };
+  const ratesHaulage = haulageRate !== undefined;
+  if (!Object.keys(patch).length && !ratesHaulage) {
+    return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingSkippedHired: 0, feedingTouched: [] };
+  }
 
   /**
    * A trip on the AGO stock ledger keeps the ledger's litres. Its other
@@ -257,7 +287,7 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
    * A trip that already carries haulage can always have it corrected.
    */
   let hired = new Set();
-  if ("haulageAmount" in patch) {
+  if ("haulageAmount" in patch || ratesHaulage) {
     const found = await db
       .select({ id: deliveryInventory.id })
       .from(deliveryInventory)
@@ -267,6 +297,20 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
         or(eq(trucks.isThirdParty, true), sql`${deliveryInventory.haulageAmount} IS NOT NULL`),
       ));
     hired = new Set(found.map((r) => Number(r.id)));
+  }
+
+  /**
+   * A hired truck's driver is fed by its owner (the user, 2026-10-26), so
+   * feeding is written only to our own trucks. Clearing it is always allowed.
+   */
+  let hiredTrucks = new Set();
+  if (patch.feedingAllowance != null) {
+    const found = await db
+      .select({ id: deliveryInventory.id })
+      .from(deliveryInventory)
+      .innerJoin(trucks, eq(trucks.id, deliveryInventory.truckId))
+      .where(and(inArray(deliveryInventory.id, list), eq(trucks.isThirdParty, true)));
+    hiredTrucks = new Set(found.map((r) => Number(r.id)));
   }
 
   /**
@@ -284,10 +328,14 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
     const set = { ...patch };
     if (owned.has(id)) delete set.agoLitres;
     if (!hired.has(id)) delete set.haulageAmount;
+    if (hiredTrucks.has(id)) {
+      delete set.feedingAllowance;
+      delete set.feedingInExpenses;
+    }
     if (locked.has(id)) {
       delete set.feedingAllowance;
       delete set.feedingInExpenses;
-    } else if (touchesFeeding) {
+    } else if (touchesFeeding && !hiredTrucks.has(id)) {
       feedingTouched.push(id);
     }
     if (!Object.keys(set).length) continue;
@@ -305,12 +353,24 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
       .where(inArray(deliveryInventory.id, some))
       .returning()));
   }
+  // The rate goes on the hired trucks only, like a lump sum.
+  if (ratesHaulage) {
+    const rated = list.filter((id) => hired.has(id));
+    if (rated.length) {
+      await tripOwnerPayments.setHaulageRate(rated, haulageRate);
+      const have = new Set(rows.map((r) => Number(r.id)));
+      const more = rated.filter((id) => !have.has(id));
+      await db.update(deliveryInventory).set(stamp).where(inArray(deliveryInventory.id, rated));
+      if (more.length) rows.push(...(await db.select().from(deliveryInventory).where(inArray(deliveryInventory.id, more))));
+    }
+  }
 
   return {
     rows: await costedRows(rows),
     agoKept: list.filter((id) => owned.has(id)).length,
-    haulageSkipped: "haulageAmount" in patch ? list.filter((id) => !hired.has(id)).length : 0,
+    haulageSkipped: "haulageAmount" in patch || ratesHaulage ? list.filter((id) => !hired.has(id)).length : 0,
     feedingLocked: locked.size,
+    feedingSkippedHired: hiredTrucks.size,
     /** Trips whose feeding was written — their payment requests follow. */
     feedingTouched,
   };
