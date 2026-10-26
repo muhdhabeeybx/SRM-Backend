@@ -1874,7 +1874,13 @@ const findStalePending = async (cutoff) => {
         sql`(${orders.idempotencyKey} IS NULL OR (
           ${orders.idempotencyKey} NOT LIKE ${ALLOCATION_ORDER_PREFIX + "%"}
           AND ${orders.idempotencyKey} NOT LIKE ${UPLOADED_ORDER_PREFIX + "%"}
-        ))`
+        ))`,
+        // Nor one a request is waiting to link to a trucking PFI
+        // (services/pfiAllocation.service).
+        sql`NOT EXISTS (
+          SELECT 1 FROM pfi_truck_allocations a
+           WHERE a.order_id = ${orders.id} AND a.status = 'pending'
+        )`
       )
     )
     .orderBy(asc(orders.createdAt));

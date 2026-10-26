@@ -1,9 +1,10 @@
-const { eq, and, desc, inArray, sql } = require("drizzle-orm");
+const { eq, and, desc, inArray, isNull, sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { pfiTruckAllocations, pfis, fleetTrucks, drivers, customers, deliveryCustomers } = require("../db/schema");
 const { scopeCondition } = require("../lib/scopeFilter");
 const { STATION_TYPES } = require("../lib/customerTypes");
 const { orderReferenceSql } = require("../lib/orderReferenceSql");
+const { PREFIX: ALLOCATION_ORDER_PREFIX } = require("../lib/allocationOrders");
 
 /**
  * Reads and writes for pfi_truck_allocations. The rules — who may raise,
@@ -29,6 +30,13 @@ const WITH_NAMES = {
   orderReference: sql`CASE WHEN o.id IS NULL THEN NULL ELSE ${orderReferenceSql("o", "oc")} END`,
   orderTotal: sql`o.total_amount`,
   orderPaid: sql`o.amount_paid`,
+  orderCustomerName: sql`oc.name`,
+  /**
+   * The order was placed before the request was raised: an order already on
+   * the cargo, linked rather than placed by approval (see linkOrder in the
+   * service). A placed one is always younger than its request.
+   */
+  linkedOrder: sql`(o.id IS NOT NULL AND o.created_at < ${pfiTruckAllocations.raisedAt})`,
 };
 
 const shape = (row) =>
@@ -46,6 +54,8 @@ const shape = (row) =>
     orderReference: row.orderReference || null,
     orderTotal: row.orderTotal == null ? null : Number(row.orderTotal),
     orderPaid: row.orderPaid == null ? null : Number(row.orderPaid),
+    orderCustomerName: row.orderCustomerName || null,
+    linkedOrder: row.linkedOrder === true,
     /** What is still unpaid on the order: owed by the trucking PFI, by no customer. */
     orderOnCredit:
       row.orderTotal == null ? null : Math.max(0, Math.round((Number(row.orderTotal) - Number(row.orderPaid || 0)) * 100) / 100),
@@ -111,7 +121,12 @@ const listByStatus = async ({ status = "pending", scopeUser = null, limit = 200 
     .limit(limit)).map(shape);
 };
 
-/** Litres already asked of a cargo by allocations nobody has decided yet. */
+/**
+ * Litres already asked of a cargo by allocations nobody has decided yet.
+ *
+ * A request to link an order already placed asks for nothing: its litres left
+ * the cargo's shelf when that order was placed.
+ */
 const pendingQuantity = async (parentPfiId, tx = db) => {
   const [row] = await tx
     .select({ qty: sql`COALESCE(SUM(${pfiTruckAllocations.quantity}), 0)` })
@@ -119,8 +134,101 @@ const pendingQuantity = async (parentPfiId, tx = db) => {
     .where(and(
       eq(pfiTruckAllocations.parentPfiId, Number(parentPfiId)),
       eq(pfiTruckAllocations.status, "pending"),
+      isNull(pfiTruckAllocations.orderId),
     ));
   return Number(row?.qty) || 0;
+};
+
+/** Orders up to this day are on the audited finance report (2026-09-10). */
+const AUDITED_THROUGH = "2026-09-10";
+
+/**
+ * Orders on a cargo, with what decides whether one may be linked to a new
+ * trucking PFI (services/pfiAllocation.service linkProblem).
+ *
+ * The list for the form (no `orderId`): every live order on the cargo placed
+ * after the audited report, that is not already an allocation's, newest first.
+ * One order (`orderId`): that order whatever it is, for the checks at raise and
+ * at approval.
+ */
+const ordersToLink = async ({ pfiId, orderId = null }, tx = db) => {
+  const one = orderId != null;
+  const result = await tx.execute(sql`
+    SELECT o.id,
+           ${orderReferenceSql("o", "c")} AS "reference",
+           o.pfi_id AS "pfiId",
+           o.created_at AS "createdAt",
+           (o.created_at AT TIME ZONE 'Africa/Lagos')::date::text AS "placedOn",
+           o.status::text AS "status",
+           o.payment_status::text AS "paymentStatus",
+           o.pricing_status AS "pricingStatus",
+           o.quantity,
+           o.price,
+           o.total_amount AS "totalAmount",
+           o.amount_paid AS "amountPaid",
+           o.idempotency_key AS "idempotencyKey",
+           o.customer_id AS "customerId",
+           c.name AS "customerName",
+           c.house_account AS "houseAccount",
+           COALESCE(NULLIF(btrim(o.company_name), ''), c.company_name, '') AS "companyName",
+           (SELECT count(*)::int FROM order_trucks t WHERE t.order_id = o.id) AS "loads",
+           (SELECT count(*)::int FROM order_trucks t WHERE t.order_id = o.id AND t.status <> 'pending') AS "loadsTicketed",
+           EXISTS (SELECT 1 FROM commissions m WHERE m.order_id = o.id AND m.status = 'paid') AS "commissionPaid",
+           EXISTS (SELECT 1 FROM order_refunds r WHERE r.order_id = o.id AND r.status = 'requested') AS "refundOpen",
+           (SELECT a.id FROM pfi_truck_allocations a
+             WHERE a.order_id = o.id AND a.status = 'pending' LIMIT 1) AS "pendingLinkId",
+           (SELECT a.pfi_number FROM pfi_truck_allocations a
+             WHERE a.order_id = o.id AND a.status = 'pending' LIMIT 1) AS "pendingLink"
+      FROM orders o
+      JOIN customers c ON c.id = o.customer_id
+     WHERE ${one
+       ? sql`o.id = ${Number(orderId)}`
+       : sql`o.pfi_id = ${Number(pfiId)}
+         AND o.status::text NOT IN ('Cancelled', 'Expired')
+         AND COALESCE(o.idempotency_key, '') NOT LIKE ${`${ALLOCATION_ORDER_PREFIX}%`}
+         AND (o.created_at AT TIME ZONE 'Africa/Lagos')::date > ${AUDITED_THROUGH}::date`}
+     ORDER BY o.created_at DESC
+     LIMIT ${one ? 1 : 300}
+  `);
+  return (result.rows ?? result).map((r) => ({
+    ...r,
+    id: Number(r.id),
+    pfiId: r.pfiId == null ? null : Number(r.pfiId),
+    customerId: Number(r.customerId),
+    quantity: Number(r.quantity),
+    price: Number(r.price),
+    totalAmount: Number(r.totalAmount),
+    amountPaid: Number(r.amountPaid || 0),
+    pendingLinkId: r.pendingLinkId == null ? null : Number(r.pendingLinkId),
+  }));
+};
+
+/**
+ * The trucking PFI a pending request will link this order to, or null. While
+ * there is one the order does not lapse (services/order.service expireOrder):
+ * a request waiting for an admin must not find its order expired overnight.
+ */
+const pendingLinkForOrder = async (orderId, tx = db) => {
+  const [row] = await tx
+    .select({ id: pfiTruckAllocations.id, pfiNumber: pfiTruckAllocations.pfiNumber })
+    .from(pfiTruckAllocations)
+    .where(and(eq(pfiTruckAllocations.orderId, Number(orderId)), eq(pfiTruckAllocations.status, "pending")))
+    .limit(1);
+  return row || null;
+};
+
+/**
+ * A linked order's own papers go with it to the house account: what was
+ * expected to be paid on it, its delivery notes, and a commission not yet paid
+ * out. A paid commission is money already out to an agent, so an order with
+ * one is never linked (linkProblem).
+ */
+const moveOrderPapers = async (orderId, customerId, tx) => {
+  const id = Number(orderId);
+  const to = Number(customerId);
+  await tx.execute(sql`UPDATE expected_payments SET customer_id = ${to}, updated_at = now() WHERE order_id = ${id}`);
+  await tx.execute(sql`UPDATE delivery_notes SET customer_id = ${to}, updated_at = now() WHERE order_id = ${id}`);
+  await tx.execute(sql`UPDATE commissions SET customer_id = ${to}, updated_at = now() WHERE order_id = ${id} AND status <> 'paid'`);
 };
 
 /**
@@ -260,6 +368,10 @@ module.exports = {
   findBySubPfi,
   listByStatus,
   pendingQuantity,
+  ordersToLink,
+  pendingLinkForOrder,
+  moveOrderPapers,
+  AUDITED_THROUGH,
   namesThatHoldLetters,
   liveSuffixes,
   create,

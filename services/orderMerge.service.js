@@ -188,6 +188,8 @@ const loadFacts = async (ids, tx) => {
       (SELECT COUNT(*) FROM wallet_holds h WHERE h.order_id = o.id)::int AS "walletHolds",
       (SELECT COUNT(*) FROM commissions cm
         WHERE cm.order_id = o.id AND cm.status = 'paid')::int AS "paidCommissions",
+      (SELECT a.pfi_number FROM pfi_truck_allocations a
+        WHERE a.order_id = o.id AND a.status = 'pending' LIMIT 1) AS "pendingLink",
       (SELECT COUNT(*) FROM order_payments p
         WHERE p.order_id = o.id AND (p.id IN (${dup}) OR p.id IN (${back})))::int AS phantoms
     FROM orders o
@@ -227,6 +229,9 @@ const ownBlockers = (order, facts) => {
   }
   if (isAllocationOrder(order)) {
     out.push(`${ref} is a truck allocation's order — its quantity is its trucking PFI's stock, so it stays whole.`);
+  }
+  if (facts?.pendingLink) {
+    out.push(`${ref} is waiting to become ${facts.pendingLink}'s order — its trucks carry exactly its quantity. Approve or withdraw that first.`);
   }
   if (order.pricingStatus === "pending") {
     out.push(`${ref} has no price yet, so there is no unit price to match. Price it first.`);

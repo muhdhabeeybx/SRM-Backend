@@ -1092,7 +1092,9 @@ const raisePfiAllocation = z.object({
   loadingDate: z
     .string({ error: "Enter the day the trucks load" })
     .regex(/^\d{4}-\d{2}-\d{2}$/, "Loading date must be a date"),
-  price: numberLike("Price").pipe(z.number().positive("Enter the day's price")),
+  // Not sent when an order already placed is named: its rate is the price.
+  price: numberLike("Price").pipe(z.number().positive("Enter the day's price")).optional(),
+  orderId: id("Order").optional(),
   trucks: z
     .array(z.object({ truckId: id("Truck"), loadedQty: quantity("Truck quantity") }), {
       error: "Pick at least one truck",
@@ -1107,6 +1109,8 @@ const raisePfiAllocation = z.object({
 }).superRefine((v, ctx) => {
   if (!v.trucks && !v.station) ctx.addIssue({ code: "custom", path: ["trucks"], message: "Pick at least one truck" });
   if (v.trucks && v.station) ctx.addIssue({ code: "custom", path: ["station"], message: "Allocate trucks or a station, not both" });
+  if (v.orderId && v.station) ctx.addIssue({ code: "custom", path: ["orderId"], message: "An order already placed is linked to trucks, not to a station" });
+  if (!v.orderId && v.price == null) ctx.addIssue({ code: "custom", path: ["price"], message: "Enter the day's price" });
 });
 const decidePfiAllocation = z
   .object({ note: optionalString("Note", 1000) })

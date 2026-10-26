@@ -15,6 +15,7 @@ const {
   bankAccountRepo,
   commissionRepo,
 } = require("../repositories");
+const allocationRepo = require("../repositories/pfiAllocation.repository");
 const { isWithinScope } = require("../lib/scopeFilter");
 const { sellableQty } = require("../lib/pfiStock");
 const { isAllocationOrder } = require("../lib/allocationOrders");
@@ -1632,6 +1633,11 @@ async function expireOrder(orderId, { tx } = {}) {
     if (isAllocationOrder(before)) {
       throw httpError(409, `${before.orderNumber} is a truck allocation's order and does not lapse`);
     }
+    // Named by a request to link it to a trucking PFI: it waits for the admin.
+    const link = await allocationRepo.pendingLinkForOrder(orderId, tx);
+    if (link) {
+      throw httpError(409, `${before.orderNumber} is waiting to become ${link.pfiNumber}'s order and does not lapse`);
+    }
     if (isUploadedOrder(before)) {
       throw httpError(409, `${before.orderNumber} was uploaded by staff and does not lapse`);
     }
@@ -1871,6 +1877,8 @@ async function expireIfStale({ orderId, customerId = null }) {
     if (!order) return false;
     if (customerId != null && order.customerId !== customerId) return false;
     if (!isOrderExpired(order)) return false;
+    // Waiting to be linked to a trucking PFI: paid, not lapsed.
+    if (await allocationRepo.pendingLinkForOrder(orderId, tx)) return false;
     await expireOrder(orderId, { tx });
     return true;
   });

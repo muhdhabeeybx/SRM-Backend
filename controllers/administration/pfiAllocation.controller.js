@@ -26,6 +26,7 @@ const raiseAllocation = asyncHandler(async (req, res) => {
     price: req.body.price,
     trucks: req.body.trucks,
     station: req.body.station,
+    orderId: req.body.orderId ?? null,
     note: req.body.note,
     user: req.user,
   });
@@ -44,7 +45,9 @@ const approveAllocation = asyncHandler(async (req, res) => {
   });
   res.json({
     success: true,
-    message: `${allocation.pfiNumber} approved — the order is placed and the PFI is raised`,
+    message: allocation.linkedOrder
+      ? `${allocation.pfiNumber} approved — ${allocation.orderReference} is its order now and the PFI is raised`
+      : `${allocation.pfiNumber} approved — the order is placed and the PFI is raised`,
     data: { allocation },
   });
 });
