@@ -5,6 +5,7 @@ const { notify, notifyAndWait } = require("../../notifications");
 const sessionService = require("../../services/session.service");
 const cookieService = require("../../services/cookie.service");
 const { isConfined } = require("../../lib/pfiScope");
+const { runsStations } = require("../../lib/stationCosts");
 
 const REALM = "staff";
 
@@ -30,6 +31,9 @@ const getAdminPayload = async (user) => {
     // the refusal itself is still the server's, this only spares them the
     // dead ends.
     pfiScoped: isConfined(ctx),
+    // Runs filling stations or LPG plants: their own trucks' landed cost
+    // reaches them, so the station pages show it (lib/stationCosts).
+    stationCosts: runsStations(ctx),
     pageOverrides: pageOverrides.map((o) => ({ routePath: o.routePath, allowed: o.allowed, viewOnly: Boolean(o.viewOnly) })),
     // The pages their roles open while role pages are on; null means pages are
     // decided as before (services/rolePages.service.js). Their own ticks

@@ -8,6 +8,7 @@ const { tripAgoFor } = require("../../lib/tripAgo");
 const feedingRequests = require("../../services/feedingRequests.service");
 const ownerPayments = require("../../services/ownerPayments.service");
 const tripOwnerPayments = require("../../repositories/tripOwnerPayment.repository");
+const { STATION_COST_FIELDS, ownStationLoadIds } = require("../../lib/stationCosts");
 
 const staffActor = (req) => ({ type: "staff", staffId: req.user?.id ?? null });
 
@@ -44,16 +45,27 @@ const maySeeCosts = (user) => {
   return (user.roles || []).includes("super_admin");
 };
 
-/** Rate stays: it is the selling price, which the inventory page already shows. */
-const stripCosts = (row) => {
+/**
+ * Rate stays: it is the selling price, which the inventory page already shows.
+ * `stationCosts` keeps what one of the person's own stations was charged for
+ * the truck — its landed cost — and nothing more (lib/stationCosts).
+ */
+const stripCosts = (row, stationCosts = false) => {
   if (!row) return row;
   const out = { ...row };
-  for (const f of COST_FIELDS) delete out[f];
+  for (const f of COST_FIELDS) {
+    if (stationCosts && STATION_COST_FIELDS.includes(f)) continue;
+    delete out[f];
+  }
   return out;
 };
 
-const withCostVisibility = (user, rows) =>
-  maySeeCosts(user) ? rows : rows.map(stripCosts);
+/** Everything for those who may cost trips; a station's own trucks' landed cost for those who run it; else none. */
+const withCostVisibility = async (user, rows) => {
+  if (maySeeCosts(user)) return rows;
+  const own = await ownStationLoadIds(user, rows);
+  return rows.map((r) => stripCosts(r, own.has(Number(r?.id))));
+};
 
 const getDeliveryInventory = asyncHandler(async (req, res) => {
   const { search, loading_status, truck_number, page = 1, limit = 500 } = req.query;
@@ -67,7 +79,7 @@ const getDeliveryInventory = asyncHandler(async (req, res) => {
     scopeUser: req.user,
   });
 
-  const loadings = withCostVisibility(req.user, result.loadings || []);
+  const loadings = await withCostVisibility(req.user, result.loadings || []);
   res.json({ success: true, data: { ...result, loadings, inventory: loadings } });
 });
 
@@ -76,7 +88,8 @@ const getDeliveryInventoryById = asyncHandler(async (req, res) => {
   if (!loading) {
     return res.status(404).json({ success: false, message: "Inventory record not found" });
   }
-  res.json({ success: true, data: { loading: maySeeCosts(req.user) ? loading : stripCosts(loading) } });
+  const [shown] = await withCostVisibility(req.user, [loading]);
+  res.json({ success: true, data: { loading: shown } });
 });
 
 const createDeliveryInventory = asyncHandler(async (req, res) => {

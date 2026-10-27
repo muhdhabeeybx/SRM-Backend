@@ -1179,8 +1179,9 @@ async function releaseOrderResources(order, tx) {
 }
 
 // Once an order is finished or dead there is nothing left to correct — with
-// one exception, below: which cargo a completed order was lifted from is a
-// fact that can be recorded wrongly and has to be correctable afterwards.
+// two exceptions, below: which cargo a completed order was lifted from, and
+// whose an expired order is. Both are facts that can be recorded wrongly and
+// have to be correctable afterwards.
 const EDIT_LOCKED_STATUSES = new Set(["Completed", "Cancelled", "Expired"]);
 
 /**
@@ -1221,15 +1222,27 @@ const STOCK_EDITABLE_STATUSES = new Set(["Pending", "Paid"]);
 const PFI_MOVE_LOCKED_STATUSES = new Set(["Cancelled", "Expired"]);
 
 /**
- * Is this patch asking for anything beyond the PFI?
+ * An expired order accepts one correction of its own: whose it is.
  *
- * A completed order accepts a PFI correction and nothing else, so the blanket
- * edit lock has to distinguish the two. Compared against the order's current
+ * It lapsed unpaid, but it is usually still a sale the customer wants, and it
+ * can be merged into their live order (orderMerge.service). A merge needs
+ * both orders on one customer record, so an expired order raised under the
+ * wrong record — the same buyer opened two or three times — could never be
+ * merged. Moving it takes nothing from any cargo: it holds no stock, and its
+ * payments live on the order, not the customer. Cancelled stays refused.
+ */
+const CUSTOMER_ONLY_STATUSES = new Set(["Expired"]);
+
+/**
+ * Is this patch asking for anything beyond the PFI and the `allowed` fields?
+ *
+ * A completed order accepts a PFI correction and nothing else, and an expired
+ * one a customer correction, so the blanket edit lock has to tell them apart. Compared against the order's current
  * values rather than merely being present: a form that posts every field it
  * rendered sends `price` and `quantity` unchanged, and refusing that as "an
  * edit to a completed order" would block the correction the desk came to make.
  */
-const CHANGES_BEYOND_PFI = (patch, order) => {
+const CHANGES_BEYOND = (patch, order, allowed = []) => {
   const same = (a, b) => String(a ?? "") === String(b ?? "");
   const unchanged = {
     customerId: same(patch.customerId, order.customerId),
@@ -1247,7 +1260,7 @@ const CHANGES_BEYOND_PFI = (patch, order) => {
       new Date(patch.createdAt).getTime() === new Date(order.createdAt).getTime(),
   };
   return Object.entries(unchanged).some(
-    ([field, isSame]) => patch[field] !== undefined && !isSame,
+    ([field, isSame]) => !allowed.includes(field) && patch[field] !== undefined && !isSame,
   );
 };
 
@@ -1271,13 +1284,18 @@ async function updateOrder(orderId, patch, { actor, ipAddress = null, userAgent 
 
     if (EDIT_LOCKED_STATUSES.has(order.status)) {
       // A completed order still accepts one correction: the cargo it was
-      // lifted from. See PFI_MOVE_LOCKED_STATUSES for why that one and no
-      // other, and why a cancelled or expired order accepts none.
+      // lifted from. An expired one accepts its customer. See
+      // PFI_MOVE_LOCKED_STATUSES and CUSTOMER_ONLY_STATUSES for why those and
+      // no others, and why a cancelled order accepts none.
       const pfiOnly =
         wantsPfiChange &&
         !PFI_MOVE_LOCKED_STATUSES.has(order.status) &&
-        !CHANGES_BEYOND_PFI(patch, order);
-      if (!pfiOnly) {
+        !CHANGES_BEYOND(patch, order);
+      const customerOnly =
+        CUSTOMER_ONLY_STATUSES.has(order.status) &&
+        !wantsPfiChange &&
+        !CHANGES_BEYOND(patch, order, ["customerId"]);
+      if (!pfiOnly && !customerOnly) {
         throw httpError(409, `A ${order.status.toLowerCase()} order can no longer be edited`);
       }
     }
