@@ -372,4 +372,38 @@ describe("order merge", () => {
     assert.equal(k.status, "Pending", "revived, not expired");
     assert.equal(k.expired_at, null);
   });
+
+  test("an expired order's litres are taken from its PFI again, and refused when they are gone", async () => {
+    const soldOf = async () => n((await client`SELECT sold_qty_litres FROM pfis WHERE id = ${pfiId}`)[0].sold_qty_litres);
+    const live = await makeOrder("ST1", { status: "Pending" });
+    const lapsed = await makeOrder("ST2", { status: "Expired" });
+    const sold = await soldOf();
+
+    const preview = await mergeService.previewMerge({ targetOrderId: live, sourceOrderIds: [lapsed] });
+    assert.ok(preview.warnings.some((w) => w.includes("gave 100 back")), "the preview says the litres go back on");
+    await mergeService.mergeOrders({ targetOrderId: live, sourceOrderIds: [lapsed], reason: "re-placed after it lapsed" });
+    assert.equal(await soldOf(), sold + QTY, "the expired order's 100 are sold again");
+    const [a] = await client`SELECT quantity FROM order_pfi_allocations WHERE order_id = ${live}`;
+    assert.equal(n(a.quantity), QTY * 2);
+
+    // Not enough left on the PFI: refused, and nothing moves.
+    const keep = await makeOrder("ST3", { status: "Pending" });
+    const gone = await makeOrder("ST4", { status: "Expired" });
+    const [p] = await client`SELECT starting_qty_litres FROM pfis WHERE id = ${pfiId}`;
+    const before = await soldOf();
+    await client`UPDATE pfis SET sold_qty_litres = ${n(p.starting_qty_litres) - QTY + 1} WHERE id = ${pfiId}`;
+    try {
+      const refused = await mergeService.previewMerge({ targetOrderId: keep, sourceOrderIds: [gone] });
+      assert.equal(refused.ok, false);
+      assert.match(refused.problems.join(" "), /has only 99 left/);
+      await assert.rejects(
+        mergeService.mergeOrders({ targetOrderId: keep, sourceOrderIds: [gone], reason: "not enough left" }),
+        /has only 99 left/,
+      );
+      const [g] = await client`SELECT status::text AS status FROM orders WHERE id = ${gone}`;
+      assert.equal(g.status, "Expired");
+    } finally {
+      await client`UPDATE pfis SET sold_qty_litres = ${before} WHERE id = ${pfiId}`;
+    }
+  });
 });

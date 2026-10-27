@@ -2,6 +2,7 @@ const { sql } = require("drizzle-orm");
 const { randomUUID } = require("crypto");
 const { db } = require("../config/db");
 const auditLogRepo = require("../repositories/auditLog.repository");
+const pfiRepo = require("../repositories/pfi.repository");
 const { generateOrderReference } = require("../utils/helpers");
 const { isAllocationOrder } = require("../lib/allocationOrders");
 const { DUPLICATE_LEGACY_IDS_SQL } = require("../repositories/cfoReport.repository");
@@ -196,6 +197,40 @@ const loadFacts = async (ids, tx) => {
     WHERE o.id IN ${idList(ids)}
   `);
   return new Map(rowsOf(result).map((row) => [Number(row.id), row]));
+};
+
+/**
+ * The stock an expired order has to take back from its PFI.
+ *
+ * Expiry gave its litres back (releaseOrderResources) and dropped its
+ * allocation row. The merge writes that row out again from pfi_id and
+ * quantity, so unless the litres are taken from the PFI again the survivor
+ * holds stock the PFI still counts as left — and a later cancel would hand
+ * back litres that were never taken. Per PFI: what the expired orders need,
+ * and what is left on it now.
+ */
+const expiredStock = async (orders, tx) => {
+  const need = new Map();
+  for (const o of orders) {
+    if (o.status !== "Expired" || o.pfiId == null) continue;
+    const row = need.get(Number(o.pfiId)) ?? { quantity: 0, refs: [] };
+    row.quantity += Number(o.quantity);
+    row.refs.push(o.reference);
+    need.set(Number(o.pfiId), row);
+  }
+  if (!need.size) return [];
+  const result = await tx.execute(sql`
+    SELECT id, pfi_number AS "pfiNumber", status::text AS status,
+           (starting_qty_litres + evacuation_surplus_litres - operational_loss_litres - sold_qty_litres)::numeric AS "left"
+      FROM pfis WHERE id IN ${idList([...need.keys()])}
+  `);
+  return rowsOf(result).map((p) => ({
+    pfiId: Number(p.id),
+    pfiNumber: p.pfiNumber,
+    active: p.status === "active",
+    left: Number(p.left),
+    ...need.get(Number(p.id)),
+  }));
 };
 
 /** Stock rows that disagree about which cargo they came from, by action. */
@@ -405,7 +440,23 @@ const assess = async ({ targetId, sourceIds, tx, lock }) => {
     );
   }
 
+  const takeBack = await expiredStock([target, ...sources], tx);
+  for (const t of takeBack) {
+    if (!t.active || t.left < t.quantity) {
+      problems.push(
+        `${t.refs.join(" and ")} gave ${t.quantity.toLocaleString("en-NG")} back to ${t.pfiNumber} when ${t.refs.length === 1 ? "it" : "they"} lapsed, and the merge has to take them again — but ${t.pfiNumber} ${t.active ? `has only ${t.left.toLocaleString("en-NG")} left` : "is not active"}.`,
+      );
+    }
+  }
+
   const warnings = [];
+  for (const t of takeBack) {
+    if (t.active && t.left >= t.quantity) {
+      warnings.push(
+        `${t.refs.join(" and ")} lapsed and gave ${t.quantity.toLocaleString("en-NG")} back to ${t.pfiNumber}. The merge takes them from ${t.pfiNumber} again, leaving ${(t.left - t.quantity).toLocaleString("en-NG")}.`,
+      );
+    }
+  }
   const company = (o) => (o.companyName || o.customerCompany || "").trim();
   const otherCompanies = sources.filter((s) => company(s).toLowerCase() !== company(target).toLowerCase());
   if (otherCompanies.length) {
@@ -450,6 +501,7 @@ const assess = async ({ targetId, sourceIds, tx, lock }) => {
     sources,
     problems,
     warnings,
+    takeBack,
     result: combine(target, sources),
     moving: {
       payments: moving("payments"),
@@ -715,6 +767,16 @@ const mergeOrders = async ({ targetOrderId, sourceOrderIds, reason = "", staffId
     const { target, sources, result } = assessed;
     const allIds = [targetId, ...sourceIds];
     const mergeGroup = randomUUID();
+
+    // An expired order's litres go back onto the PFI's sold stock before its
+    // allocation row is written out again (see expiredStock).
+    for (const t of assessed.takeBack) {
+      const reserved = await pfiRepo.reserveStock(t.pfiId, t.quantity, tx);
+      if (!reserved) {
+        throw httpError(409, `${t.pfiNumber} no longer has ${t.quantity.toLocaleString("en-NG")} left to take back for ${t.refs.join(" and ")}.`);
+      }
+      await pfiRepo.markFinishedIfComplete(t.pfiId, tx);
+    }
 
     const { liftedSkips } = await repoint({
       tx, targetId, sourceIds, allIds, staffId, targetRef: target.reference,
