@@ -13,6 +13,7 @@ const {
   getLinkablePayments,
   linkFeedingExpense,
   raiseOwnerPayment,
+  recordLoadingPaid,
 } = require("../../controllers/administration/deliveryInventory.controller");
 const {
   confirmAllocation,
@@ -50,6 +51,7 @@ router.post(
 
 router.post("/feeding-link", verifyStaff, validate({ body: misc.linkFeeding }), linkFeedingExpense);
 router.post("/owner-payments", verifyStaff, validate({ body: misc.ownerPayment }), raiseOwnerPayment);
+router.post("/loading-paid", verifyStaff, validate({ body: misc.loadingPaid }), recordLoadingPaid);
 
 router.patch("/:id", verifyStaff, validate({ params: misc.idParam, body: misc.updateInventory }), updateDeliveryInventory);
 router.delete("/:id", verifyStaff, validate({ params: misc.idParam }), deleteDeliveryInventory);

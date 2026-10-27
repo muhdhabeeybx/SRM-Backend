@@ -74,10 +74,11 @@ const withTruckOwners = async (rows) => {
 };
 
 /**
- * The Feeding payment request each trip's feeding is on (0095): its
- * reference and where it stands. A request deleted in Expenses reads as none.
+ * The payment requests a trip's feeding (0095) and loading (0099) are on: each
+ * one's reference and where it stands. A request deleted in Expenses reads as
+ * none.
  */
-const feedingRequests = async (expenseIds) => {
+const requestsById = async (expenseIds) => {
   const ids = [...new Set(expenseIds.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
   if (!ids.length) return new Map();
   const result = await db.execute(sql`
@@ -88,8 +89,15 @@ const feedingRequests = async (expenseIds) => {
 };
 
 const withFeedingRequests = async (rows) => {
-  const found = await feedingRequests(rows.filter(Boolean).map((r) => r.feedingExpenseId));
-  return rows.map((r) => (r ? { ...r, feedingRequest: found.get(Number(r.feedingExpenseId)) ?? null } : r));
+  const live = rows.filter(Boolean);
+  const found = await requestsById([...live.map((r) => r.feedingExpenseId), ...live.map((r) => r.loadingCostExpenseId)]);
+  return rows.map((r) => (r
+    ? {
+        ...r,
+        feedingRequest: found.get(Number(r.feedingExpenseId)) ?? null,
+        loadingRequest: found.get(Number(r.loadingCostExpenseId)) ?? null,
+      }
+    : r));
 };
 
 /**
@@ -107,18 +115,20 @@ const withOwnerPayments = async (rows) => {
 const costedRows = async (rows) =>
   (await withOwnerPayments(await withFeedingRequests(await withTruckOwners(await withLedgerAgo(rows))))).map(withCosts);
 
-/** Past pending, a request's figures are being acted on: the feeding behind it is fixed. */
-const FEEDING_OPEN = new Set(["pending", "rejected"]);
-const feedingLockedIds = async (ids) => {
+/** Past pending, a request's figures are being acted on: the feeding or loading behind it is fixed. */
+const REQUEST_OPEN = new Set(["pending", "rejected"]);
+const lockedIds = async (ids, column) => {
   const list = [...new Set(ids.map(Number).filter(Boolean))];
   if (!list.length) return new Set();
   const result = await db.execute(sql`
     SELECT d.id, e.status::text AS status
       FROM delivery_inventory d
-      JOIN pfi_expenses e ON e.id = d.feeding_expense_id AND e.deleted_at IS NULL
+      JOIN pfi_expenses e ON e.id = d.${sql.raw(column)} AND e.deleted_at IS NULL
      WHERE d.id IN (${sql.join(list.map((id) => sql`${id}`), sql`, `)})`);
-  return new Set((result.rows ?? result).filter((r) => !FEEDING_OPEN.has(r.status)).map((r) => Number(r.id)));
+  return new Set((result.rows ?? result).filter((r) => !REQUEST_OPEN.has(r.status)).map((r) => Number(r.id)));
 };
+const feedingLockedIds = (ids) => lockedIds(ids, "feeding_expense_id");
+const loadingLockedIds = (ids) => lockedIds(ids, "loading_cost_expense_id");
 
 const findAll = async ({
   search,
@@ -236,7 +246,7 @@ const deleteById = async (id, tx = db) => {
  */
 const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) => {
   const list = [...new Set((ids || []).map(Number).filter(Boolean))];
-  if (!list.length) return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingSkippedHired: 0, feedingTouched: [] };
+  if (!list.length) return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingSkippedHired: 0, feedingTouched: [], loadingLocked: 0, loadingTouched: [] };
 
   /**
    * The haulage rate per litre (0098) is written apart from the drizzle
@@ -253,7 +263,7 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
   }
 
   const patch = {};
-  for (const key of ["agoLitres", "agoPrice", "feedingAllowance", "productPrice", "haulageAmount"]) {
+  for (const key of ["agoLitres", "agoPrice", "feedingAllowance", "loadingCost", "productPrice", "haulageAmount"]) {
     const v = values[key];
     if (v === undefined) continue;
     if (v === null || v === "") {
@@ -267,9 +277,12 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
   if (typeof values.feedingInExpenses === "boolean") {
     patch.feedingInExpenses = values.feedingInExpenses;
   }
+  if (typeof values.loadingCostInExpenses === "boolean") {
+    patch.loadingCostInExpenses = values.loadingCostInExpenses;
+  }
   const ratesHaulage = haulageRate !== undefined;
   if (!Object.keys(patch).length && !ratesHaulage) {
-    return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingSkippedHired: 0, feedingTouched: [] };
+    return { rows: [], agoKept: 0, haulageSkipped: 0, feedingLocked: 0, feedingSkippedHired: 0, feedingTouched: [], loadingLocked: 0, loadingTouched: [] };
   }
 
   /**
@@ -320,10 +333,14 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
    */
   const touchesFeeding = "feedingAllowance" in patch || "feedingInExpenses" in patch;
   const locked = touchesFeeding ? await feedingLockedIds(list) : new Set();
+  // Loading the same way (0099) — on every truck, hired ones included.
+  const touchesLoading = "loadingCost" in patch || "loadingCostInExpenses" in patch;
+  const loadingLocked = touchesLoading ? await loadingLockedIds(list) : new Set();
 
   // Each trip's own patch, then one UPDATE per distinct patch.
   const groups = new Map();
   const feedingTouched = [];
+  const loadingTouched = [];
   for (const id of list) {
     const set = { ...patch };
     if (owned.has(id)) delete set.agoLitres;
@@ -337,6 +354,12 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
       delete set.feedingInExpenses;
     } else if (touchesFeeding && !hiredTrucks.has(id)) {
       feedingTouched.push(id);
+    }
+    if (loadingLocked.has(id)) {
+      delete set.loadingCost;
+      delete set.loadingCostInExpenses;
+    } else if (touchesLoading) {
+      loadingTouched.push(id);
     }
     if (!Object.keys(set).length) continue;
     const key = Object.keys(set).sort().join("|");
@@ -373,6 +396,9 @@ const setCosts = async (ids, values, { clearBlank = false, actor = null } = {}) 
     feedingSkippedHired: hiredTrucks.size,
     /** Trips whose feeding was written — their payment requests follow. */
     feedingTouched,
+    loadingLocked: loadingLocked.size,
+    /** Trips whose loading was written — their Truck Loading requests follow. */
+    loadingTouched,
   };
 };
 
@@ -388,6 +414,7 @@ module.exports = {
   costedRows,
   findCostedByIds,
   feedingLockedIds,
+  loadingLockedIds,
   findById,
   findAll,
   create,

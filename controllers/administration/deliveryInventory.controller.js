@@ -7,6 +7,7 @@ const allocationTrucks = require("../../services/allocationTrucks.service");
 const { tripAgoFor } = require("../../lib/tripAgo");
 const feedingRequests = require("../../services/feedingRequests.service");
 const ownerPayments = require("../../services/ownerPayments.service");
+const loadingRequests = require("../../services/loadingRequests.service");
 const tripOwnerPayments = require("../../repositories/tripOwnerPayment.repository");
 const { STATION_COST_FIELDS, ownStationLoadIds } = require("../../lib/stationCosts");
 
@@ -29,6 +30,7 @@ const staffActor = (req) => ({ type: "staff", staffId: req.user?.id ?? null });
 const COST_FIELDS = [
   "agoLitres", "agoPrice", "agoValue", "agoFromLedger",
   "feedingAllowance", "feedingInExpenses", "feedingRequest", "feedingExpenseId", "totalExpenses", "costPerLitre",
+  "loadingCost", "loadingCostInExpenses", "loadingRequest", "loadingCostExpenseId",
   "productPrice", "landingCost",
   "haulageRate", "haulageAmount", "haulageBalance", "haulageAdded",
   "ownerPaid", "ownerRequested", "ownerAdvance", "ownerOwed", "ownerToRaise", "ownerPaidOffOn", "ownerPayments",
@@ -185,7 +187,7 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
   const { ids, clearBlank, ...values } = req.body;
 
   const actor = req.user?.name || req.user?.email || null;
-  const { rows: written, agoKept, haulageSkipped, feedingLocked, feedingSkippedHired, feedingTouched } =
+  const { rows: written, agoKept, haulageSkipped, feedingLocked, feedingSkippedHired, feedingTouched, loadingLocked, loadingTouched } =
     await deliveryInventoryRepo.setCosts(ids, values, { clearBlank, actor });
 
   // Only feeding was sent, and every truck is a hired one: its owner feeds the driver.
@@ -204,11 +206,20 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
     });
   }
 
-  // Feeding not already paid goes on the batch's Feeding payment request (0095).
-  const requests = feedingTouched.length
-    ? await feedingRequests.sync({ tripIds: feedingTouched, actor: { id: req.user?.id ?? null, name: actor || "" } })
-    : null;
-  const rows = requests ? await deliveryInventoryRepo.findCostedByIds(written.map((r) => r.id)) : written;
+  // Only loading was sent, and every truck's loading is on a request finance has taken forward.
+  if (!written.length && loadingLocked) {
+    return res.status(409).json({
+      success: false,
+      message: `Loading on ${loadingLocked === 1 ? "this truck is" : `these ${loadingLocked} trucks is`} on a payment request finance has already taken forward, or recorded as paid, so it cannot change here.`,
+    });
+  }
+
+  // Feeding not already paid goes on the batch's Feeding payment request (0095),
+  // loading on its Truck Loading request (0099).
+  const who = { id: req.user?.id ?? null, name: actor || "" };
+  const requests = feedingTouched.length ? await feedingRequests.sync({ tripIds: feedingTouched, actor: who }) : null;
+  const loading = loadingTouched.length ? await loadingRequests.sync({ tripIds: loadingTouched, actor: who }) : null;
+  const rows = requests || loading ? await deliveryInventoryRepo.findCostedByIds(written.map((r) => r.id)) : written;
 
   // Only haulage was sent, and none of these trucks is a third party's.
   if (!rows.length && haulageSkipped) {
@@ -231,18 +242,23 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
     });
   }
 
-  // Only the feeding mark changed — say that, not "costs applied".
+  // Only a mark changed — say that, not "costs applied".
   const trucks = `${rows.length} truck${rows.length === 1 ? "" : "s"}`;
-  const markOnly =
-    typeof values.feedingInExpenses === "boolean" &&
+  const noFigures =
     !clearBlank &&
-    ["agoLitres", "agoPrice", "feedingAllowance", "productPrice", "haulageAmount", "haulageRate"].every((k) => values[k] == null);
+    ["agoLitres", "agoPrice", "feedingAllowance", "loadingCost", "productPrice", "haulageAmount", "haulageRate"].every((k) => values[k] == null);
+  const feedingMark = typeof values.feedingInExpenses === "boolean";
+  const loadingMark = typeof values.loadingCostInExpenses === "boolean";
 
-  const said = markOnly
+  const said = noFigures && feedingMark && !loadingMark
     ? values.feedingInExpenses
       ? `Feeding on ${trucks} marked as paid in Expenses`
       : `Feeding on ${trucks} added back as a trip cost`
-    : `Costs applied to ${trucks}`;
+    : noFigures && loadingMark && !feedingMark
+      ? values.loadingCostInExpenses
+        ? `Loading on ${trucks} marked as already in Expenses`
+        : `Loading on ${trucks} added back as a trip cost`
+      : `Costs applied to ${trucks}`;
   const notes = [
     agoKept ? `AGO litres on ${agoKept} of them come from the AGO Stock Ledger and were left as they are.` : "",
     haulageSkipped && (values.haulageAmount != null || values.haulageRate != null)
@@ -254,24 +270,31 @@ const setDeliveryTripCosts = asyncHandler(async (req, res) => {
     feedingSkippedHired && values.feedingAllowance != null
       ? `Feeding went on our own trucks only — ${feedingSkippedHired} hired truck${feedingSkippedHired === 1 ? " was" : "s were"} left without it, since the owner feeds the driver.`
       : "",
+    loadingLocked
+      ? `Loading on ${loadingLocked} of them is on a payment request finance has already taken forward, or recorded as paid, so it was left as it is.`
+      : "",
     requests ? await requestSentence(requests) : "",
+    loading ? await requestSentence(loading, loadingRequests) : "",
   ].filter(Boolean).map((n) => (/[.!?]$/.test(n) ? n : `${n}.`));
   res.json({
     success: true,
     message: notes.length ? `${said}. ${notes.join(" ")}` : said,
-    data: { inventory: rows, updated: rows.length, agoKept, haulageSkipped, feedingLocked, feedingSkippedHired, feedingRequests: requests },
+    data: {
+      inventory: rows, updated: rows.length, agoKept, haulageSkipped, feedingLocked, feedingSkippedHired,
+      feedingRequests: requests, loadingLocked, loadingRequests: loading,
+    },
   });
 });
 
-/** What a save did to the Feeding requests, naming each PFI the way the screens do. */
-const requestSentence = async (result) => {
+/** What a save did to the Feeding (or Truck Loading) requests, naming each PFI the way the screens do. */
+const requestSentence = async (result, service = feedingRequests) => {
   const pfiIds = [...new Set([...result.raised, ...result.changed, ...(result.held || [])].map((r) => r.pfiId))];
   const names = new Map();
   for (const id of pfiIds) {
     const pfi = await pfiRepo.findById(id);
     if (pfi) names.set(id, pfi.allocationCode || pfi.pfiNumber);
   }
-  return feedingRequests.sentence(result, names);
+  return service.sentence(result, names);
 };
 
 const updateDeliveryInventory = asyncHandler(async (req, res) => {
@@ -429,6 +452,13 @@ const deleteDeliveryInventory = asyncHandler(async (req, res) => {
       actor: { id: req.user?.id ?? null, name: req.user?.name || req.user?.email || "" },
     }).catch((err) => console.error("[deliveryInventory.delete] feeding request not re-totalled:", err.message));
   }
+  // And off a pending Truck Loading request, its loading.
+  if (existing.loadingCostExpenseId) {
+    await loadingRequests.sync({
+      expenseIds: [existing.loadingCostExpenseId],
+      actor: { id: req.user?.id ?? null, name: req.user?.name || req.user?.email || "" },
+    }).catch((err) => console.error("[deliveryInventory.delete] loading request not re-totalled:", err.message));
+  }
   res.json({ success: true, message: "Delivery inventory deleted" });
 });
 
@@ -475,6 +505,8 @@ const raiseOwnerPayment = asyncHandler(async (req, res) => {
     amount: req.body.amount ?? null,
     expenseId: req.body.expenseId ?? null,
     note: req.body.note || "",
+    paid: req.body.paid ?? null,
+    user: req.user,
     actor,
   });
   res.status(r.linked ? 200 : 201).json({
@@ -484,10 +516,25 @@ const raiseOwnerPayment = asyncHandler(async (req, res) => {
   });
 });
 
+/** POST /delivery-inventory/loading-paid — these trucks' loading, paid already: written in as paid. */
+const recordLoadingPaid = asyncHandler(async (req, res) => {
+  if (!maySeeCosts(req.user)) {
+    return res.status(403).json({ success: false, message: "You do not have access to delivery costing" });
+  }
+  const actor = { id: req.user?.id ?? null, name: req.user?.name || req.user?.email || "" };
+  const r = await loadingRequests.recordPaid({ tripIds: req.body.ids, paid: req.body.paid, user: req.user, actor });
+  res.status(201).json({
+    success: true,
+    message: loadingRequests.paidSentence(r),
+    data: { inventory: await deliveryInventoryRepo.findCostedByIds(req.body.ids), recorded: r.recorded },
+  });
+});
+
 module.exports = {
   getLinkablePayments,
   linkFeedingExpense,
   raiseOwnerPayment,
+  recordLoadingPaid,
   getDeliveryInventory,
   getDeliveryInventoryById,
   createDeliveryInventory,

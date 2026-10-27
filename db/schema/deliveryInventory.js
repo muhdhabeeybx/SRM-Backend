@@ -70,6 +70,14 @@ const deliveryInventory = pgTable(
      */
     feedingExpenseId: integer("feeding_expense_id"),
     /**
+     * The truck's loading money (0099), raised like its feeding: on one Truck
+     * Loading request per batch, counted on the truck until that is paid.
+     * Hired trucks take it too. The foreign key lives in the migration.
+     */
+    loadingCost: decimal("loading_cost", { precision: 14, scale: 2 }),
+    loadingCostInExpenses: boolean("loading_cost_in_expenses").default(false).notNull(),
+    loadingCostExpenseId: integer("loading_cost_expense_id"),
+    /**
      * What a third-party truck's owner charges for the trip (0094). On such a
      * trip the AGO above is sold to the owner, not burnt by us, and the owner
      * is paid haulage − AGO. Null on our own trucks.

@@ -188,6 +188,10 @@ const bulkCostInventory = z.object({
   haulageRate: money("Haulage rate", { places: 4 }).nullish(),
   /** Feeding already paid through Expenses — kept, but not added again. Absent leaves it. */
   feedingInExpenses: z.boolean().optional(),
+  /** Loading money (0099), raised on the batch's Truck Loading request. Every truck, hired too. */
+  loadingCost: money("Loading").nullish(),
+  /** Loading already in Expenses some other way — kept, but not raised or added. Absent leaves it. */
+  loadingCostInExpenses: z.boolean().optional(),
   /** Without this, a blank field means "leave alone" rather than "clear". */
   clearBlank: z.boolean().optional(),
 });
@@ -196,6 +200,17 @@ const linkFeeding = z.object({
   expenseId: id("Expense"),
   ids: z.array(id("Truck")).min(1, "Pick the trucks").max(300),
 });
+/**
+ * Money that has already left the bank, written in as a paid expense rather
+ * than a request (lib/recordedAsPaid): which account, when, and its reference.
+ */
+const paidAlready = z.object({
+  bankPaidFrom: z.string().trim().min(1, "Say which account it was paid from").max(255),
+  paymentDate: z.string().trim().min(1, "Enter the date it was paid").max(40),
+  paymentReference: z.string().trim().min(1, "Enter the payment reference").max(255),
+  paymentMethod: optionalString("Payment method", 100),
+  notes: optionalString("Notes", 1000),
+});
 /** A payment request to a hired truck's owner, or one already raised spread across the trucks. */
 const ownerPayment = z.object({
   ids: z.array(id("Truck")).min(1, "Pick the trucks").max(300),
@@ -203,6 +218,13 @@ const ownerPayment = z.object({
   amount: money("Amount").nullish(),
   expenseId: id("Expense").optional(),
   note: optionalString("Note", 500),
+  /** Paid to the owner already: recorded as a paid expense, not raised for approval. */
+  paid: paidAlready.optional(),
+});
+/** These trucks' loading, paid already: one paid Truck Loading expense per PFI. */
+const loadingPaid = z.object({
+  ids: z.array(id("Truck")).min(1, "Pick the trucks").max(300),
+  paid: paidAlready,
 });
 /** The PFIs whose unlinked feeding and haulage expenses are wanted: "38,79". */
 const linkablePayments = z.object({
@@ -1173,7 +1195,7 @@ module.exports = {
   listPfis,
   listTickets, ticketIdOrCode,
   createStation, updateStation, listStations,
-  createInventory, updateInventory, listInventory, bulkCostInventory, linkFeeding, ownerPayment, linkablePayments,
+  createInventory, updateInventory, listInventory, bulkCostInventory, linkFeeding, ownerPayment, loadingPaid, linkablePayments,
   createStaff, updateStaff, setStaffPassword, listStaff, updateMyProfile, changeMyPassword,
   createBankAccount, updateBankAccount,
   createBankStatement, bankStatementMapping, matchBankLines,
