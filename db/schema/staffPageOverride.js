@@ -16,7 +16,8 @@ const { staff } = require("./staff");
  * would otherwise show" — `allowed: true` grants a page their role wouldn't,
  * `allowed: false` hides a page their role would. No row for a route means
  * "fall back to whatever the role grants." `viewOnly` on an allowed row means
- * they may look and download but not change anything there.
+ * they may look and download but not change anything there. `pfiIds` on an
+ * allowed row means that page shows those PFIs instead of their own.
  */
 const staffPageOverrides = pgTable(
   "staff_page_overrides",
@@ -29,6 +30,8 @@ const staffPageOverrides = pgTable(
     allowed: boolean("allowed").notNull(),
     /** Allowed to open and download, not to change (migration 0090). */
     viewOnly: boolean("view_only").notNull().default(false),
+    /** This page's own PFIs in place of theirs, or null (migration 0100). */
+    pfiIds: integer("pfi_ids").array(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

@@ -1,7 +1,7 @@
 const asyncHandler = require("express-async-handler");
 const { staffRepo, staffScopeRepo } = require("../../repositories");
 const { PFI_SLOTS } = require("../../lib/pfiSlots");
-const { isConfined } = require("../../lib/pfiScope");
+const { isConfined, pfiScopedOpen } = require("../../lib/pfiScope");
 const rolePages = require("../../services/rolePages.service");
 const pfiRoles = require("../../services/pfiRoles.service");
 
@@ -89,6 +89,7 @@ const getPreview = asyncHandler(async (req, res) => {
       // role -> the open PFIs whose slots give it
       fromPfis,
       pfiScoped: !superAdmin && isConfined({ canViewAllLocations: s.canViewAllLocations, scope: scopeByStaff.get(s.id) }),
+      pfiScopedOpen: pfiScopedOpen({ scope: scopeByStaff.get(s.id) }),
       pageOverrides: (overridesByStaff.get(s.id) || []).map((o) => ({ routePath: o.routePath, allowed: o.allowed, viewOnly: Boolean(o.viewOnly) })),
     };
   });

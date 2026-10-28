@@ -86,7 +86,7 @@ describe("view-only pages", () => {
 
       const read = await request(app).get(`/api/admin/${person.staff.id}`).set("Authorization", `Bearer ${admin}`);
       const overrides = read.body.data.admin.pageOverrides;
-      assert.deepEqual(overrides.find((o) => o.routePath === "/expenses"), { routePath: "/expenses", allowed: true, viewOnly: true });
+      assert.deepEqual(overrides.find((o) => o.routePath === "/expenses"), { routePath: "/expenses", allowed: true, viewOnly: true, pfiIds: null });
       // View only means nothing on a page they are not given, so it is not kept.
       assert.equal(overrides.find((o) => o.routePath === "/pfi").viewOnly, false);
 

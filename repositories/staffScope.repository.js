@@ -1,6 +1,7 @@
 const { eq, and, inArray } = require("drizzle-orm");
 const { setAssignmentContext } = require("../lib/pfiAssignmentContext");
 const rolePages = require("../services/rolePages.service");
+const pfiRoles = require("../services/pfiRoles.service");
 const { db } = require("../config/db");
 const {
   staff,
@@ -20,15 +21,21 @@ const {
  * request. A single round of three id-only queries — cheap, and simpler than
  * one query with two joins fanning out the row count.
  */
+/** A page grant as every reader of it gets it. */
+const OVERRIDE_FIELDS = {
+  routePath: staffPageOverrides.routePath,
+  allowed: staffPageOverrides.allowed,
+  viewOnly: staffPageOverrides.viewOnly,
+  pfiIds: staffPageOverrides.pfiIds,
+};
+
 const getAuthContext = async (staffId) => {
   const [staffRow, depotRows, stationRows, pfiRows, overrideRows, fillingRows] = await Promise.all([
     db.select({ canViewAllLocations: staff.canViewAllLocations, roles: staff.roles }).from(staff).where(eq(staff.id, staffId)).limit(1),
     db.select({ depotId: depotStaff.depotId }).from(depotStaff).where(eq(depotStaff.staffId, staffId)),
     db.select({ lpgStationId: lpgStationStaff.lpgStationId }).from(lpgStationStaff).where(eq(lpgStationStaff.staffId, staffId)),
     db.select({ pfiId: pfiStaff.pfiId }).from(pfiStaff).where(eq(pfiStaff.staffId, staffId)),
-    db.select({ routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed, viewOnly: staffPageOverrides.viewOnly })
-      .from(staffPageOverrides)
-      .where(eq(staffPageOverrides.staffId, staffId)),
+    db.select(OVERRIDE_FIELDS).from(staffPageOverrides).where(eq(staffPageOverrides.staffId, staffId)),
     db.select({ id: fillingStationStaff.deliveryCustomerId }).from(fillingStationStaff).where(eq(fillingStationStaff.staffId, staffId)),
   ]);
 
@@ -53,6 +60,10 @@ const getAuthContext = async (staffId) => {
     // The pages their roles open, or null when roles do not decide their
     // pages (services/rolePages.service.js).
     rolePages: await rolePages.pagesFor(roles),
+    // The PFIs that name them in a slot, which every page with a PFI list of
+    // its own shows as well (middleware/pagePfis.js). Only looked up for
+    // somebody who has such a page.
+    slotPfiIds: overrideRows.some((o) => o.pfiIds?.length) ? await pfiRoles.slotPfiIdsHeld(staffId) : [],
   };
 };
 
@@ -143,7 +154,7 @@ const getScopeWithNamesForStaffIds = async (staffIds) => {
 
 const getPageOverrides = async (staffId) => {
   const rows = await db
-    .select({ routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed, viewOnly: staffPageOverrides.viewOnly })
+    .select(OVERRIDE_FIELDS)
     .from(staffPageOverrides)
     .where(eq(staffPageOverrides.staffId, staffId));
   return rows;
@@ -162,12 +173,12 @@ const getPageOverridesForStaffIds = async (staffIds) => {
   if (!staffIds.length) return byStaff;
 
   const rows = await db
-    .select({ staffId: staffPageOverrides.staffId, routePath: staffPageOverrides.routePath, allowed: staffPageOverrides.allowed, viewOnly: staffPageOverrides.viewOnly })
+    .select({ staffId: staffPageOverrides.staffId, ...OVERRIDE_FIELDS })
     .from(staffPageOverrides)
     .where(inArray(staffPageOverrides.staffId, staffIds));
 
-  for (const r of rows) {
-    byStaff.get(r.staffId)?.push({ routePath: r.routePath, allowed: r.allowed, viewOnly: r.viewOnly });
+  for (const { staffId, ...row } of rows) {
+    byStaff.get(staffId)?.push(row);
   }
   return byStaff;
 };
@@ -224,13 +235,20 @@ const setScope = async (
   });
 };
 
-/** Replaces this staff member's page overrides. `overrides` is [{routePath, allowed, viewOnly}]. */
+/** A page's own PFI list as stored: on an allowed row only, and never empty — empty is null, "their PFIs". */
+const pagePfiList = (o) => {
+  if (!o.allowed || !Array.isArray(o.pfiIds)) return null;
+  const ids = [...new Set(o.pfiIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))].sort((a, b) => a - b);
+  return ids.length ? ids : null;
+};
+
+/** Replaces this staff member's page overrides. `overrides` is [{routePath, allowed, viewOnly, pfiIds}]. */
 const setPageOverrides = async (staffId, overrides = []) => {
   await db.transaction(async (tx) => {
     await tx.delete(staffPageOverrides).where(eq(staffPageOverrides.staffId, staffId));
     if (overrides.length) {
       await tx.insert(staffPageOverrides).values(
-        overrides.map((o) => ({ staffId, routePath: o.routePath, allowed: !!o.allowed, viewOnly: !!o.allowed && !!o.viewOnly }))
+        overrides.map((o) => ({ staffId, routePath: o.routePath, allowed: !!o.allowed, viewOnly: !!o.allowed && !!o.viewOnly, pfiIds: pagePfiList(o) }))
       );
     }
   });

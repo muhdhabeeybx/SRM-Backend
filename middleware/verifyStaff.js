@@ -2,6 +2,7 @@ const { verifyAccessToken } = require("../services/token.service");
 const sessionService = require("../services/session.service");
 const { staffScopeRepo } = require("../repositories");
 const { viewOnlyRefusal } = require("./viewOnlyPages");
+const { applyPagePfis } = require("./pagePfis");
 
 // Role VALUES, not table names — these are data, consumed by config/roleMapping.js
 // and by the frontend. They are unrelated to the `staff` table rename.
@@ -84,6 +85,7 @@ const authenticateStaff = async (req, res, next) => {
     scope: authContext.scope,
     pageOverrides: authContext.pageOverrides,
     rolePages: authContext.rolePages,
+    slotPfiIds: authContext.slotPfiIds,
   };
   // Deliberately not `req.session` — that name belongs to express-session, and
   // colliding with it would be a confusing trap if it is ever added.
@@ -93,6 +95,9 @@ const authenticateStaff = async (req, res, next) => {
   // in authoriseByRoute because several routers use authenticateStaff alone.
   const viewOnly = viewOnlyRefusal(req);
   if (viewOnly) return res.status(viewOnly.status).json(viewOnly.body);
+
+  // A page with a PFI list of its own answers with those PFIs.
+  applyPagePfis(req);
 
   next();
 };

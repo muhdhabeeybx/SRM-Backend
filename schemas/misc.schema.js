@@ -299,6 +299,8 @@ const staffBase = {
         allowed: z.boolean({ error: "allowed must be true or false" }),
         // Open it to look at and download from, not to change (migration 0090).
         view_only: z.boolean({ error: "view_only must be true or false" }).optional(),
+        // This page's own PFIs in place of theirs (migration 0100).
+        pfi_ids: z.array(z.union([id("PFI id"), z.string(), z.number()])).max(500, "Too many PFIs for one page").optional(),
       })
     )
     .max(200, "Too many page overrides")

@@ -4,6 +4,7 @@ const { orders, orderTrucks, pfiExpenses } = require("../db/schema");
 const { outstandingTrucks } = require("./truckProgress.service");
 const { transferSql } = require("../lib/allocationOrders");
 const { confinedAwayFromOrders } = require("../lib/scopeFilter");
+const { asOnPage } = require("../middleware/pagePfis");
 
 /**
  * How much work is waiting, per desk.
@@ -283,7 +284,9 @@ const getWorkQueues = async (user) => {
   const results = await Promise.all(
     QUEUES.map(async (q) => {
       try {
-        const [row] = await q.count(user);
+        // Each count as its own page shows it, where that page has a PFI
+        // list of its own (middleware/pagePfis.js).
+        const [row] = await q.count(asOnPage(user, q.path));
         // A queue may carry a second figure in a different unit — tickets are
         // counted in orders for the badge and in trucks for the person doing
         // the work. Best-effort: it decorates, it does not gate.

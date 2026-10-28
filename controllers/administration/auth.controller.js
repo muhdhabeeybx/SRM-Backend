@@ -4,7 +4,7 @@ const { staffRepo, staffScopeRepo, sessionRepo } = require("../../repositories")
 const { notify, notifyAndWait } = require("../../notifications");
 const sessionService = require("../../services/session.service");
 const cookieService = require("../../services/cookie.service");
-const { isConfined } = require("../../lib/pfiScope");
+const { isConfined, pfiScopedOpen } = require("../../lib/pfiScope");
 const { runsStations } = require("../../lib/stationCosts");
 
 const REALM = "staff";
@@ -31,6 +31,9 @@ const getAdminPayload = async (user) => {
     // the refusal itself is still the server's, this only spares them the
     // dead ends.
     pfiScoped: isConfined(ctx),
+    // The refused areas they were given anyway: stations or plants of their
+    // own open those pages to a confined person (lib/pfiScope.js).
+    pfiScopedOpen: pfiScopedOpen(ctx),
     // Runs filling stations or LPG plants: their own trucks' landed cost
     // reaches them, so the station pages show it (lib/stationCosts).
     stationCosts: runsStations(ctx),
