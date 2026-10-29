@@ -32,6 +32,13 @@ const WITH_NAMES = {
   orderPaid: sql`o.amount_paid`,
   orderCustomerName: sql`oc.name`,
   /**
+   * The account the order quotes — where the trucking PFI pays the cargo for
+   * these litres, and so the "pay to" on that PFI's invoice.
+   */
+  orderAccountBank: sql`o.virtual_account_bank`,
+  orderAccountName: sql`o.virtual_account_name`,
+  orderAccountNumber: sql`o.virtual_account_number`,
+  /**
    * The order was placed before the request was raised: an order already on
    * the cargo, linked rather than placed by approval (see linkOrder in the
    * service). A placed one is always younger than its request.
@@ -55,6 +62,9 @@ const shape = (row) =>
     orderTotal: row.orderTotal == null ? null : Number(row.orderTotal),
     orderPaid: row.orderPaid == null ? null : Number(row.orderPaid),
     orderCustomerName: row.orderCustomerName || null,
+    orderAccountBank: row.orderAccountBank || null,
+    orderAccountName: row.orderAccountName || null,
+    orderAccountNumber: row.orderAccountNumber || null,
     linkedOrder: row.linkedOrder === true,
     /** What is still unpaid on the order: owed by the trucking PFI, by no customer. */
     orderOnCredit:

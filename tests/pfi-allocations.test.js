@@ -496,6 +496,10 @@ describe("truck allocations — off a cargo, approved into an order and a letter
     assert.equal(parentView.body.data.allocations[0].subPfiId, sub.id);
     const subView = await as(admin).get(`${API}/${sub.id}/allocations`);
     assert.equal(subView.body.data.madeBy.parentPfiId, parent.id);
+    // The account its order on the cargo quotes: the "pay to" on its invoice.
+    const [order] = await db.select().from(orders).where(eq(orders.id, subView.body.data.madeBy.orderId));
+    assert.equal(subView.body.data.madeBy.orderAccountNumber, order.virtualAccountNumber);
+    assert.equal(subView.body.data.madeBy.orderAccountBank, order.virtualAccountBank);
     assert.equal(subView.body.data.form, null, "a batch of trucks is not allocated off");
   });
 
