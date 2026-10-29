@@ -3,7 +3,7 @@ const audit = require("./audit.service");
 const { notifyAndWait } = require("../notifications");
 const { DESKS: ASSIGNMENT_DESKS } = require("./deskAssignments.service");
 const { cfoDeskIds } = require("./expenseNotifications.service");
-const { officerIdsFor, stationOfficerIds, generalOfficerIds } = require("../lib/expenseOfficers");
+const { officerIdsFor, officerIds } = require("../lib/expenseOfficers");
 const { isSoldOut } = require("../lib/pfiStock");
 const { shortPfi, dayLabel, FILER_ROLES, REPORT_NAMES } = require("./reportReminders.service");
 const { localDateStr, addDaysStr } = require("../lib/zonedDay");
@@ -261,7 +261,7 @@ const officersOf = (dir, expense) => officerIdsFor(expense).map((id) => dir.byId
 const namedDesks = (dir) => {
   const names = (ids) => ids.map((id) => dir.byId.get(id)?.name).filter(Boolean).join(" and ") || "nobody (not an active member of staff)";
   return {
-    officers: `${names(stationOfficerIds())} for station and LPG plant expenses; ${names(generalOfficerIds())} for the rest`,
+    officers: names(officerIds()),
     cfo: `The CFO, ${names(cfoDeskIds())}`,
   };
 };

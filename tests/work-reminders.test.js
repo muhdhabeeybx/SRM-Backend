@@ -46,7 +46,6 @@ let salesManagerOnA;
 let truckSalesOnT;
 let admin;
 let officer;
-let stationOfficer;
 let cfo;
 let raiser;
 const orderIds = [];
@@ -87,7 +86,7 @@ describe("Work reminders", () => {
   // On unless switched off; set here so a local .env cannot turn these tests off.
   const savedSwitch = process.env.WORK_REMINDERS_ENABLED;
   const savedCfo = process.env.EXPENSE_CFO_STAFF_IDS;
-  const savedOfficers = [process.env.EXPENSE_OFFICER_STAFF_IDS, process.env.EXPENSE_OFFICER_STATION_STAFF_IDS];
+  const savedOfficer = process.env.EXPENSE_OFFICER_STAFF_IDS;
 
   before(async () => {
     process.env.WORK_REMINDERS_ENABLED = "true";
@@ -111,13 +110,11 @@ describe("Work reminders", () => {
     truckSalesOnT = await person(["truck_sales"], "ts-t");
     admin = await person(["admin"], "admin");
     officer = await person(["expenditure_officer"], "officer");
-    stationOfficer = await person(["truck_sales"], "stn-officer");
     cfo = await person(["finance"], "cfo");
     raiser = await person(["truck_sales"], "raiser");
-    // The CFO and each expense's officer are named, as the expense chain names them.
+    // The CFO and the expenditure officer are named, as the expense chain names them.
     process.env.EXPENSE_CFO_STAFF_IDS = String(cfo);
     process.env.EXPENSE_OFFICER_STAFF_IDS = String(officer);
-    process.env.EXPENSE_OFFICER_STATION_STAFF_IDS = String(stationOfficer);
 
     await client`
       INSERT INTO pfi_staff (pfi_id, staff_id) VALUES
@@ -167,10 +164,8 @@ describe("Work reminders", () => {
     else process.env.WORK_REMINDERS_ENABLED = savedSwitch;
     if (savedCfo === undefined) delete process.env.EXPENSE_CFO_STAFF_IDS;
     else process.env.EXPENSE_CFO_STAFF_IDS = savedCfo;
-    if (savedOfficers[0] === undefined) delete process.env.EXPENSE_OFFICER_STAFF_IDS;
-    else process.env.EXPENSE_OFFICER_STAFF_IDS = savedOfficers[0];
-    if (savedOfficers[1] === undefined) delete process.env.EXPENSE_OFFICER_STATION_STAFF_IDS;
-    else process.env.EXPENSE_OFFICER_STATION_STAFF_IDS = savedOfficers[1];
+    if (savedOfficer === undefined) delete process.env.EXPENSE_OFFICER_STAFF_IDS;
+    else process.env.EXPENSE_OFFICER_STAFF_IDS = savedOfficer;
     await client`DELETE FROM notifications WHERE staff_id = ANY(${staffIds})`;
     await client`DELETE FROM staff_notification_overrides WHERE staff_id = ANY(${staffIds})`;
     await client`DELETE FROM daily_reports WHERE submitted_by = ANY(${staffIds})`;
@@ -219,8 +214,10 @@ describe("Work reminders", () => {
     assert.doesNotMatch(text(admin), /verify|to pay|CFO/);
     // The rest of finance is not the CFO.
     assert.doesNotMatch(text(financeOnA), /expense/);
-    // A station's expense waits on the station officer — role or not — and only on them.
-    assert.match(text(stationOfficer), /^Hello \S+, \d+ expense requests? (is|are) waiting for you to verify\.$/);
+    // A station's expense waits on the same officer as the rest (29 Oct 2026):
+    // the general one waiting and the station one are both theirs to verify.
+    const toVerify = Number(text(officer).match(/(\d+) expense requests? (?:is|are) waiting for you to verify/)?.[1]);
+    assert.ok(toVerify >= 2, `the station's expense is counted with the rest, got ${toVerify}`);
   });
 
   test("ticketing hears of paid orders not ticketed on its PFI", async () => {

@@ -47,9 +47,7 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
   let admin;
   const savedCfo = process.env.EXPENSE_CFO_STAFF_IDS;
   const savedOfficer = process.env.EXPENSE_OFFICER_STAFF_IDS;
-  const savedStationOfficer = process.env.EXPENSE_OFFICER_STATION_STAFF_IDS;
   let otherOfficer;
-  let stationOfficer;
 
   before(async () => {
     const make = async (roles, tag) => {
@@ -78,12 +76,10 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     admin = await make([chain.ROLE.ADMIN], "Admin");
     // The CFO is named, not the role: only `cfo` is the CFO here.
     process.env.EXPENSE_CFO_STAFF_IDS = String(cfo.id);
-    // Each expense has one named officer (lib/expenseOfficers.js); another
-    // holder of the role is not it.
+    // Every expense has the one named officer (lib/expenseOfficers.js);
+    // another holder of the role is not it.
     otherOfficer = await make([chain.ROLE.OFFICER], "OtherOfficer");
-    stationOfficer = await make(["truck_sales"], "StationOfficer");
     process.env.EXPENSE_OFFICER_STAFF_IDS = String(officer.id);
-    process.env.EXPENSE_OFFICER_STATION_STAFF_IDS = String(stationOfficer.id);
   });
 
   /**
@@ -106,8 +102,6 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     else process.env.EXPENSE_CFO_STAFF_IDS = savedCfo;
     if (savedOfficer === undefined) delete process.env.EXPENSE_OFFICER_STAFF_IDS;
     else process.env.EXPENSE_OFFICER_STAFF_IDS = savedOfficer;
-    if (savedStationOfficer === undefined) delete process.env.EXPENSE_OFFICER_STATION_STAFF_IDS;
-    else process.env.EXPENSE_OFFICER_STATION_STAFF_IDS = savedStationOfficer;
     await db.delete(staff).where(sql`${staff.email} LIKE ${`notify-%-${RUN}@soroman.test`}`);
     await closeDb();
   });
@@ -197,7 +191,7 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
     assert.ok(!recipients2.includes(cfo.id), "the actor-submitter is excluded, even as the role holder");
   });
 
-  test("pending reaches the expense's named officer only; a station's goes to the station officer; paid still reaches every participant", async () => {
+  test("pending reaches the named officer only, a station's too; paid still reaches every participant", async () => {
     const pendingExpense = baseExpense();
     await notifyExpenseStage({ expense: pendingExpense, stage: chain.STATUS.PENDING, actorId: submitter.id, actorName: "Submitter" });
     const pendingRecipients = await waitForRecipients("expense.pending", pendingExpense.id, [officer.id]);
@@ -210,8 +204,8 @@ describe("expenseNotifications — the submitter hears about every stage, not ju
 
     const stationExpense = { ...baseExpense(), delivery_customer_id: 1 };
     await notifyExpenseStage({ expense: stationExpense, stage: chain.STATUS.PENDING, actorId: submitter.id, actorName: "Submitter" });
-    const stationRecipients = await waitForRecipients("expense.pending", stationExpense.id, [stationOfficer.id]);
-    assert.deepEqual(stationRecipients, [stationOfficer.id], "a station's expense is the station officer's, even without the role");
+    const stationRecipients = await waitForRecipients("expense.pending", stationExpense.id, [officer.id]);
+    assert.deepEqual(stationRecipients, [officer.id], "a station's expense is the same officer's as the rest (29 Oct 2026)");
 
     const paidExpense = baseExpense();
     paidExpense.verified_by = officer.id;
