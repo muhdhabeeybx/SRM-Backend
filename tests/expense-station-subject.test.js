@@ -252,6 +252,82 @@ describe("an expense against a station or a plant", () => {
     assert.equal(row.delivery_customer_id, null);
   });
 
+  /*
+   * "Against which PFI?" on a station's or plant's cost (migration 0055).
+   *
+   * The form asks it, and until 29 Oct 2026 the server threw the answer away:
+   * only a cargo account kept a PFI, so every station and plant expense was
+   * saved with none and read as general overhead. Sent here exactly as the
+   * dialog sends it — both lists, and the PFI.
+   */
+  test("a plant expense keeps the PFI it is raised against", async (t) => {
+    const pfiId = rowsOf(await db.execute(sql`SELECT id FROM pfis ORDER BY id LIMIT 1`))[0]?.id;
+    if (!categoryId || !plantId || !pfiId) return t.skip("no seeded category, LPG plant or PFI here");
+
+    const res = await raise({ station_ids: [], plant_ids: [plantId], pfi_id: pfiId });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+
+    const row = await subjectOf(res.body.data.expense.id);
+    assert.equal(Number(row.lpg_station_id), Number(plantId));
+    assert.equal(Number(row.pfi_id), Number(pfiId));
+  });
+
+  test("a station expense keeps its PFI, and may still name none", async (t) => {
+    const pfiId = rowsOf(await db.execute(sql`SELECT id FROM pfis ORDER BY id LIMIT 1`))[0]?.id;
+    if (!categoryId || !stationId || !pfiId) return t.skip("no seeded category, filling station or PFI here");
+
+    const tied = await raise({ station_ids: [stationId], plant_ids: [], pfi_id: pfiId });
+    assert.equal(tied.status, 201, JSON.stringify(tied.body));
+    assert.equal(Number((await subjectOf(tied.body.data.expense.id)).pfi_id), Number(pfiId));
+
+    const untied = await raise({ station_ids: [stationId], plant_ids: [], pfi_id: null });
+    assert.equal(untied.status, 201, JSON.stringify(untied.body));
+    assert.equal((await subjectOf(untied.body.data.expense.id)).pfi_id, null);
+  });
+
+  test("a station expense naming a PFI that does not exist is refused, not saved without it", async (t) => {
+    if (!categoryId || !stationId) return t.skip("no seeded category or filling station here");
+
+    const res = await raise({ station_ids: [stationId], pfi_id: 99999999 });
+    assert.equal(res.status, 400, JSON.stringify(res.body));
+    assert.match(res.body.message, /PFI not found/);
+  });
+
+  test("an overhead still cannot carry a PFI on a general account", async (t) => {
+    const pfiId = rowsOf(await db.execute(sql`SELECT id FROM pfis ORDER BY id LIMIT 1`))[0]?.id;
+    if (!categoryId || !pfiId) return t.skip("no seeded category or PFI here");
+
+    const res = await raise({ station_ids: [], plant_ids: [], pfi_id: pfiId });
+    assert.equal(res.status, 201, JSON.stringify(res.body));
+    assert.equal((await subjectOf(res.body.data.expense.id)).pfi_id, null);
+  });
+
+  test("an edit keeps a plant expense's PFI, and taking the plant away takes the PFI too", async (t) => {
+    const pfiId = rowsOf(await db.execute(sql`SELECT id FROM pfis ORDER BY id LIMIT 1`))[0]?.id;
+    if (!categoryId || !plantId || !pfiId) return t.skip("no seeded category, LPG plant or PFI here");
+
+    const made = await raise({ station_ids: [], plant_ids: [plantId], pfi_id: null });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const id = made.body.data.expense.id;
+
+    const tie = await request(app)
+      .patch(`${EXPENSES}/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ category_id: categoryId, station_ids: [], plant_ids: [plantId], pfi_id: pfiId });
+    assert.equal(tie.status, 200, JSON.stringify(tie.body));
+    assert.equal(Number((await subjectOf(id)).pfi_id), Number(pfiId));
+
+    // Back to an overhead: the dialog sends no PFI for one, and none is kept.
+    const untie = await request(app)
+      .patch(`${EXPENSES}/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ category_id: categoryId, station_ids: [], plant_ids: [], pfi_id: null });
+    assert.equal(untie.status, 200, JSON.stringify(untie.body));
+    const row = await subjectOf(id);
+    assert.equal(row.lpg_station_id, null);
+    assert.equal(row.pfi_id, null);
+  });
+
 /**
  * One bill, several stations.
  *

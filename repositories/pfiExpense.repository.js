@@ -883,7 +883,9 @@ const findExpenseFull = async (id) => {
            -- say which order the money goes back on and where the refund stands.
            r.id AS refund_id, r.order_id AS refund_order_id, r.status AS refund_status,
            COALESCE(NULLIF(ro.company_name, ''), rc.company_name, '') AS refund_company,
-           rp.pfi_number AS refund_pfi_number
+           rp.pfi_number AS refund_pfi_number,
+           -- The station or plant it was raised for, by name, as the list has it.
+           dc.name AS station_name, ls.name AS plant_name
     FROM pfi_expenses e
     LEFT JOIN order_refunds r ON r.expense_id = e.id
     LEFT JOIN orders ro ON ro.id = r.order_id
@@ -891,6 +893,8 @@ const findExpenseFull = async (id) => {
     LEFT JOIN pfis rp ON rp.id = ro.pfi_id
     JOIN expense_categories c ON c.id = e.category_id
     LEFT JOIN pfis p ON p.id = e.pfi_id
+    LEFT JOIN delivery_customers dc ON dc.id = e.delivery_customer_id
+    LEFT JOIN lpg_stations ls ON ls.id = e.lpg_station_id
     LEFT JOIN staff sub ON sub.id = COALESCE(e.added_by, e.recorded_by)
     WHERE e.id = ${Number(id)}
   `;

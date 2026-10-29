@@ -49,7 +49,10 @@ const actorFor = async (req) => {
  *
  *   · a `pfi_direct` account must name a PFI, or the cost lands nowhere;
  *   · every other account must not, so a general overhead can never quietly
- *     inflate one batch's cost;
+ *     inflate one batch's cost — except a station's or plant's cost
+ *     (`forSubject`), which may name the load it sits under (migration 0055).
+ *     That PFI is optional, and checked to exist when given. Until 29 Oct 2026
+ *     it was dropped here without a word, though the form asks for it;
  *   · an `income` account, or any other account only the ledger posts to
  *     (banks, payables, equity — migration 0081), is refused outright.
  *
@@ -57,7 +60,7 @@ const actorFor = async (req) => {
  * their old behaviour exactly: the category carries the link and the body's
  * `pfi_id` is ignored, so historical rows still edit cleanly.
  */
-const resolveBooking = async (categoryId, rawPfiId) => {
+const resolveBooking = async (categoryId, rawPfiId, { forSubject = false } = {}) => {
   const category = await pfiExpenseRepo.findCategoryById(categoryId);
   if (!category) throw httpErr(400, "Category not found");
   // Banks, sales, payables and the rest of the chart (0081) are the ledger's,
@@ -71,7 +74,16 @@ const resolveBooking = async (categoryId, rawPfiId) => {
     throw httpErr(400, `${category.name} is an income account — it cannot carry an expense`);
   }
   if (!group) return { category, pfiId: category.pfi_id || null };
-  if (!group.requiresPfi) return { category, pfiId: null };
+  if (!group.requiresPfi) {
+    if (!forSubject || rawPfiId === undefined || rawPfiId === null || rawPfiId === "") {
+      return { category, pfiId: null };
+    }
+    const pfiId = Number(rawPfiId);
+    if (!Number.isFinite(pfiId) || pfiId <= 0 || !(await pfiRepo.findById(pfiId))) {
+      throw httpErr(400, "PFI not found");
+    }
+    return { category, pfiId };
+  }
 
   const pfiId = Number(rawPfiId);
   if (!Number.isFinite(pfiId) || pfiId <= 0) {
@@ -615,7 +627,9 @@ const createExpense = asyncHandler(async (req, res) => {
   const amount = Number(req.body.amount);
   if (!Number.isFinite(amount) || amount < 0) throw httpErr(400, "Amount must be a positive number");
 
-  const { pfiId } = await resolveBooking(categoryId, req.body.pfi_id ?? req.body.pfiId);
+  const subjects = await resolveSubject(req.body);
+  const forSubject = subjects.some((s) => s.deliveryCustomerId != null || s.lpgStationId != null);
+  const { pfiId } = await resolveBooking(categoryId, req.body.pfi_id ?? req.body.pfiId, { forSubject });
   const { actorId, actorName } = await actorFor(req);
   const { vendorId, vendorName } = await vendorFor(req.body);
 
@@ -640,8 +654,6 @@ const createExpense = asyncHandler(async (req, res) => {
   }
 
   const money_ = currencyFor(req.body);
-
-  const subjects = await resolveSubject(req.body);
 
   /*
    * Paid out of a station's or plant's own sales cash (0092). It is that
@@ -828,20 +840,6 @@ const updateExpense = asyncHandler(async (req, res) => {
 
   const data = {};
 
-  // The account and the cargo are re-resolved together: moving a line onto an
-  // administrative account has to clear its PFI, and moving it onto a direct
-  // cost has to be given one. Touching either field runs the same check the
-  // create path runs.
-  const categoryId = req.body.category_id ?? req.body.categoryId ?? req.body.category;
-  const bodyPfiId = req.body.pfi_id ?? req.body.pfiId;
-  if (categoryId !== undefined || bodyPfiId !== undefined) {
-    const effectiveCategory = categoryId !== undefined ? categoryId : existing.category_id;
-    const effectivePfi = bodyPfiId !== undefined ? bodyPfiId : existing.pfi_id;
-    const { pfiId } = await resolveBooking(effectiveCategory, effectivePfi);
-    data.category_id = Number(effectiveCategory);
-    data.pfi_id = pfiId;
-  }
-
   /*
    * The subject moves on its own.
    *
@@ -886,6 +884,23 @@ const updateExpense = asyncHandler(async (req, res) => {
     const [subject] = subjects;
     data.delivery_customer_id = subject.deliveryCustomerId;
     data.lpg_station_id = subject.lpgStationId;
+  }
+
+  // The account and the cargo are re-resolved together: moving a line onto an
+  // administrative account has to clear its PFI, and moving it onto a direct
+  // cost has to be given one. Touching either field runs the same check the
+  // create path runs. After the subject above, because a station's or plant's
+  // cost may keep a PFI that an overhead may not.
+  const categoryId = req.body.category_id ?? req.body.categoryId ?? req.body.category;
+  const bodyPfiId = req.body.pfi_id ?? req.body.pfiId;
+  if (categoryId !== undefined || bodyPfiId !== undefined) {
+    const effectiveCategory = categoryId !== undefined ? categoryId : existing.category_id;
+    const effectivePfi = bodyPfiId !== undefined ? bodyPfiId : existing.pfi_id;
+    const station = data.delivery_customer_id !== undefined ? data.delivery_customer_id : existing.delivery_customer_id;
+    const plant = data.lpg_station_id !== undefined ? data.lpg_station_id : existing.lpg_station_id;
+    const { pfiId } = await resolveBooking(effectiveCategory, effectivePfi, { forSubject: station != null || plant != null });
+    data.category_id = Number(effectiveCategory);
+    data.pfi_id = pfiId;
   }
 
   /*
