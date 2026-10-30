@@ -335,21 +335,6 @@ const sendOrderSummarySMS = async (phone, orderData) => {
   return deliver(phone, sms, "Order SMS", { audience: "customer" });
 };
 
-const sendTicketSummarySMS = async (phone, ticketData) => {
-  const { ticketNumber, customerName, productName, quantity, unit, depotName, deliveryType, orderNumber } = ticketData;
-
-  // Delivery orders have nothing to "present at the depot" — the same order-level
-  // ticket exists so the load can pass the gate, but the buyer isn't collecting
-  // it. Telling a delivery customer to redeem a pickup QR is wrong, so the copy
-  // branches on deliveryType.
-  const sms =
-    deliveryType === "delivery"
-      ? `${greet(customerName)}your order of ${qty(quantity, unit)} of ${productName} from ${depotName || "our depot"} is confirmed and being prepared for delivery. We will keep you posted. Thank you for your patronage.`
-      : `${greet(customerName)}your loading ticket for ${qty(quantity, unit)} of ${productName} at ${depotName || "our depot"} is ready. Thank you for your patronage.`;
-
-  return deliver(phone, sms, "Ticket SMS", { audience: "customer" });
-};
-
 const sendDangoteDeliveryOrderSMS = async (phone, orderData) => {
   const { requestNumber, customerName, product, quantity, quantityUnit, totalAmount, accountNumber, bankName, accountName } = orderData;
 
@@ -404,4 +389,4 @@ const sendLpgOrderExpiredSMS = async (phone, { requestNumber, customerName }) =>
   return deliver(phone, sms, "LPG expiry SMS", { audience: "customer" });
 };
 
-module.exports = { sendSMSTermii, route, getTermiiBalance, sendSMSWithFallback, sendPfiReviewSMS, sendOrderSummarySMS, sendTicketSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS, MESSAGE_CLASS };
+module.exports = { sendSMSTermii, route, getTermiiBalance, sendSMSWithFallback, sendPfiReviewSMS, sendOrderSummarySMS, sendDangoteDeliveryOrderSMS, sendLpgOrderSMS, sendOrderExpiredSMS, sendDangoteOrderExpiredSMS, sendLpgOrderExpiredSMS, CHANNELS, MESSAGE_CLASS };

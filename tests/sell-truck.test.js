@@ -8,7 +8,6 @@ const app = require("../app");
 const { client } = require("../config/db");
 const { staffToken, staffTokenWithRoles, closeDb } = require("./helpers");
 const { CATALOG } = require("../notifications/catalog");
-const { choiceForType } = require("../notifications/staffChoices");
 
 /**
  * Selling a truck, and who takes its money — the Sell truck dialog
@@ -239,25 +238,4 @@ describe("the texts a sale sends", () => {
     );
   });
 
-  test("finance: what money to expect, and where to confirm it", () => {
-    const entry = CATALOG["desk.truck_sold"];
-    const data = {
-      ...base,
-      customerName: "",
-      total: 67300000,
-      lines: [
-        { customerName: "Bello", quantity: 30000, rate: 1350, value: 40500000 },
-        { customerName: "Ali", quantity: 20000, rate: 1340, value: 26800000 },
-      ],
-    };
-    assert.equal(entry.title(data), "Truck BWR835XB sold — N67,300,000 to collect");
-    assert.equal(
-      entry.sms(data),
-      "Good day. Truck BWR835XB on batch PFI-38B has been sold: " +
-        "30,000 Litres to Bello at N1,350 per litre, N40,500,000 and 20,000 Litres to Ali at N1,340 per litre, N26,800,000. " +
-        "Kindly confirm each payment on Pending Orders when it lands.",
-    );
-    // Switched off with the rest of their desk's texts.
-    assert.equal(choiceForType("desk.truck_sold")?.key, "desk_steps");
-  });
 });

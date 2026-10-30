@@ -171,15 +171,15 @@ const CHOICES = [
     personal: true,
   },
   {
-    // Sent to the officers of the next desk on the order's PFI, by text as
-    // well as the bell — see notifications/deskOfficers.js for who that is.
+    // Sent to the officer the PFI names for the next desk, by text as well as
+    // the bell — see notifications/deskOfficers.js.
     key: "desk_steps",
     label: "Order and truck steps for their desk",
     description:
-      "A text when an order or truck on their PFI reaches their desk: an order to confirm, tickets to write, trucks at the gate, a truck sold, truck payments to confirm.",
+      "A text when work reaches them on their PFI: an order to confirm, tickets to write, gantry tickets to pick, trucks at the gate, trucks to sell.",
     types: [
       "desk.order_to_confirm", "desk.order_to_ticket", "desk.order_to_stock", "desk.trucks_to_admit", "desk.trucks_on_yard",
-      "desk.order_completed", "desk.order_cancelled", "desk.trucks_to_sell", "desk.truck_sold", "desk.truck_payment",
+      "desk.trucks_to_sell",
     ],
     personal: true,
   },

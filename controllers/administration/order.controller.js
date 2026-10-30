@@ -1466,9 +1466,9 @@ const generateOrderTickets = asyncHandler(async (req, res) => {
     };
   });
 
-  // The entrance gate, the customer and each driver hear about the trucks
-  // this call ticketed — after the commit, so nobody is told about a batch
-  // that rolled back.
+  // The entrance gate and the customer's app hear about the trucks this call
+  // ticketed — after the commit, so nobody is told about a batch that rolled
+  // back.
   stepNotices.ticketsWritten(orderId, freshLoads);
 
   res.json({

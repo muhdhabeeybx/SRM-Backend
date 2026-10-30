@@ -1,7 +1,6 @@
 const QRCode = require("qrcode");
 const { db } = require("../config/db");
 const { orderRepo, ticketRepo, customerRepo } = require("../repositories");
-const { sendTicketSummarySMS } = require("./sms.service");
 const { notify } = require("../notifications");
 
 /**
@@ -109,17 +108,9 @@ const generateTicketForOrder = async (orderIdOrDoc) => {
       virtualAccountBank: order.virtualAccountBank || "",
     };
 
-    // No ticket email: it arrived at the same moment as the payment receipt
-    // (order.paid), which already carries the order, the amount and the next
-    // step, so the customer was getting two emails about one payment. The SMS
-    // and the in-app notice below stay.
-    if (customer.phone) {
-      try {
-        await sendTicketSummarySMS(customer.phone, ticketData);
-      } catch (smsErr) {
-        console.error("Failed to send ticket SMS:", smsErr.message);
-      }
-    }
+    // No ticket email or text: they arrived at the same moment as the payment
+    // receipt (order.paid), which already carries the order, the amount and the
+    // next step, so the customer heard twice about one payment.
 
     // The inbox row and push, so the ticket is reachable in the app. The
     // catalog entry is APP_ONLY so nothing here is sent twice.

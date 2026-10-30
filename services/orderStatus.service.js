@@ -104,11 +104,10 @@ const ARRIVAL_NOTIFICATIONS = Object.freeze({
  * failure must never roll it back or surface as a 500 to the caller.
  */
 async function announce(order, toStatus, opts) {
-  // The next desk hears too — ticketing on a release, finance and ticketing
-  // on completion or cancellation. Its own module; it never throws.
+  // The next desk hears too — ticketing on a release. Its own module; it never
+  // throws.
   if (order?.id) {
     stepNotices().orderArrived(order.id, toStatus, {
-      reason: opts.metadata?.reason,
       ticketsWithPayment: Boolean(opts.metadata?.ticketsWithPayment),
     });
   }

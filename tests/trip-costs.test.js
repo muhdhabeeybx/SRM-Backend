@@ -31,26 +31,42 @@ describe("tripCosts", () => {
     assert.equal(c.feedingInExpenses, false);
   });
 
-  test("feeding paid through Expenses stays on the row but is not added again", () => {
+  test("feeding paid through Expenses is still what the trip cost; it only moves to paid", () => {
     const c = tripCosts(truck({ feedingInExpenses: true }));
     assert.equal(c.feedingAllowance, 50_000);
     assert.equal(c.feedingInExpenses, true);
-    assert.equal(c.totalExpenses, 1_955_000);
-    assert.equal(c.costPerLitre, 39.1);
-    assert.equal(c.landingCost, 1339.1);
-    assert.equal(c.margin, 60.9);
+    assert.equal(c.totalExpenses, 2_005_000);
+    assert.equal(c.costPerLitre, 40.1);
+    assert.equal(c.landingCost, 1340.1);
+    assert.equal(c.margin, 59.9);
+    assert.equal(c.paidInExpenses, 50_000);
+    assert.equal(c.stillToPay, 0);
   });
 
   test("reads the database column name as well", () => {
     const c = tripCosts(truck({ feedingInExpenses: undefined, feeding_in_expenses: true }));
-    assert.equal(c.totalExpenses, 1_955_000);
+    assert.equal(c.paidInExpenses, 50_000);
   });
 
-  test("feeding only, paid through Expenses, is a known zero, not uncosted", () => {
+  test("feeding only, paid through Expenses, still costs the truck its feeding", () => {
     const c = tripCosts(truck({ agoLitres: null, agoPrice: null, feedingInExpenses: true }));
-    assert.equal(c.totalExpenses, 0);
-    assert.equal(c.costPerLitre, 0);
+    assert.equal(c.totalExpenses, 50_000);
+    assert.equal(c.costPerLitre, 1);
     assert.equal(c.costed, true);
+  });
+
+  test("a rate of ₦0 is a truck not sold yet: no margin, not a loss of the whole landing cost", () => {
+    const c = tripCosts(truck({ rate: "0.00" }));
+    assert.equal(c.landingCost, 1340.1);
+    assert.equal(c.margin, null);
+    assert.equal(c.marginValue, null);
+    assert.deepEqual(c.missing, ["selling rate"]);
+  });
+
+  test("own trucks' diesel is out of our stock: neither paid nor still to pay", () => {
+    const c = tripCosts(truck());
+    assert.equal(c.paidInExpenses, 0);
+    assert.equal(c.stillToPay, 50_000);
   });
 
   test("the mark alone, with no feeding entered, changes nothing", () => {
@@ -109,6 +125,23 @@ describe("tripCosts on a third-party truck", () => {
   test("feeding we paid is still added on top of the haulage", () => {
     const c = tripCosts(hired({ feedingAllowance: "50000" }));
     assert.equal(c.totalExpenses, 3_050_000);
+  });
+
+  test("paying the owner never makes the truck cheaper: JMT276XA on PFI-38B", () => {
+    const c = tripCosts({
+      quantityAllocated: 50_000, haulageRate: "65", agoLitres: "575", agoPrice: "1900",
+      productPrice: "1350", rate: "0", truckThirdParty: true,
+      loadingCost: "81500", loadingRequest: { status: "paid" },
+      ownerPayments: { paid: 1_125_000, requested: 0 },
+    });
+    assert.equal(c.haulageAmount, 3_250_000);
+    assert.equal(c.totalExpenses, 3_331_500);
+    assert.equal(c.costPerLitre, 66.63);
+    assert.equal(c.landingCost, 1416.63);
+    assert.equal(c.paidInExpenses, 1_206_500);
+    assert.equal(c.ownerOwed, 1_032_500);
+    assert.equal(c.stillToPay, 1_032_500);
+    assert.equal(c.haulageAdded, 2_125_000, "a batch adds only what the PFI's expenses do not hold");
   });
 
   test("our own truck is costed exactly as before", () => {

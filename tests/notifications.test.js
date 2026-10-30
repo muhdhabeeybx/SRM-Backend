@@ -178,7 +178,7 @@ describe("quiet hours", () => {
 
   test("a normal-priority notification is suppressed during quiet hours", () => {
     const { allowed, suppressed } = engine.gateChannels({
-      entry: catalog.getType("order.released"),
+      entry: catalog.getType("order.cancelled"),
       rendered: { priority: "high" },
       principal: { type: "customer", id: customer.id },
       contact: { email: "a@b.com", phone: PHONE },

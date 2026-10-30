@@ -1,86 +1,60 @@
 const { and, eq, inArray, arrayOverlaps } = require("drizzle-orm");
 const { db } = require("../config/db");
-const { staff, pfiStaff, depotStaff } = require("../db/schema");
+const { staff, pfis, pfiStaff } = require("../db/schema");
 
 /**
  * Who holds a desk for one PFI — the people a step's text goes to.
  *
  * An order moves desk to desk: finance confirms the money, ticketing writes
  * the tickets, security admits and releases the trucks. Each move tells the
- * NEXT desk, and "the desk" for an order is the officers of that role assigned
- * to the order's PFI, not everybody in the company who holds the role. A
- * finance officer on PFI 39/26 has no use for PFI 42's orders.
+ * NEXT desk, and "the desk" is, in order:
  *
- * When nobody with the role is on the PFI, the step must not go silent — that
- * is exactly when an order gets stuck. It falls back, in order, to:
+ *   1. the officer the PFI names for that job, and nobody else — a sales
+ *      manager on the PFI who also holds the finance role is not its finance;
+ *   2. where that job's slot is empty, whoever holds the role and is assigned
+ *      to this PFI on Manage Users. Slots for ticketing, the gates and stock
+ *      only came with migration 0096, so many desks are still held this way.
  *
- *   1. the role's company-wide holders: nobody on any PFI, and either no
- *      depots or this order's depot among theirs (the rule the order list's
- *      scope uses, lib/scopeFilter.js);
- *   2. the admins, so somebody notices the PFI has nobody on that desk.
+ * It stops there. Nobody else on the company's books is told, and neither are
+ * the admins (the owner, 30 Oct 2026: too many messages, sent to people who had
+ * nothing to do with them). A desk with nobody on it texts nobody; the bell and
+ * the work queues still show the work.
  *
- * A desk with `adminsLast: false` never reaches the admins: its last resort is
- * every holder of the role, wherever they sit, and when nobody holds the role
- * nobody is told (an empty list). The stock desk is one — the owner's rule of
- * 20 Oct 2026, "only to stock officer".
- *
- * Suspended and deactivated accounts never count, at any tier.
+ * Suspended and deactivated accounts are never told.
  *
  * @param {object} opts
  * @param {number|null} opts.pfiId
- * @param {number|null} [opts.depotId]
- * @param {string[]} opts.roles     the desk — any one of these roles holds it
- * @param {boolean} [opts.adminsLast=true] whether the admins stand in for an empty desk
+ * @param {{slots: string[], roles: string[]}} opts.desk  one of DESKS below
  * @returns {Promise<Array<object>>} recipient specs for notify()'s `to`
  */
-const officersFor = async ({ pfiId, depotId = null, roles, adminsLast = true }) => {
-  const admins = adminsLast ? [{ roles: ["admin", "super_admin"] }] : [];
-  if (!roles?.length) return admins;
+const officersFor = async ({ pfiId, desk }) => {
+  if (pfiId == null) return [];
+  const live = and(eq(staff.isActive, true), eq(staff.suspended, false));
 
-  const holders = await db
+  const [pfi] = await db.select().from(pfis).where(eq(pfis.id, Number(pfiId))).limit(1);
+  const named = [...new Set(desk.slots.map((key) => Number(pfi?.[key])).filter((id) => Number.isInteger(id) && id > 0))];
+  const officers = named.length
+    ? await db.select({ id: staff.id }).from(staff).where(and(inArray(staff.id, named), live))
+    : [];
+  if (officers.length) return officers.map((p) => ({ staffId: Number(p.id) }));
+
+  const assigned = await db
     .select({ id: staff.id })
     .from(staff)
-    .where(and(arrayOverlaps(staff.roles, roles), eq(staff.isActive, true), eq(staff.suspended, false)));
-  if (!holders.length) return admins;
-
-  const ids = holders.map((h) => Number(h.id));
-  const [pfiRows, depotRows] = await Promise.all([
-    db.select({ staffId: pfiStaff.staffId, id: pfiStaff.pfiId }).from(pfiStaff).where(inArray(pfiStaff.staffId, ids)),
-    db.select({ staffId: depotStaff.staffId, id: depotStaff.depotId }).from(depotStaff).where(inArray(depotStaff.staffId, ids)),
-  ]);
-
-  const byStaff = (rows) => {
-    const m = new Map();
-    for (const r of rows) m.set(Number(r.staffId), [...(m.get(Number(r.staffId)) || []), Number(r.id)]);
-    return m;
-  };
-  const pfisOf = byStaff(pfiRows);
-  const depotsOf = byStaff(depotRows);
-
-  if (pfiId != null) {
-    const onPfi = ids.filter((id) => (pfisOf.get(id) || []).includes(Number(pfiId)));
-    if (onPfi.length) return onPfi.map((staffId) => ({ staffId }));
-  }
-
-  const companyWide = ids.filter((id) => {
-    if ((pfisOf.get(id) || []).length) return false;
-    const depots = depotsOf.get(id) || [];
-    return !depots.length || (depotId != null && depots.includes(Number(depotId)));
-  });
-  if (companyWide.length) return companyWide.map((staffId) => ({ staffId }));
-
-  return adminsLast ? admins : ids.map((staffId) => ({ staffId }));
+    .innerJoin(pfiStaff, eq(pfiStaff.staffId, staff.id))
+    .where(and(eq(pfiStaff.pfiId, Number(pfiId)), arrayOverlaps(staff.roles, desk.roles), live));
+  return assigned.map((p) => ({ staffId: Number(p.id) }));
 };
 
-/** The desks, by the roles that hold them. One list, so a desk is named once. */
-const DESK_ROLES = Object.freeze({
-  finance: ["finance"],
-  tickets: ["ticketing", "dispatch"],
-  gateIn: ["security_entry"],
-  gateOut: ["security_exit"],
-  truckSales: ["truck_sales"],
+/** The desks: the PFI slots that name them (lib/pfiSlots.js), and the roles that hold them. One list, so a desk is named once. */
+const DESKS = Object.freeze({
+  finance: { slots: ["auditOfficerId"], roles: ["finance"] },
+  tickets: { slots: ["ticketingOfficerId"], roles: ["ticketing", "dispatch"] },
+  gateIn: { slots: ["gateEntryOfficerId"], roles: ["security_entry"] },
+  gateOut: { slots: ["securityExitOfficerId"], roles: ["security_exit"] },
+  truckSales: { slots: ["salesManagerId", "truckSalesOfficerId"], roles: ["truck_sales"] },
   // Picks the gantry tickets a paid order is sold on (gantry PFIs on a ticket register).
-  stock: ["stock_officer"],
+  stock: { slots: ["stockOfficerId"], roles: ["stock_officer"] },
 });
 
-module.exports = { officersFor, DESK_ROLES };
+module.exports = { officersFor, DESKS };

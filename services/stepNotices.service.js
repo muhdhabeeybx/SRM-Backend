@@ -1,34 +1,36 @@
 const { sql } = require("drizzle-orm");
 const { db } = require("../config/db");
 const { notify } = require("../notifications");
-const { officersFor, DESK_ROLES } = require("../notifications/deskOfficers");
+const { officersFor, DESKS } = require("../notifications/deskOfficers");
 const { generateOrderReference } = require("../utils/helpers");
 const gantryRegister = require("../lib/gantryTicketRegister");
+const pfiDesks = require("../lib/pfiDesks");
 
 /**
  * The texts that follow an order, and a truck sale, from move to move.
  *
  * Each function here is called by the code that made the move, AFTER the move
- * is written, and tells whoever is next: the desk's officers on that PFI
- * (notifications/deskOfficers.js), the driver of the truck, the customer. The
- * wording lives in the catalog (deskSteps, deliverySms); this file only decides
- * who hears what, and gathers the facts the wording needs.
+ * is written. The wording lives in the catalog (deskSteps, deliverySms); this
+ * file only decides who hears what, and gathers the facts the wording needs.
+ *
+ * A step texts somebody only when they have something to do next, and only
+ * whoever holds that job on the PFI (notifications/deskOfficers.js). The owner,
+ * 30 Oct 2026: too many messages. Telling someone what has already happened, or
+ * what they just did themselves, is not a reason to send one.
  *
  *   Orders       placed     → finance on the PFI: confirm the payment
  *                released   → ticketing: write the tickets
  *                ticketed   → the entrance gate: expect these trucks
- *                             each driver: your ticket; the customer: trucks ticketed
  *                first in   → the exit gate: trucks are on the yard
- *                truck out  → the customer: this truck has left
- *                completed  → finance and ticketing: every truck is out
- *                cancelled  → finance and ticketing
  *
- *   Truck sales  loaded     → each driver: you are loaded; truck sales: sell them
+ *   Truck sales  loaded     → truck sales: sell them
  *                sold       → each customer: what you bought, where to pay;
- *                             the driver: every drop; finance: money to expect
+ *                             the driver: every drop
  *                customer   → the driver: who you deliver to; the customer: your truck
- *                payment    → driver, customer, payer; finance: confirm the deposit
- *                confirmed  → the customer: payment confirmed
+ *                payment    → the customer: payment confirmed, once per save
+ *
+ * A customer with the app also sees trucks ticketed and trucks leaving there;
+ * those are not texts (the catalog's channels).
  *
  * Gantry and delivery PFIs have no ticketing or gate desks — their orders go
  * straight from payment to Completed (order.service completeDesklessOrder) —
@@ -78,7 +80,7 @@ const later = (label, fn) => {
 const orderContext = async (orderId) => {
   const [row] = rowsOf(
     await db.execute(sql`
-      SELECT o.id, o.pfi_id AS "pfiId", o.depot_id AS "depotId", o.quantity,
+      SELECT o.id, o.pfi_id AS "pfiId", o.quantity,
              o.total_amount AS "totalAmount", o.pricing_status AS "pricingStatus",
              COALESCE(NULLIF(o.company_name, ''), c.company_name) AS "companyName",
              o.customer_id AS "customerId",
@@ -113,8 +115,8 @@ const orderContext = async (orderId) => {
 };
 
 /** Tell one desk on the order's PFI. */
-const toDesk = async (type, ctx, roles, extra = {}, { adminsLast = true } = {}) => {
-  const to = await officersFor({ pfiId: ctx.pfiId, depotId: ctx.depotId, roles, adminsLast });
+const toDesk = async (type, ctx, desk, extra = {}) => {
+  const to = await officersFor({ pfiId: ctx.pfiId, desk });
   if (!to.length) return;
   await notify(type, { to, data: { ...ctx.data, ...extra } });
 };
@@ -124,50 +126,39 @@ const orderPlaced = (orderId) =>
   later("orderPlaced", async () => {
     const ctx = await orderContext(orderId);
     if (!ctx) return;
-    await toDesk("desk.order_to_confirm", ctx, DESK_ROLES.finance, {
+    await toDesk("desk.order_to_confirm", ctx, DESKS.finance, {
       awaitingPrice: ctx.pricingStatus === "pending",
     });
   });
 
 /**
  * An order arrived at a status. Called by the state machine for every move
- * (orderStatus.service announce), so every path — payment, credit release,
- * the gate, a cancellation — tells the desks the same way.
+ * (orderStatus.service announce), so every path — payment, credit release, the
+ * gate — tells the desks the same way. Only a release gives a desk work.
  *
  * Loading is not here: the move into it is the ticketing call, which knows
  * the trucks and says so itself (ticketsWritten).
  */
-const orderArrived = (orderId, status, { reason, ticketsWithPayment = false } = {}) =>
+const orderArrived = (orderId, status, { ticketsWithPayment = false } = {}) =>
   later(`orderArrived:${status}`, async () => {
-    if (!["Released", "Completed", "Cancelled"].includes(status)) return;
+    if (status !== "Released") return;
     const ctx = await orderContext(orderId);
     if (!ctx) return;
 
-    if (status === "Released" && hasDesks(ctx)) {
-      await toDesk("desk.order_to_ticket", ctx, DESK_ROLES.tickets);
+    if (hasDesks(ctx)) {
+      await toDesk("desk.order_to_ticket", ctx, DESKS.tickets);
     }
     // Not when its tickets were picked with the payment: it is already done.
-    // Stock officers only, never the admins (owner, 20 Oct 2026).
-    if (status === "Released" && !ticketsWithPayment && ctx.pfiType === "gantry" && (await gantryRegister.isOn(ctx.pfiId))) {
-      await toDesk("desk.order_to_stock", ctx, DESK_ROLES.stock, {}, { adminsLast: false });
-    }
-    if (status === "Completed" && hasDesks(ctx)) {
-      const [{ n = 0 } = {}] = rowsOf(
-        await db.execute(sql`SELECT COUNT(*)::int AS n FROM order_trucks WHERE order_id = ${Number(orderId)}`)
-      );
-      await toDesk("desk.order_completed", ctx, [...DESK_ROLES.finance, ...DESK_ROLES.tickets], { truckCount: n });
-    }
-    if (status === "Cancelled") {
-      await toDesk("desk.order_cancelled", ctx, [...DESK_ROLES.finance, ...DESK_ROLES.tickets], { reason: reason || "" });
+    if (!ticketsWithPayment && ctx.pfiType === "gantry" && (await gantryRegister.isOn(ctx.pfiId))) {
+      await toDesk("desk.order_to_stock", ctx, DESKS.stock);
     }
   });
 
 /**
  * Tickets were written for some of an order's trucks.
  *
- * One text to the entrance gate listing them, one to the customer, and one to
- * each driver with his own ticket. `loads` are the order_trucks rows this call
- * wrote or re-ticketed.
+ * One text to the entrance gate listing them, and a notice in the customer's
+ * app. `loads` are the order_trucks rows this call wrote or re-ticketed.
  */
 const ticketsWritten = (orderId, loads = []) =>
   later("ticketsWritten", async () => {
@@ -175,38 +166,15 @@ const ticketsWritten = (orderId, loads = []) =>
     const ctx = await orderContext(orderId);
     if (!ctx) return;
 
-    const ids = loads.map((l) => Number(l.id)).filter(Number.isFinite);
-    const tickets = ids.length
-      ? rowsOf(
-          await db.execute(sql`
-            SELECT order_truck_id AS "loadId", ticket_number AS "ticketNumber"
-              FROM tickets WHERE order_truck_id IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
-          `)
-        )
-      : [];
-    const ticketOf = new Map(tickets.map((t) => [Number(t.loadId), t.ticketNumber]));
     const plates = loads.map((l) => l.truckNumber);
 
     if (hasDesks(ctx)) {
-      await toDesk("desk.trucks_to_admit", ctx, DESK_ROLES.gateIn, { plates, truckCount: loads.length });
+      await toDesk("desk.trucks_to_admit", ctx, DESKS.gateIn, { plates, truckCount: loads.length });
     }
     if (ctx.customerId) {
       await notify("order.trucks_ticketed", {
         to: { customerId: ctx.customerId },
         data: { ...ctx.data, plates, truckCount: loads.length },
-      });
-    }
-    for (const l of loads) {
-      if (!l.driverPhone) continue;
-      await notify("order.truck_ticketed_driver", {
-        to: { phone: l.driverPhone, name: l.driverName || "" },
-        data: {
-          ...ctx.data,
-          loadId: l.id,
-          ticketNumber: String(l.manualTicketNumber || "").trim() || ticketOf.get(Number(l.id)) || "",
-          truckNumber: l.truckNumber,
-          quantity: l.quantity,
-        },
       });
     }
   });
@@ -230,10 +198,10 @@ const truckGatedIn = (orderId, load) =>
     if (n !== 0) return;
     const ctx = await orderContext(orderId);
     if (!ctx || !hasDesks(ctx)) return;
-    await toDesk("desk.trucks_on_yard", ctx, DESK_ROLES.gateOut, { truckNumber: load?.truckNumber || "" });
+    await toDesk("desk.trucks_on_yard", ctx, DESKS.gateOut, { truckNumber: load?.truckNumber || "" });
   });
 
-/** A truck left the depot: its customer hears, per truck. */
+/** A truck left the depot: a notice in its customer's app, per truck. */
 const truckGatedOut = (orderId, load) =>
   later("truckGatedOut", async () => {
     const ctx = await orderContext(orderId);
@@ -263,7 +231,7 @@ const loadsWithDrivers = async (ids) => {
       SELECT di.id, di.pfi_id AS "pfiId", di.allocation_code AS "allocationCode",
              di.truck_number AS "truckNumber", di.depot AS "depotName",
              di.quantity_allocated AS "quantity", di.pfi_product AS "product",
-             p.pfi_number AS "pfiNumber", p.location_id AS "depotId",
+             p.pfi_number AS "pfiNumber",
              COALESCE(NULLIF(dr.phone, ''), NULLIF(ft.driver_phone, ''), '') AS "driverPhone",
              COALESCE(NULLIF(dr.name, ''), NULLIF(ft.driver_name, ''), '') AS "driverName"
         FROM delivery_inventory di
@@ -276,29 +244,14 @@ const loadsWithDrivers = async (ids) => {
 };
 
 /**
- * Trucks were loaded onto a batch. Each driver is told he is loaded; the truck
- * sales desk on the PFI gets one text per batch listing them.
+ * Trucks were loaded onto a batch: the people who sell it get one text per
+ * batch listing them. The batch's PFI is the one holding its code, else the one
+ * its loads were drawn from (lib/pfiDesks.js).
  */
 const trucksLoaded = (inventoryIds = []) =>
   later("trucksLoaded", async () => {
     const loads = await loadsWithDrivers(inventoryIds);
     if (!loads.length) return;
-
-    for (const l of loads) {
-      if (!l.driverPhone) continue;
-      await notify("delivery.truck_loaded", {
-        to: { phone: l.driverPhone, name: l.driverName },
-        data: {
-          inventoryId: l.id,
-          truckNumber: l.truckNumber,
-          depotName: l.depotName,
-          quantity: l.quantity,
-          product: l.product,
-          allocationCode: l.allocationCode,
-          customerName: "",
-        },
-      });
-    }
 
     const batches = new Map();
     for (const l of loads) {
@@ -307,7 +260,9 @@ const trucksLoaded = (inventoryIds = []) =>
     }
     for (const group of batches.values()) {
       const first = group[0];
-      const to = await officersFor({ pfiId: first.pfiId, depotId: first.depotId, roles: DESK_ROLES.truckSales });
+      const [batch] = await pfiDesks.listDesks([first.allocationCode]);
+      const to = await officersFor({ pfiId: batch?.pfiId ?? first.pfiId, desk: DESKS.truckSales });
+      if (!to.length) continue;
       await notify("desk.trucks_to_sell", {
         to,
         data: {
@@ -352,17 +307,36 @@ const deliveryCustomerPhone = async (customerId) => {
   return row?.phone || "";
 };
 
+/** The customer hears their payment on a truck is confirmed. */
+const tellPaymentConfirmed = async (sale, amount, subject) => {
+  const phone = await deliveryCustomerPhone(sale.customerId);
+  if (!phone) return;
+  await notifyOnce(subject, "delivery.payment_confirmed", {
+    to: { phone, name: sale.customerName || "" },
+    data: {
+      saleId: sale.id,
+      amount,
+      truckNumber: sale.truckNumber,
+      customerName: sale.customerName || "",
+      allocationCode: sale.allocationCode || "",
+    },
+  });
+};
+
 /**
  * Sale rows were written on trucks.
  *
- * A row with money on it is a payment: the driver learns the product is sold
- * and who to call, the customer and a separate payer learn it is paid, and
- * finance on the PFI is asked to confirm the deposit. A row with a customer and
- * no money puts that customer on the truck. Transfers between trucks and
- * expense rows move nothing anybody needs telling about.
+ * A row matched to a bank statement line is finance confirming the money — the
+ * Confirm button on Pending Payments is that match — so the customer hears, one
+ * text however many lines the save matched. A row with a customer and no money
+ * puts that customer on the truck. A deposit keyed in by hand is not confirmed
+ * yet (depositConfirmed). Transfers between trucks and expense rows move
+ * nothing anybody needs telling about.
  */
 const salesRecorded = (sales = []) =>
   later("salesRecorded", async () => {
+    const confirmed = new Map();
+
     for (const sale of sales) {
       if (!sale || sale.transferGroupId) continue;
       if (Number(sale.expensesAmount || 0) > 0) continue;
@@ -371,37 +345,24 @@ const salesRecorded = (sales = []) =>
       if (!load) continue;
 
       const amount = Number(sale.paymentAmount || 0);
-      const customerPhone = await deliveryCustomerPhone(sale.customerId);
-      const payerPhone = String(sale.phoneNumber || "").trim();
-      // One subject per truck, customer and kind of news.
-      const subject = `${load.id}|${sale.customerId || sale.customerName || ""}|${amount > 0 ? sale.id : "assigned"}`;
-      const base = {
-        inventoryId: load.id,
-        truckNumber: load.truckNumber,
-        customerName: sale.customerName || "",
-        customerPhone,
-        driverName: load.driverName,
-        driverPhone: load.driverPhone,
-        allocationCode: load.allocationCode || sale.allocationCode || "",
-      };
-
       if (amount > 0) {
-        const payer = { ...base, payerName: sale.payerName || sale.customerName || "", payerPhone };
-        if (load.driverPhone) {
-          await notifyOnce(subject, "delivery.paid_driver", { to: { phone: load.driverPhone, name: load.driverName }, data: payer });
-        }
-        if (customerPhone) {
-          await notifyOnce(subject, "delivery.paid_customer", { to: { phone: customerPhone, name: sale.customerName }, data: payer });
-        }
-        if (payerPhone && payerPhone !== customerPhone) {
-          await notifyOnce(subject, "delivery.paid_payer", { to: { phone: payerPhone, name: sale.payerName }, data: payer });
-        }
-        const to = await officersFor({ pfiId: load.pfiId, depotId: load.depotId, roles: DESK_ROLES.finance });
-        await notifyOnce(subject, "desk.truck_payment", {
-          to,
-          data: { ...payer, amount, saleId: sale.id, pfiNumber: load.pfiNumber || "" },
-        });
+        if (!sale.statementLineId) continue;
+        const key = `${load.id}|${sale.customerId || ""}`;
+        const so = confirmed.get(key) || { sale, amount: 0, ids: [] };
+        confirmed.set(key, { ...so, amount: so.amount + amount, ids: [...so.ids, sale.id] });
       } else if (sale.customerId) {
+        const customerPhone = await deliveryCustomerPhone(sale.customerId);
+        // One subject per truck and customer.
+        const subject = `${load.id}|${sale.customerId}`;
+        const base = {
+          inventoryId: load.id,
+          truckNumber: load.truckNumber,
+          customerName: sale.customerName || "",
+          customerPhone,
+          driverName: load.driverName,
+          driverPhone: load.driverPhone,
+          allocationCode: load.allocationCode || sale.allocationCode || "",
+        };
         if (load.driverPhone) {
           await notifyOnce(subject, "delivery.assigned_driver", { to: { phone: load.driverPhone, name: load.driverName }, data: base });
         }
@@ -409,6 +370,10 @@ const salesRecorded = (sales = []) =>
           await notifyOnce(subject, "delivery.assigned_customer", { to: { phone: customerPhone, name: sale.customerName }, data: base });
         }
       }
+    }
+
+    for (const { sale, amount, ids } of confirmed.values()) {
+      await tellPaymentConfirmed(sale, amount, ids.join(","));
     }
   });
 
@@ -438,9 +403,8 @@ const collectionAccount = async (pfiId) => {
 /**
  * A truck was sold from the Sell truck dialog. Each customer — one of our own
  * stations included — hears what they bought and where to pay; the driver
- * once, with every drop; finance on the PFI what money to expect, so they
- * confirm each payment on Pending Orders as it lands. Only the lines just
- * sold — a second customer added later is news to them, not to the first.
+ * once, with every drop. Only the lines just sold — a second customer added
+ * later is news to them, not to the first.
  */
 const truckSold = (inventoryId, sales = []) =>
   later("truckSold", async () => {
@@ -482,38 +446,16 @@ const truckSold = (inventoryId, sales = []) =>
         data: { ...base, customerName: "", lines },
       });
     }
-
-    const to = await officersFor({ pfiId: load.pfiId, depotId: load.depotId, roles: DESK_ROLES.finance });
-    if (!to.length) return;
-    await notify("desk.truck_sold", {
-      to,
-      data: {
-        ...base,
-        customerName: "",
-        pfiNumber: load.pfiNumber || "",
-        saleId: sales[0].id,
-        lines,
-        total: lines.reduce((sum, l) => sum + l.value, 0),
-      },
-    });
   });
 
-/** Finance marked a truck payment's deposit as received: the customer hears. */
+/**
+ * A deposit keyed in by hand was marked received: the customer hears. One
+ * matched to a statement line was told when it was matched (salesRecorded).
+ */
 const depositConfirmed = (sale) =>
   later("depositConfirmed", async () => {
-    if (!sale || Number(sale.paymentAmount || 0) <= 0) return;
-    const phone = await deliveryCustomerPhone(sale.customerId);
-    if (!phone) return;
-    await notify("delivery.payment_confirmed", {
-      to: { phone, name: sale.customerName || "" },
-      data: {
-        saleId: sale.id,
-        amount: sale.paymentAmount,
-        truckNumber: sale.truckNumber,
-        customerName: sale.customerName || "",
-        allocationCode: sale.allocationCode || "",
-      },
-    });
+    if (!sale || sale.statementLineId || Number(sale.paymentAmount || 0) <= 0) return;
+    await tellPaymentConfirmed(sale, sale.paymentAmount, sale.id);
   });
 
 module.exports = {

@@ -222,8 +222,7 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.create(
     bankAccountId ? { ...base, bankAccountId } : base,
   );
-  // A customer put on a truck, or money on it: the driver, the customer, a
-  // separate payer and finance hear. Never throws.
+  // A customer put on a truck: the driver and the customer hear. Never throws.
   stepNotices.salesRecorded([sale]);
   res.status(201).json({
     success: true,
@@ -237,10 +236,9 @@ const createDeliverySale = asyncHandler(async (req, res) => {
  *
  * One call for the whole sale, so the lines land together and the texts go
  * out once: each customer hears what they bought and where to pay, the driver
- * who to deliver to, and finance on the PFI what money to expect
- * (stepNotices.truckSold). What is left on the truck is checked server-side,
- * under a lock (deliverySaleRepo.sellTruck); more can be sold off it later
- * while litres remain.
+ * who to deliver to (stepNotices.truckSold). What is left on the truck is
+ * checked server-side, under a lock (deliverySaleRepo.sellTruck); more can be
+ * sold off it later while litres remain.
  */
 const sellTruck = asyncHandler(async (req, res) => {
   const { loadingId, lines } = req.body;

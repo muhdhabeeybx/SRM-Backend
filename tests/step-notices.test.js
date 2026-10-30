@@ -7,38 +7,39 @@ const assert = require("node:assert/strict");
 const { inArray } = require("drizzle-orm");
 const { db, client } = require("../config/db");
 const { pfis } = require("../db/schema");
-const { officersFor } = require("../notifications/deskOfficers");
+const { officersFor, DESKS } = require("../notifications/deskOfficers");
 const { CATALOG } = require("../notifications/catalog");
-const { choiceForType } = require("../notifications/staffChoices");
+const { choiceForType, publicChoices } = require("../notifications/staffChoices");
 const stepNotices = require("../services/stepNotices.service");
 const { closeDb, staffTokenWithRoles } = require("./helpers");
 
 /**
  * The texts that follow an order from desk to desk.
  *
- * What has to hold: a step reaches the officers of the next desk on the
- * order's PFI and nobody on other PFIs; when the PFI has nobody on that desk it
- * falls back to the role's company-wide holders, then to the admins, so a step
- * is never silent; a suspended officer is never told; and a PFI with no desks
- * (gantry, delivery) is never told about tickets.
+ * What has to hold: a step reaches the officer the PFI names for the next desk
+ * and nobody else — not others on the PFI who hold the role. Where the slot is
+ * empty it reaches whoever holds the role and is assigned to that PFI. Never the
+ * rest of the company, never the admins. A desk with nobody on it texts nobody,
+ * a suspended officer is never told, and a PFI with no desks (gantry, delivery)
+ * is never told about tickets.
  */
 const RUN = Date.now();
-// A role nobody else in the test database holds, so the fallback tiers can be
-// tested without every other suite's staff joining in.
-const ROLE = `desk-test-${RUN}`;
 
 let pfiA;
 let pfiB;
+let pfiTicked;
 let gantry;
-let onA;
-let onB;
-let companyWide;
 let financeOnA;
 let financeOnB;
+let alsoFinanceOnA;
+let tickedFinance;
+let elsewhereFinance;
+let salesOnA;
+let sellerOnA;
 const orderIds = [];
 const staffIds = [];
 
-const ids = (specs) => specs.map((s) => Number(s.staffId)).sort();
+const ids = (specs) => specs.map((s) => Number(s.staffId)).sort((x, y) => x - y);
 
 /** The rows a step wrote for this run's orders — polled, because steps are fire-and-forget. */
 const rowsFor = async (type, orderId, { expect = 1, ms = 3000 } = {}) => {
@@ -75,25 +76,33 @@ const orderOn = async (pfi) => {
 
 describe("Step notices", () => {
   before(async () => {
-    [pfiA, pfiB, gantry] = await db
+    [pfiA, pfiB, pfiTicked, gantry] = await db
       .insert(pfis)
       .values([
         { pfiNumber: `PFI/STEP/A/${RUN}`, status: "active", startingQtyLitres: 1000 },
         { pfiNumber: `PFI/STEP/B/${RUN}`, status: "active", startingQtyLitres: 1000 },
+        { pfiNumber: `PFI/STEP/T/${RUN}`, status: "active", startingQtyLitres: 1000 },
         { pfiNumber: `PFI/STEP/G/${RUN}`, status: "active", startingQtyLitres: 1000, pfiType: "gantry" },
       ])
       .returning();
 
-    onA = await person([ROLE], "on-a");
-    onB = await person([ROLE], "on-b");
-    companyWide = await person([ROLE], "company");
     financeOnA = await person(["finance"], "fin-a");
     financeOnB = await person(["finance"], "fin-b");
+    alsoFinanceOnA = await person(["finance", "sales_manager"], "also-fin-a");
+    tickedFinance = await person(["finance"], "ticked");
+    // Holds the role, assigned to nothing: the company-wide kind who used to get every empty desk's texts.
+    elsewhereFinance = await person(["finance"], "elsewhere");
+    salesOnA = await person(["truck_sales"], "sales-a");
+    sellerOnA = await person(["truck_sales"], "seller-a");
 
     await client`
-      INSERT INTO pfi_staff (pfi_id, staff_id)
-      VALUES (${pfiA.id}, ${onA}), (${pfiB.id}, ${onB}),
-             (${pfiA.id}, ${financeOnA}), (${pfiB.id}, ${financeOnB})`;
+      UPDATE pfis SET audit_officer_id = ${financeOnA}, sales_manager_id = ${salesOnA}, truck_sales_officer_id = ${sellerOnA}
+       WHERE id = ${pfiA.id}`;
+    await client`UPDATE pfis SET audit_officer_id = ${financeOnB} WHERE id = ${pfiB.id}`;
+    // On the PFI, with the role, but named for a different job.
+    await client`INSERT INTO pfi_staff (pfi_id, staff_id) VALUES (${pfiA.id}, ${alsoFinanceOnA})`;
+    // No slot filled: this PFI's finance is the one ticked on it in Manage Users.
+    await client`INSERT INTO pfi_staff (pfi_id, staff_id) VALUES (${pfiTicked.id}, ${tickedFinance}), (${pfiTicked.id}, ${salesOnA})`;
   });
 
   after(async () => {
@@ -101,65 +110,49 @@ describe("Step notices", () => {
     await client`DELETE FROM notifications WHERE staff_id = ANY(${staffIds})`;
     await client`DELETE FROM pfi_staff WHERE staff_id = ANY(${staffIds})`;
     await client`DELETE FROM orders WHERE id = ANY(${orderIds})`;
-    await db.delete(pfis).where(inArray(pfis.id, [pfiA.id, pfiB.id, gantry.id]));
+    await db.delete(pfis).where(inArray(pfis.id, [pfiA.id, pfiB.id, pfiTicked.id, gantry.id]));
     await client`UPDATE staff SET is_active = false WHERE id = ANY(${staffIds})`;
     await closeDb();
   });
 
-  test("a desk on a PFI is its own officers, not the other PFI's nor the company-wide ones", async () => {
-    assert.deepEqual(ids(await officersFor({ pfiId: pfiA.id, roles: [ROLE] })), [onA]);
-    assert.deepEqual(ids(await officersFor({ pfiId: pfiB.id, roles: [ROLE] })), [onB]);
+  test("a desk is the officer its PFI names, not others with the role", async () => {
+    assert.deepEqual(ids(await officersFor({ pfiId: pfiA.id, desk: DESKS.finance })), [financeOnA]);
+    assert.deepEqual(ids(await officersFor({ pfiId: pfiB.id, desk: DESKS.finance })), [financeOnB]);
   });
 
-  test("a PFI with nobody on the desk falls to the role's company-wide holders", async () => {
-    assert.deepEqual(ids(await officersFor({ pfiId: gantry.id, roles: [ROLE] })), [companyWide]);
-    // Somebody confined to other depots is not company-wide for this one.
-    await client`INSERT INTO depot_staff (depot_id, staff_id) SELECT id, ${companyWide} FROM depots ORDER BY id DESC LIMIT 1`;
-    const [{ id: otherDepot }] = await client`SELECT id FROM depots ORDER BY id LIMIT 1`;
-    const [{ id: theirDepot }] = await client`SELECT id FROM depots ORDER BY id DESC LIMIT 1`;
-    if (Number(otherDepot) !== Number(theirDepot)) {
-      assert.deepEqual(await officersFor({ pfiId: gantry.id, depotId: otherDepot, roles: [ROLE] }), [
-        { roles: ["admin", "super_admin"] },
-      ]);
-    }
-    assert.deepEqual(ids(await officersFor({ pfiId: gantry.id, depotId: theirDepot, roles: [ROLE] })), [companyWide]);
-    await client`DELETE FROM depot_staff WHERE staff_id = ${companyWide}`;
+  test("the truck sales desk is the Sales Manager and the Truck Sales Officer", async () => {
+    assert.deepEqual(
+      ids(await officersFor({ pfiId: pfiA.id, desk: DESKS.truckSales })),
+      [salesOnA, sellerOnA].sort((x, y) => x - y),
+    );
   });
 
-  test("a desk nobody holds goes to the admins", async () => {
-    assert.deepEqual(await officersFor({ pfiId: pfiA.id, roles: [`nobody-${RUN}`] }), [
-      { roles: ["admin", "super_admin"] },
-    ]);
+  test("an empty slot goes to whoever holds the role and is assigned to that PFI", async () => {
+    const told = ids(await officersFor({ pfiId: pfiTicked.id, desk: DESKS.finance }));
+    assert.deepEqual(told, [tickedFinance]);
+    assert.ok(!told.includes(salesOnA), "on the PFI, without the role, is not the desk");
+    assert.ok(!told.includes(elsewhereFinance), "the role, off the PFI, is not the desk");
   });
 
-  test("a desk kept from the admins falls to every holder of the role, or to nobody", async () => {
-    assert.deepEqual(await officersFor({ pfiId: pfiA.id, roles: [`nobody-${RUN}`], adminsLast: false }), []);
-    await client`UPDATE staff SET suspended = true WHERE id = ${companyWide}`;
+  test("a desk with nobody on it texts nobody, not the company or the admins", async () => {
+    assert.deepEqual(await officersFor({ pfiId: gantry.id, desk: DESKS.finance }), []);
+    assert.deepEqual(await officersFor({ pfiId: null, desk: DESKS.finance }), []);
+  });
+
+  test("a suspended officer is not told", async () => {
+    await client`UPDATE staff SET suspended = true WHERE id = ${financeOnB}`;
     try {
-      // Nobody on the gantry PFI and nobody company-wide: the officers on other PFIs, not the admins.
-      assert.deepEqual(await officersFor({ pfiId: gantry.id, roles: [ROLE] }), [{ roles: ["admin", "super_admin"] }]);
-      assert.deepEqual(ids(await officersFor({ pfiId: gantry.id, roles: [ROLE], adminsLast: false })), [onA, onB].sort());
+      assert.deepEqual(await officersFor({ pfiId: pfiB.id, desk: DESKS.finance }), []);
     } finally {
-      await client`UPDATE staff SET suspended = false WHERE id = ${companyWide}`;
+      await client`UPDATE staff SET suspended = false WHERE id = ${financeOnB}`;
     }
   });
 
-  test("a suspended officer is not the desk", async () => {
-    await client`UPDATE staff SET suspended = true WHERE id = ${onA}`;
-    try {
-      // With A's officer suspended, A has nobody: the company-wide holder takes it.
-      assert.deepEqual(ids(await officersFor({ pfiId: pfiA.id, roles: [ROLE] })), [companyWide]);
-    } finally {
-      await client`UPDATE staff SET suspended = false WHERE id = ${onA}`;
-    }
-  });
-
-  test("a new order asks finance on its own PFI to confirm the payment", async () => {
+  test("a new order asks the PFI's named finance officer to confirm the payment", async () => {
     const orderId = await orderOn(pfiA);
     stepNotices.orderPlaced(orderId);
     const told = await rowsFor("desk.order_to_confirm", orderId);
-    assert.ok(told.includes(financeOnA), "finance on the order's PFI is told");
-    assert.ok(!told.includes(financeOnB), "finance on another PFI is not");
+    assert.deepEqual(told, [financeOnA]);
   });
 
   test("a gantry order is never sent to ticketing — it has no ticketing desk", async () => {
@@ -171,19 +164,29 @@ describe("Step notices", () => {
 
   test("every desk step is an SMS, and can be switched off per person", () => {
     const deskTypes = Object.keys(CATALOG).filter((t) => t.startsWith("desk."));
-    assert.ok(deskTypes.length >= 8);
+    assert.ok(deskTypes.length >= 6);
     for (const t of deskTypes) {
       assert.ok(CATALOG[t].channels.includes("sms"), `${t} texts`);
       assert.equal(choiceForType(t)?.key, "desk_steps", `${t} is on the desk_steps choice`);
     }
+    assert.ok(publicChoices().some((c) => c.key === "desk_steps"));
   });
 
   test("a text renders without the fields it may be missing", () => {
-    for (const t of [...Object.keys(CATALOG).filter((k) => k.startsWith("desk.")),
-      "order.truck_ticketed_driver", "order.trucks_ticketed", "order.truck_departed", "delivery.payment_confirmed"]) {
+    for (const t of [...Object.keys(CATALOG).filter((k) => k.startsWith("desk.")), "delivery.payment_confirmed"]) {
       const sms = CATALOG[t].sms({});
       assert.equal(typeof sms, "string", t);
       assert.ok(!/undefined|null|NaN/.test(sms), `${t}: ${sms}`);
     }
+  });
+
+  test("on a depot order the customer's one text is the payment", () => {
+    assert.ok(CATALOG["order.paid"].channels.includes("sms"));
+    for (const t of ["order.released", "order.trucks_ticketed", "order.truck_departed", "order.completed"]) {
+      assert.ok(!CATALOG[t].channels.includes("sms"), `${t} does not text`);
+      assert.ok(CATALOG[t].channels.includes("in_app"), `${t} stays in the app`);
+    }
+    // Their order being cancelled is news they must get.
+    assert.ok(CATALOG["order.cancelled"].channels.includes("sms"));
   });
 });

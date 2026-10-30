@@ -162,7 +162,8 @@ describe("feeding and haulage matched to the trucks they pay for", () => {
     const a = await row(t.a);
     assert.equal(Number(a.feedingAllowance), 50000);
     assert.equal(a.feedingRequest.id, Number(handFeeding.id));
-    assert.equal(a.totalExpenses, 50000, "counted on the truck until it is paid");
+    assert.equal(a.totalExpenses, 50000, "what the truck cost");
+    assert.equal(a.stillToPay, 50000, "not paid yet");
     const [e] = await expensesOn(pfi.id);
     assert.equal(e.description, "FEEDING ALLOWANCE FOR 3 SOROMAN TRUCKS @ #50,000 EACH", "the words it was raised with");
     assert.equal(Number(e.amount), 150000);
@@ -171,7 +172,10 @@ describe("feeding and haulage matched to the trucks they pay for", () => {
     assert.equal(offered.length, 0, "linked, it is no longer offered");
 
     await pay(handFeeding.id, 150000);
-    assert.equal((await row(t.a)).totalExpenses, 0, "paid: the PFI's expenses carry it");
+    const fed = await row(t.a);
+    assert.equal(fed.totalExpenses, 50000, "paid, it still cost the truck that");
+    assert.equal(fed.paidInExpenses, 50000);
+    assert.equal(fed.stillToPay, 0);
   });
 
   test("linking replaces a request costing raised for the same trucks", async () => {
@@ -227,16 +231,19 @@ describe("feeding and haulage matched to the trucks they pay for", () => {
     assert.equal(h.ownerPaid, 0);
     assert.equal(h.ownerOwed, 1500000);
     assert.equal(h.ownerToRaise, 500000);
-    assert.equal(h.totalExpenses, 2000000, "unpaid, the whole haulage counts on the trip");
+    assert.equal(h.totalExpenses, 2000000, "the whole haulage");
+    assert.equal(h.haulageAdded, 2000000, "none of it in the PFI's paid expenses yet");
   });
 
-  test("paid, the advance comes off the trip — the PFI's expenses carry it", async () => {
+  test("paid, the advance leaves the trip's cost alone and moves to the PFI's expenses", async () => {
     await pay(advance.id, 3000000);
     const h = await row(t.h1);
     assert.equal(h.ownerPaid, 1000000);
     assert.equal(h.ownerRequested, 0);
     assert.equal(h.ownerOwed, 500000);
-    assert.equal(h.totalExpenses, 1000000, "₦2m haulage − ₦1m already paid");
+    assert.equal(h.totalExpenses, 2000000, "the truck costs the same once the owner is paid");
+    assert.equal(h.haulageAdded, 1000000, "₦2m haulage − ₦1m already paid");
+    assert.equal(h.paidInExpenses, 1000000);
   });
 
   test("an advance cannot pay a truck more than it is owed", async () => {
@@ -254,7 +261,9 @@ describe("feeding and haulage matched to the trucks they pay for", () => {
     const h = await row(t.h1);
     assert.equal(h.ownerOwed, 0);
     assert.ok(h.ownerPaidOffOn, "the day the balance was paid");
-    assert.equal(h.totalExpenses, 500000, "what is left on the trip is the AGO the owner took");
+    assert.equal(h.totalExpenses, 2000000, "paid off, the truck still cost its haulage");
+    assert.equal(h.haulageAdded, 500000, "what the PFI's expenses do not hold is the AGO the owner took");
+    assert.equal(h.stillToPay, 0);
     const again = await as().post("/api/delivery-inventory/owner-payments", { ids: [t.h1], kind: "balance" });
     assert.equal(again.status, 409);
     assert.match(again.body.message, /Nothing is left to pay/);

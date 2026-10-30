@@ -141,7 +141,8 @@ describe("truck loading in Delivery Costing, and costs paid already", () => {
     const a = await row(t.a);
     assert.equal(a.loadingCost, 90000);
     assert.equal(a.loadingRequest.status, "pending");
-    assert.equal(a.totalExpenses, 90000, "counted on the truck until paid");
+    assert.equal(a.totalExpenses, 90000, "what the truck cost");
+    assert.equal(a.stillToPay, 90000, "not paid yet");
   });
 
   test("a truck changed or ticked as in Expenses re-totals the request", async () => {
@@ -152,7 +153,7 @@ describe("truck loading in Delivery Costing, and costs paid already", () => {
     assert.match(res.body.message, /Loading on 1 truck marked as already in Expenses/);
     const [req] = await live(pfi.id);
     assert.equal(Number(req.amount), 190000);
-    assert.equal((await row(t.hiredA)).totalExpenses, 0, "in Expenses already: not added");
+    assert.equal((await row(t.hiredA)).paidInExpenses, 90000, "in Expenses already");
   });
 
   test("once finance takes it forward the loading is fixed, and once paid the truck adds nothing", async () => {
@@ -165,7 +166,9 @@ describe("truck loading in Delivery Costing, and costs paid already", () => {
     await client`UPDATE pfi_expenses SET status = 'paid', amount_paid = amount, paid_at = NOW() WHERE id = ${req.id}`;
     const a = await row(t.a);
     assert.equal(a.loadingCost, 90000, "the figure stays on the truck");
-    assert.equal(a.totalExpenses, 0, "the PFI's paid expenses carry it now");
+    assert.equal(a.totalExpenses, 90000, "paid, it still cost the truck that");
+    assert.equal(a.paidInExpenses, 90000);
+    assert.equal(a.stillToPay, 0);
   });
 
   test("deleting a truck off a pending request takes its loading off it", async () => {
@@ -221,7 +224,8 @@ describe("truck loading in Delivery Costing, and costs paid already", () => {
 
     const d = await row(t.d);
     assert.equal(d.loadingRequest.reference, e.reference_number);
-    assert.equal(d.totalExpenses, 0, "paid: carried by the PFI");
+    assert.equal(d.paidInExpenses, Number(d.loadingCost), "paid: carried by the PFI");
+    assert.equal(d.stillToPay, 0);
     const changed = await cost([t.d], { loadingCost: 1 });
     assert.equal(changed.status, 409, "recorded as paid: fixed");
   });
