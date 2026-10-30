@@ -210,7 +210,9 @@ describe("who enters a station's records", () => {
   });
 
   test("rows for a plain customer are never guarded", async () => {
-    const res = await bulk(people.other.token, [{ ...row("deposit"), customerId: customer, customerName: "Buyer" }]);
+    // Money on a plain customer's truck is the sales ledger's, and finance's
+    // to record (lib/pfiDesks.js) — but no station's people are asked.
+    const res = await bulk(people.deposits.token, [{ ...row("deposit"), customerId: customer, customerName: "Buyer" }]);
     assert.equal(res.status, 201, JSON.stringify(res.body));
   });
 });

@@ -1050,6 +1050,19 @@ const reminderSentences = (d) => {
 const hello = (d, rest) =>
   d.firstName ? `Hello ${d.firstName}, ${rest}` : `${rest.charAt(0).toUpperCase()}${rest.slice(1)}`;
 
+/** "PFI 55/26 has been assigned to you as Sales Manager. Its account is Access Bank 1982276001, SOROMAN REFINERY." */
+const pfiAssignedSentences = (d) => {
+  const accounts = (d.accounts || [])
+    .map((a) => [[a.bankName, a.accountNumber].filter(Boolean).join(" "), a.accountName].filter(Boolean).join(", "))
+    .filter(Boolean);
+  const roles = andList((d.roles || []).filter(Boolean));
+  return (
+    `${d.pfiNumber || "A PFI"} has been assigned to you${roles ? ` as ${roles}` : ""}.` +
+    (accounts.length === 1 ? ` Its account is ${accounts[0]}.` : "") +
+    (accounts.length > 1 ? ` Its accounts are ${andList(accounts)}.` : "")
+  );
+};
+
 /** "daily sales report for PFI 47, gate report for PFI 37 and PFI 46" */
 const reportsList = (d) =>
   (d.reports || []).map((r) => `${r.name} for ${andList(r.pfis || [])}`).join(", ");
@@ -1877,6 +1890,27 @@ const CATALOG = {
     data: (d) => ({ screen: "Messages", senderId: d.senderId }),
     actionUrl: (d) => adminLink(`/messages?with=${d.senderId}`),
     dedupe: (d) => (d.messageId ? `staff.direct_message:${d.messageId}` : null),
+  },
+
+  /**
+   * Somebody was named on a PFI — at Start selling, or in a slot of a PFI
+   * already selling (services/pfiAssignmentNotices.service.js): which PFI, as
+   * what, and the account its customers pay into.
+   *
+   * data: firstName, pfiId, pfiNumber, roles[] (slot labels),
+   *       accounts[] ({bankName, accountNumber, accountName})
+   */
+  "staff.pfi_assigned": {
+    audience: "staff",
+    category: "operations",
+    priority: "high",
+    channels: APP_AND_SMS,
+    title: (d) => `${d.pfiNumber || "A PFI"} assigned to you`,
+    body: (d) => pfiAssignedSentences(d),
+    sms: (d) => hello(d, pfiAssignedSentences(d)),
+    entity: (d) => ({ type: "pfi", id: String(d.pfiId || "") }),
+    data: (d) => ({ screen: "PfiDetail", pfiId: d.pfiId }),
+    actionUrl: (d) => adminLink(`/pfi/details?id=${d.pfiId}`),
   },
 
   /**

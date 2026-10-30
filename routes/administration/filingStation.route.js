@@ -1,4 +1,4 @@
-const { denyPfiScoped, denyPfiScopedUnlessStations } = require("../../lib/pfiScope");
+const { denyPfiScoped, denyPfiScopedUnlessStations, denyPfiScopedUnlessPlaces } = require("../../lib/pfiScope");
 const express = require("express");
 const router = express.Router();
 const verifyStaff = require("../../middleware/verifyStaff");
@@ -23,7 +23,8 @@ const {
  * cycle key travels in the PATCH body rather than the path — see the
  * controller. Migration 0029.
  */
-router.get("/cycles", verifyStaff, denyPfiScopedUnlessStations, getStationCycleStatuses);
+// Read by the plants' pages too (station-pfi-status), so plant staff pass.
+router.get("/cycles", verifyStaff, denyPfiScopedUnlessPlaces, getStationCycleStatuses);
 router.patch("/cycles", verifyStaff, denyPfiScopedUnlessStations, setStationCycleStatus);
 
 router.get("/", verifyStaff, denyPfiScopedUnlessStations, validate({ query: misc.listStations }), getFilingStations);

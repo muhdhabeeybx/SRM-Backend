@@ -62,15 +62,10 @@ const findAll = async ({
   page = 1,
   limit = 500,
   /**
-   * The allocation codes this person may see, or null for everyone. Staff
-   * assigned to a PFI see only its batches' sales — lib/pfiScope.js.
+   * What this person may see (lib/saleReach.js): their PFIs' batches, and
+   * every row at their own stations and plants. Null or open for everyone.
    */
-  allowedCodes = null,
-  /**
-   * The filling stations this person may see, or null for everyone. Staff
-   * assigned stations see only sales to them — lib/stationScope.js.
-   */
-  allowedStationIds = null,
+  reach = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
@@ -78,19 +73,13 @@ const findAll = async ({
 
   const conditions = [];
 
-  if (Array.isArray(allowedCodes)) {
-    // A sale with no code cannot be tied to a PFI, so it is outside every one.
-    conditions.push(
-      allowedCodes.length
-        ? inArray(sql`upper(trim(${deliverySales.allocationCode}))`, allowedCodes)
-        : sql`false`,
-    );
-  }
-
-  if (Array.isArray(allowedStationIds)) {
-    conditions.push(
-      allowedStationIds.length ? inArray(deliverySales.customerId, allowedStationIds) : sql`false`,
-    );
+  if (reach && !reach.open) {
+    // Any one of them lets a row through. A sale with no code cannot be tied
+    // to a PFI, so only its station can.
+    const ways = [];
+    if (reach.codes?.length) ways.push(inArray(sql`upper(trim(${deliverySales.allocationCode}))`, reach.codes));
+    if (reach.places?.length) ways.push(inArray(deliverySales.customerId, reach.places));
+    conditions.push(ways.length === 0 ? sql`false` : ways.length === 1 ? ways[0] : or(...ways));
   }
 
   if (customer) {

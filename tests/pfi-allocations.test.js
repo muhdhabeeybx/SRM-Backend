@@ -476,7 +476,7 @@ describe("truck allocations — off a cargo, approved into an order and a letter
   test("Start selling reads the trucks approval wrote — it writes no second set", async () => {
     const res = await as(admin).post(`${API}/${sub.id}/activate`, {
       bankAccountIds: [account.id],
-      officers: { auditOfficerId: deskStaff.id, salesManagerId: deskStaff.id },
+      officers: { auditOfficerId: financeStaff.id, salesManagerId: deskStaff.id },
     });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     const rows = await db.select().from(deliveryInventory).where(eq(deliveryInventory.allocationCode, `PFI-${SERIAL}B`));
@@ -680,7 +680,7 @@ describe("truck allocations — off a cargo, approved into an order and a letter
   test("Start selling writes the load to the inventory and the sales ledger, on the station", async () => {
     const res = await as(admin).post(`${API}/${stationSub.id}/activate`, {
       bankAccountIds: [account.id],
-      officers: { auditOfficerId: deskStaff.id, salesManagerId: deskStaff.id },
+      officers: { auditOfficerId: financeStaff.id, salesManagerId: deskStaff.id },
     });
     assert.equal(res.status, 200, JSON.stringify(res.body));
     assert.deepEqual(res.body.data.batch.inventoryIds, [], "no driver to tell and no truck sales desk to wake");

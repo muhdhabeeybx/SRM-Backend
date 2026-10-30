@@ -9,6 +9,7 @@ const {
   createDeliverySale,
   createDeliverySalesBulk,
   sellTruck,
+  getDeliveryDesks,
   updateDeliverySale,
   setDeliverySaleDepositStatus,
   deleteDeliverySale,
@@ -19,6 +20,8 @@ const {
 router.get("/", verifyStaff, validate({ query: saleSchemas.listDeliverySales }), getDeliverySales);
 // Both of these sit above "/:id" — Express matches in order, and a literal
 // path declared after a parameter route is swallowed by it.
+// Who sells and who takes the money on each batch (lib/pfiDesks.js).
+router.get("/desks", verifyStaff, getDeliveryDesks);
 router.get("/cycle-standing", verifyStaff, validate({ query: saleSchemas.cycleStandingQuery }), getDeliveryCycleStanding);
 // One transaction for many rows — see the controller.
 router.post("/bulk", verifyStaff, validate({ body: saleSchemas.createDeliverySalesBulk }), createDeliverySalesBulk);

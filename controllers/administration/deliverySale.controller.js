@@ -2,10 +2,10 @@ const asyncHandler = require("express-async-handler");
 const stepNotices = require("../../services/stepNotices.service");
 const { deliverySaleRepo, deliveryCustomerRepo } = require("../../repositories");
 const { client } = require("../../config/db");
-const { allocationCodesFor } = require("../../lib/pfiScope");
-const { scopedStationIds, stationVisible } = require("../../lib/stationScope");
+const { reachFor, rowInReach, writeInReach } = require("../../lib/saleReach");
 const pfiBankScope = require("../../lib/pfiBankScope");
 const stationEntry = require("../../lib/stationEntry");
+const pfiDesks = require("../../lib/pfiDesks");
 const { bookForWrite } = require("../../lib/deliveryBook");
 
 /**
@@ -27,36 +27,44 @@ const actorName = (user) =>
   user ? user.name || [user.firstName, user.surname].filter(Boolean).join(" ") || user.email || "" : "";
 
 /*
-  ── Staff assigned to a PFI see its truck sales and no others ─────────────
+  ── What each person sees ──────────────────────────────────────────────────
 
-  A truck sale reaches its PFI through its allocation code (lib/pfiScope.js,
-  allocationCodesFor). Every list below is filtered by the codes the person
-  may see; every single sale is checked before it is read or changed, and one
-  outside their PFI reads as not found.
+  A truck sale reaches its PFI through its allocation code; a station's or
+  plant's rows reach whoever is given that station or plant, on any PFI
+  (lib/saleReach.js). Every list below is filtered that way; every single
+  sale is checked before it is read or changed, and one outside reach reads
+  as not found.
 */
 const code = (v) => String(v || "").trim().toUpperCase();
 const notFound = (res) => res.status(404).json({ success: false, message: "Sale record not found" });
 const forbidden = (res, message) => res.status(403).json({ success: false, message });
 
-const saleVisible = (codes, sale) => codes === null || (!!sale && codes.includes(code(sale.allocationCode)));
-
 /*
-  ── Who records a truck sale's money ──────────────────────────────────────
+  ── Who sells a truck, and who records its money ──────────────────────────
 
-  Selling a truck and taking its money are two jobs (the owner, 24 Oct 2026):
-  the sales manager on the batch says who bought it and at what rate, and the
-  finance officer on the PFI matches the payments off the bank statement —
-  from Pending Orders or the ledger. The same people as an order's payment
-  (enforceRole('finance', 'admin') on the order routes; super admin passes).
-  One person holding both roles does both.
+  Selling a truck and taking its money are two jobs (the owner, 24 Oct 2026),
+  and since 30 Oct each batch's own PFI says who does which (lib/pfiDesks.js):
+  its Sales Manager or Truck Sales Officer sells it and corrects the sale, and
+  its Finance / Audit Officer matches the payments off the bank statement —
+  from Pending Orders or the ledger. A job nobody is named for stays as it
+  was: anyone sells, finance takes the money. Admins may always do either.
 
-  Only the sales ledger's money: recording a payment, changing or deleting
-  one, and moving an overpayment between trucks. A station's own deposits are
+  Only the sales ledger's rows: a station's own pump sales and deposits are
   its entry staff's (lib/stationEntry).
 */
-const MONEY_ROLES = ["finance", "admin", "super_admin"];
-const takesMoney = (user) => (user?.roles || []).some((r) => MONEY_ROLES.includes(r));
-const NOT_FINANCE = "Only finance records a truck sale's payment.";
+const SALE_FIELDS = ["customerId", "customerName", "location", "quantity", "rate", "salesValue"];
+
+/** A truck share sold to someone — a customer on it with litres or a value. */
+const isSaleRow = (row) =>
+  row?.customerId != null && (Number(row.quantity || 0) > 0 || Number(row.salesValue || 0) > 0);
+
+const differs = (next, now) => {
+  if (next === undefined) return false;
+  const a = Number(next);
+  const b = Number(now);
+  if (next !== "" && now !== "" && next != null && now != null && Number.isFinite(a) && Number.isFinite(b)) return a !== b;
+  return String(next ?? "").trim() !== String(now ?? "").trim();
+};
 
 /*
   ── Who enters a station's rows ────────────────────────────────────────────
@@ -70,31 +78,26 @@ const NOT_FINANCE = "Only finance records a truck sale's payment.";
 */
 
 /**
- * The filling-station half of visibility, beside the PFI half above. Someone
- * assigned stations sees only sales to those stations (lib/stationScope.js);
- * both halves must pass, so a person given a station AND a PFI sees that
- * station's sales on that PFI.
+ * The batch codes and customer of every row in a truck cycle — truck, load
+ * date, customer. Matched the way cycleStanding matches: plates without
+ * spaces, the date's first ten characters.
  */
-const stationOk = (user, sale) => !sale || stationVisible(user, sale.customerId);
-const rowStation = (row) => row?.customerId ?? row?.customer_id ?? null;
-const stationWriteOk = (user, row) => rowStation(row) == null || stationVisible(user, rowStation(row));
-
-/**
- * A truck cycle — truck, load date, customer — is visible when every sale in
- * it carries a code this person may see. Matched the way cycleStanding
- * matches: plates without spaces, the date's first ten characters.
- */
-const cycleVisible = async (codes, cycle) => {
-  if (codes === null) return true;
+const cycleRows = (cycle) => {
   const customerId = cycle?.customerId ?? null;
-  const rows = await client`
-    SELECT DISTINCT upper(trim(allocation_code)) AS code
+  return client`
+    SELECT DISTINCT upper(trim(allocation_code)) AS "allocationCode", customer_id AS "customerId"
       FROM delivery_sales
-     WHERE regexp_replace(upper(coalesce(truck_number, '')), '\s', '', 'g')
-         = regexp_replace(upper(${String(cycle?.truckNumber || "")}), '\s', '', 'g')
+     WHERE regexp_replace(upper(coalesce(truck_number, '')), '[[:space:]]', '', 'g')
+         = regexp_replace(upper(${String(cycle?.truckNumber || "")}), '[[:space:]]', '', 'g')
        AND coalesce(left(date_loaded, 10), '') = ${String(cycle?.dateLoaded || "").slice(0, 10)}
        AND ${customerId == null ? client`customer_id IS NULL` : client`customer_id = ${Number(customerId)}`}`;
-  return rows.length > 0 && rows.every((r) => codes.includes(r.code));
+};
+
+/** A cycle is visible when every sale in it is within this person's reach. */
+const cycleVisible = async (reach, cycle) => {
+  if (reach.open) return true;
+  const rows = await cycleRows(cycle);
+  return rows.length > 0 && rows.every((r) => rowInReach(reach, r));
 };
 // Paystack DVA auto-generation is disabled — see createDeliverySale below.
 // Re-add this import if reinstating:
@@ -111,16 +114,25 @@ const getDeliverySales = asyncHandler(async (req, res) => {
     date_to,
     page,
     limit,
-    allowedCodes: await allocationCodesFor(req.user),
-    allowedStationIds: scopedStationIds(req.user),
+    reach: await reachFor(req.user),
   });
 
   res.json({ success: true, data: result });
 });
 
+/**
+ * Who sells and who takes the money on every batch, by code — so the ledger
+ * and Pending Orders show each button only to whoever the server will let use
+ * it, and name the person otherwise. Officers' names only; nothing else of
+ * any PFI.
+ */
+const getDeliveryDesks = asyncHandler(async (req, res) => {
+  res.json({ success: true, data: { desks: await pfiDesks.listDesks() } });
+});
+
 const getDeliverySaleById = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
-  if (!sale || !saleVisible(await allocationCodesFor(req.user), sale) || !stationOk(req.user, sale)) return notFound(res);
+  if (!sale || !rowInReach(await reachFor(req.user), sale)) return notFound(res);
   res.json({ success: true, data: { sale } });
 });
 
@@ -174,15 +186,20 @@ const createDeliverySale = asyncHandler(async (req, res) => {
   const [placed] = await placeRows([claiming ? { ...typed, paymentAmount: typed.paymentAmount || 1 } : typed]);
   const base = { ...typed, book: placed.book };
   const money = claiming || Number(base.paymentAmount || 0) !== 0;
-  if (money && base.book === "trucking" && !takesMoney(req.user)) return forbidden(res, NOT_FINANCE);
+  const batch = [base.allocationCode ?? base.allocation_code];
+  if (base.book === "trucking") {
+    const desk = money
+      ? await pfiDesks.moneyRefusal(req.user, batch)
+      : isSaleRow(base) ? await pfiDesks.sellRefusal(req.user, batch) : null;
+    if (desk) return forbidden(res, desk);
+  }
 
-  // Only onto a batch of this person's PFI, and only from its accounts.
-  const codes = await allocationCodesFor(req.user);
-  if (codes !== null && !codes.includes(code(base.allocationCode ?? base.allocation_code))) {
-    return forbidden(res, "That batch is not on your PFI.");
+  // Only onto a batch of this person's PFI or a station of theirs, and only
+  // from accounts they may use.
+  if (!writeInReach(await reachFor(req.user), base)) {
+    return forbidden(res, "That batch is not on your PFI, and that customer is not one of your stations.");
   }
   if (bankAccountId) await pfiBankScope.assertAccountAllowed(req.user, bankAccountId);
-  if (!stationWriteOk(req.user, base)) return forbidden(res, "That station is not one of yours.");
   const refusal = await stationEntry.refusalFor(req.user, [base], claiming ? { kinds: ["deposits"] } : {});
   if (refusal) return forbidden(res, refusal);
 
@@ -229,13 +246,15 @@ const sellTruck = asyncHandler(async (req, res) => {
   const { loadingId, lines } = req.body;
   const [load] = await client`
     SELECT id, allocation_code AS "allocationCode" FROM delivery_inventory WHERE id = ${Number(loadingId)}`;
-  const codes = await allocationCodesFor(req.user);
-  if (!load || (codes !== null && !codes.includes(code(load.allocationCode)))) {
+  const reach = await reachFor(req.user);
+  // The truck is theirs to sell when its batch is on their PFI, or when every
+  // line goes to a station of theirs.
+  const onBatch = !!load && (reach.open || (reach.codes !== null && reach.codes.includes(code(load.allocationCode))));
+  if (!load || (!onBatch && !lines.every((l) => rowInReach(reach, l)))) {
     return res.status(404).json({ success: false, message: "That truck is not on the inventory." });
   }
-  if (lines.some((l) => !stationWriteOk(req.user, l))) {
-    return forbidden(res, "One or more of those customers is a station that is not one of yours.");
-  }
+  const desk = await pfiDesks.sellRefusal(req.user, [load.allocationCode]);
+  if (desk) return forbidden(res, desk);
 
   const { load: sold, sales } = await deliverySaleRepo.sellTruck({
     loadingId,
@@ -291,13 +310,18 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
     }
   }
 
-  const codes = await allocationCodesFor(req.user);
-  if (codes !== null && rows.some((r) => !codes.includes(code(r.allocationCode ?? r.allocation_code)))) {
-    return forbidden(res, "One or more of those rows is on a batch that is not on your PFI.");
+  const reach = await reachFor(req.user);
+  if (rows.some((r) => !writeInReach(reach, r))) {
+    return forbidden(res, "One or more of those rows is on a batch that is not on your PFI, for a customer that is not one of your stations.");
   }
-  if (rows.some((r) => !stationWriteOk(req.user, r))) {
-    return forbidden(res, "One or more of those rows is for a station that is not one of yours.");
-  }
+  // The sales ledger's rows among them: sold by the batch's sellers, paid by its finance.
+  const ledger = rows.filter((r) => r.book === "trucking");
+  const batchesOf = (list) => list.map((r) => r.allocationCode ?? r.allocation_code);
+  const money = ledger.filter((r) => Number(r.paymentAmount || 0) !== 0);
+  const sold = ledger.filter((r) => Number(r.paymentAmount || 0) === 0 && isSaleRow(r));
+  const desk = (money.length && (await pfiDesks.moneyRefusal(req.user, batchesOf(money))))
+    || (sold.length && (await pfiDesks.sellRefusal(req.user, batchesOf(sold))));
+  if (desk) return forbidden(res, desk);
   // A station's hand-keyed deposit names an account, and the single-row route
   // already refuses one outside this person's PFI. The same rule here.
   for (const accountId of new Set(rows.map((r) => r.bankAccountId).filter(Boolean))) {
@@ -325,21 +349,18 @@ const createDeliverySalesBulk = asyncHandler(async (req, res) => {
  * caller's word.
  */
 const transferDeliveryOverpayment = asyncHandler(async (req, res) => {
-  if (!takesMoney(req.user)) return forbidden(res, NOT_FINANCE);
+  const ends = [req.body.from, ...(Array.isArray(req.body.to) ? req.body.to : [])];
   // Money may only move between trucks this person can see, both ends.
-  const codes = await allocationCodesFor(req.user);
-  if (codes !== null) {
-    const ends = [req.body.from, ...(Array.isArray(req.body.to) ? req.body.to : [])];
-    for (const end of ends) {
-      if (!(await cycleVisible(codes, end))) {
-        return forbidden(res, "Both ends of a transfer must be on your PFI.");
-      }
+  const reach = await reachFor(req.user);
+  for (const end of ends) {
+    if (!(await cycleVisible(reach, end))) {
+      return forbidden(res, "Both ends of a transfer must be on your PFI or at your stations.");
     }
   }
-  const ends = [req.body.from, ...(Array.isArray(req.body.to) ? req.body.to : [])];
-  if (ends.some((end) => !stationWriteOk(req.user, end))) {
-    return forbidden(res, "Both ends of a transfer must be at your stations.");
-  }
+  // And it is the finance officer's of every batch it touches.
+  const batches = (await Promise.all(ends.map(cycleRows))).flat().map((r) => r.allocationCode);
+  const desk = await pfiDesks.moneyRefusal(req.user, batches);
+  if (desk) return forbidden(res, desk);
   // Moving banked money between loads is deposits work, at both ends.
   const refusal = await stationEntry.refusalFor(req.user, ends, { kinds: ["deposits"] });
   if (refusal) return forbidden(res, refusal);
@@ -367,8 +388,7 @@ const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
     dateLoaded: req.query.dateLoaded,
     customerId: req.query.customerId || null,
   };
-  if (!(await cycleVisible(await allocationCodesFor(req.user), cycle))) return notFound(res);
-  if (!stationWriteOk(req.user, cycle)) return notFound(res);
+  if (!(await cycleVisible(await reachFor(req.user), cycle))) return notFound(res);
   const standing = await deliverySaleRepo.cycleStanding({
     truckNumber: req.query.truckNumber,
     dateLoaded: req.query.dateLoaded,
@@ -379,14 +399,11 @@ const getDeliveryCycleStanding = asyncHandler(async (req, res) => {
 
 const updateDeliverySale = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
-  const codes = await allocationCodesFor(req.user);
-  if (sale && (!saleVisible(codes, sale) || !stationOk(req.user, sale))) return notFound(res);
-  // Nor moved onto a station that is not theirs.
-  if (!stationWriteOk(req.user, req.body)) return forbidden(res, "That station is not one of yours.");
-  // Nor may it be moved onto a batch outside their PFI.
-  const nextCode = req.body.allocationCode ?? req.body.allocation_code;
-  if (codes !== null && nextCode !== undefined && !codes.includes(code(nextCode))) {
-    return forbidden(res, "That batch is not on your PFI.");
+  const reach = await reachFor(req.user);
+  if (sale && !rowInReach(reach, sale)) return notFound(res);
+  // Nor moved onto a batch or a station outside their reach.
+  if (sale && !writeInReach(reach, { ...sale, ...req.body })) {
+    return forbidden(res, "That batch is not on your PFI, and that customer is not one of your stations.");
   }
   if (!sale) {
     return res.status(404).json({ success: false, message: "Sale record not found" });
@@ -410,9 +427,15 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
   // into a deposit by somebody who does not enter deposits, nor the reverse.
   const refusal = await stationEntry.refusalFor(req.user, [current, { ...current, ...req.body }]);
   if (refusal) return forbidden(res, refusal);
-  const movesMoney = req.body.paymentAmount !== undefined
-    && Number(req.body.paymentAmount || 0) !== Number(sale.paymentAmount || 0);
-  if (movesMoney && current.book === "trucking" && !takesMoney(req.user)) return forbidden(res, NOT_FINANCE);
+  if (current.book === "trucking") {
+    // The batch it is on now and the one it would be on.
+    const batches = [current.allocationCode, req.body.allocationCode ?? req.body.allocation_code];
+    const movesMoney = differs(req.body.paymentAmount, sale.paymentAmount ?? 0);
+    const changesSale = SALE_FIELDS.some((f) => differs(req.body[f], sale[f]));
+    const desk = (movesMoney && (await pfiDesks.moneyRefusal(req.user, batches)))
+      || (changesSale && isSaleRow({ ...current, ...req.body }) && (await pfiDesks.sellRefusal(req.user, batches)));
+    if (desk) return forbidden(res, desk);
+  }
 
   // An edit is not a new author: whoever recorded the row stays on it. The
   // page resends the whole row, "Unknown" and all, so it is dropped here.
@@ -443,7 +466,7 @@ const updateDeliverySale = asyncHandler(async (req, res) => {
  */
 const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
   const sale = await deliverySaleRepo.findById(req.params.id);
-  if (sale && (!saleVisible(await allocationCodesFor(req.user), sale) || !stationOk(req.user, sale))) {
+  if (sale && !rowInReach(await reachFor(req.user), sale)) {
     return notFound(res);
   }
   if (!sale) {
@@ -464,20 +487,24 @@ const setDeliverySaleDepositStatus = asyncHandler(async (req, res) => {
 });
 
 const deleteDeliverySale = asyncHandler(async (req, res) => {
-  const codes = await allocationCodesFor(req.user);
-  if (codes !== null || scopedStationIds(req.user) !== null || !stationEntry.mayAlwaysEnter(req.user)) {
-    const existing = await deliverySaleRepo.findById(req.params.id);
-    if (existing && (!saleVisible(codes, existing) || !stationOk(req.user, existing))) return notFound(res);
-    if ((codes !== null || scopedStationIds(req.user) !== null) && !existing) return notFound(res);
+  const existing = await deliverySaleRepo.findById(req.params.id);
+  const reach = await reachFor(req.user);
+  if (!reach.open || !stationEntry.mayAlwaysEnter(req.user)) {
+    if (existing && !rowInReach(reach, existing)) return notFound(res);
+    if (!reach.open && !existing) return notFound(res);
     const refusal = await stationEntry.refusalFor(req.user, existing ? [existing] : []);
     if (refusal) return forbidden(res, refusal);
   }
-  // A payment on the ledger, once recorded, is finance's to take off again.
-  if (!takesMoney(req.user)) {
-    const existing = await deliverySaleRepo.findById(req.params.id);
-    if (existing && Number(existing.paymentAmount || 0) !== 0) {
-      const side = existing.book || (await deliverySaleRepo.readBookById(existing.id));
-      if (side === "trucking") return forbidden(res, NOT_FINANCE);
+  // A ledger row is its batch's: a payment, once recorded, is its finance
+  // officer's to take off again, and a sold share its sellers'.
+  if (existing) {
+    const side = existing.book || (await deliverySaleRepo.readBookById(existing.id));
+    if (side === "trucking") {
+      const batches = [existing.allocationCode];
+      const desk = Number(existing.paymentAmount || 0) !== 0
+        ? await pfiDesks.moneyRefusal(req.user, batches)
+        : isSaleRow(existing) ? await pfiDesks.sellRefusal(req.user, batches) : null;
+      if (desk) return forbidden(res, desk);
     }
   }
   const sale = await deliverySaleRepo.deleteById(req.params.id);
@@ -489,6 +516,7 @@ const deleteDeliverySale = asyncHandler(async (req, res) => {
 
 module.exports = {
   createDeliverySalesBulk,
+  getDeliveryDesks,
   getDeliverySales,
   getDeliverySaleById,
   createDeliverySale,

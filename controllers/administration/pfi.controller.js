@@ -24,10 +24,12 @@ const { scopedPfiIds } = require("../../lib/pfiBankScope");
 const { SOURCES, contextFromRequest, withAssignmentContext } = require("../../lib/pfiAssignmentContext");
 const smsService = require("../../services/sms.service");
 const stepNotices = require("../../services/stepNotices.service");
+const pfiAssignmentNotices = require("../../services/pfiAssignmentNotices.service");
 const { allocationPfis } = require("../../services/allocationTrucks.service");
 const { localDateStr } = require("../../lib/zonedDay");
 const gantryRegister = require("../../lib/gantryTicketRegister");
 const { PFI_SLOTS, officersOn } = require("../../lib/pfiSlots");
+const { doubleDeskRefusal } = require("../../lib/pfiDesks");
 const pfiRoles = require("../../services/pfiRoles.service");
 
 function httpErr(status, message) {
@@ -249,6 +251,9 @@ const createPfi = asyncHandler(async (req, res) => {
     officers[idKey] = val ? (parseInt(val, 10) || val) : null;
     officers[nameKey] = await resolveOfficerName(val);
   }
+  // On a trucking batch, selling and taking the money are separate people (lib/pfiDesks.js).
+  const doubleDesk = pfi_type === "trucking" ? doubleDeskRefusal(officers) : null;
+  if (doubleDesk) return res.status(400).json({ success: false, message: doubleDesk });
 
   /**
    * Every PFI is raised not_started. There is no longer a choice.
@@ -492,6 +497,21 @@ const updatePfi = asyncHandler(async (req, res) => {
   }
 
   /**
+   * On a trucking batch, selling and taking the money are separate people
+   * (lib/pfiDesks.js; the owner, 30 Oct 2026). Depot PFIs are not asked: the
+   * owner kept this to trucks, stations and LPG. Asked only when one of those
+   * three slots changes, so a PFI already naming one person for both (PFI
+   * 47C, left so at the owner's word) still saves its other edits, and is put
+   * right the next time its finance or selling officers are edited.
+   */
+  const DESK_SLOTS = ["auditOfficerId", "salesManagerId", "truckSalesOfficerId"];
+  if (pfiType === "trucking" && DESK_SLOTS.some((k) => updateData[k] !== undefined && Number(updateData[k] || 0) !== Number(pfi[k] || 0))) {
+    const after = Object.fromEntries(DESK_SLOTS.map((k) => [k, updateData[k] !== undefined ? updateData[k] : pfi[k]]));
+    const doubleDesk = doubleDeskRefusal(after);
+    if (doubleDesk) return res.status(400).json({ success: false, message: doubleDesk });
+  }
+
+  /**
    * Once a PFI's price has been reviewed, the price moves only by another
    * review. Typing over it here would leave the file listing a reviewed price
    * the PFI no longer has, and the price it replaced nowhere. The form sends
@@ -557,6 +577,8 @@ const updatePfi = asyncHandler(async (req, res) => {
       })
       .catch((err) => console.error("[pfi] PFI sight not brought in line with its officers:", err.message));
     await followSlots([...officersOn(pfi), ...officersOn(updated)], req);
+    // Whoever was newly named on a PFI already selling is told. Never throws.
+    pfiAssignmentNotices.officersChanged(pfi, updated);
   }
 
   if (onRegister && pfiType !== "gantry") {
@@ -667,6 +689,13 @@ const activatePfi = asyncHandler(async (req, res) => {
   if (!financeOfficer) {
     throw httpErr(400, "Assign a finance officer before activating this PFI");
   }
+  // On a trucking batch, selling and taking the money are separate people (lib/pfiDesks.js).
+  const doubleDesk = pfi.pfiType !== "trucking" ? null : doubleDeskRefusal({
+    auditOfficerId: auditOfficer,
+    salesManagerId: financeOfficer,
+    truckSalesOfficerId: officers.truckSalesOfficerId ?? pfi.truckSalesOfficerId,
+  });
+  if (doubleDesk) throw httpErr(400, doubleDesk);
 
   // A gantry PFI sold ticket by ticket sells only what its tickets hold, so
   // it has nothing to sell until they are entered.
@@ -692,6 +721,8 @@ const activatePfi = asyncHandler(async (req, res) => {
   // loaded, and the truck sales desk that the batch is ready. Never throws.
   if (updated.batch?.inventoryIds?.length) stepNotices.trucksLoaded(updated.batch.inventoryIds);
   await followSlots(officersOn(updated.pfi), req);
+  // Each officer hears the PFI is theirs, as what, and its account. Never throws.
+  pfiAssignmentNotices.pfiStarted(updated.pfi);
 
   res.json({
     success: true,

@@ -10,6 +10,7 @@ const ownerPayments = require("../../services/ownerPayments.service");
 const loadingRequests = require("../../services/loadingRequests.service");
 const tripOwnerPayments = require("../../repositories/tripOwnerPayment.repository");
 const { STATION_COST_FIELDS, ownStationLoadIds } = require("../../lib/stationCosts");
+const { placeIdsFor } = require("../../lib/saleReach");
 
 const staffActor = (req) => ({ type: "staff", staffId: req.user?.id ?? null });
 
@@ -79,6 +80,7 @@ const getDeliveryInventory = asyncHandler(async (req, res) => {
     page,
     limit,
     scopeUser: req.user,
+    places: await placeIdsFor(req.user),
   });
 
   const loadings = await withCostVisibility(req.user, result.loadings || []);

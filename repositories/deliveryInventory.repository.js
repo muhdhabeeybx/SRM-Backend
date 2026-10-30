@@ -137,6 +137,11 @@ const findAll = async ({
   page = 1,
   limit = 500,
   scopeUser,
+  /**
+   * The customer ids of this person's own stations and plants (lib/saleReach
+   * placeIdsFor), or null. Their trucks are shown whatever PFI they came off.
+   */
+  places = null,
 } = {}) => {
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
@@ -149,7 +154,27 @@ const findAll = async ({
    * assignment; the batch is the dimension that can.
    */
   const scope = scopeCondition(scopeUser, { pfiColumn: deliveryInventory.pfiId });
-  if (scope) conditions.push(scope);
+  if (scope && places?.length) {
+    /**
+     * A truck one of their stations or plants was given counts as theirs on
+     * any batch: assigned to it, or carrying a sale to it on the same plate
+     * and day — a truck split between a customer and a station is filed under
+     * whoever bought first (lib/station-account loadingsForStation reads it
+     * the same way).
+     */
+    const ids = sql.join(places.map((id) => sql`${Number(id)}`), sql`, `);
+    conditions.push(or(scope, sql`(
+      ${deliveryInventory.customerId} IN (${ids})
+      OR EXISTS (
+        SELECT 1 FROM delivery_sales ds
+         WHERE ds.customer_id IN (${ids})
+           AND regexp_replace(upper(coalesce(ds.truck_number, '')), '[[:space:]]', '', 'g')
+             = regexp_replace(upper(coalesce(${deliveryInventory.truckNumber}, '')), '[[:space:]]', '', 'g')
+           AND left(coalesce(ds.date_loaded, ''), 10) = left(coalesce(${deliveryInventory.dateAllocated}, ''), 10)
+      ))`));
+  } else if (scope) {
+    conditions.push(scope);
+  }
 
   if (loading_status) {
     conditions.push(eq(deliveryInventory.loadingStatus, loading_status));
